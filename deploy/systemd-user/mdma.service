@@ -1,0 +1,23 @@
+[Unit]
+Description=MDMA local mTLS inference server
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/mdma/server.env
+ExecStart=%h/.local/bin/mdma-serve
+WorkingDirectory=%h/.local/state/mdma
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=40
+KillSignal=SIGTERM
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mdma
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,4 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Prefill matmul, f32-staged weight tile. Body in gemm_tile.glsl.
+#include "gemm_tile.glsl"

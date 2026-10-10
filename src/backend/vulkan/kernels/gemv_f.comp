@@ -1,0 +1,48 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "q5k.glsl"
+// Scalar-weight fallback: f32, f16, BF16, Q5_K. One workgroup per (row, token); lanes
+// stride the row by 64 elements, shared-memory reduction.
+layout(local_size_x = 64) in;
+layout(push_constant, std430) uniform PC { uint64_t w; uint64_t x; uint64_t y; uint n_out; uint n_in; uint n_tokens; uint dtype; } pc;
+shared float red[64];
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint t = gl_WorkGroupID.y;
+    uint lane = gl_LocalInvocationID.x;
+    F32Buf x = F32Buf(pc.x);
+    float acc = 0.0;
+    if (row < pc.n_out && t < pc.n_tokens) {
+        uint xb = t * pc.n_in;
+        uint wb = row * pc.n_in;
+        switch (pc.dtype) {
+        case DTYPE_F32: {
+            F32Buf w = F32Buf(pc.w);
+            for (uint i = lane; i < pc.n_in; i += 64u) acc += w.v[wb + i] * x.v[xb + i];
+            break;
+        }
+        case DTYPE_Q5K: {
+            U32Buf w = U32Buf(pc.w);
+            uint base = row * (pc.n_in / 256u) * 176u;
+            for (uint i = lane; i < pc.n_in; i += 64u)
+                acc += q5k_elem(w, base + (i / 256u) * 176u, i % 256u) * x.v[xb + i];
+            break;
+        }
+        case DTYPE_F16:
+        case DTYPE_BF16: {
+            U32Buf w = U32Buf(pc.w);
+            for (uint i = lane; i < pc.n_in; i += 64u)
+                acc += (pc.dtype == DTYPE_BF16 ? bf16_elem(w, wb + i) : half_elem(w, wb + i)) * x.v[xb + i];
+            break;
+        }
+        }
+    }
+    red[lane] = acc;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u) {
+        if (lane < s) red[lane] += red[lane + s];
+        barrier();
+    }
+    if (lane == 0u && row < pc.n_out && t < pc.n_tokens) F32Buf(pc.y).v[t * pc.n_out + row] = red[0];
+}

@@ -1,0 +1,25 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+// Interleaved pairs (2i, 2i+1). x: pair, y: head over q heads then k heads, z: token.
+layout(local_size_x = ROPE_PAIR_THREADS) in;
+layout(push_constant, std430) uniform PC { uint64_t q; uint64_t k; int pos; int head_dim; int n_q; int n_kv; float theta; } pc;
+void main() {
+    int pair = int(gl_GlobalInvocationID.x);
+    int head = int(gl_GlobalInvocationID.y);
+    int t = int(gl_GlobalInvocationID.z);
+    int n_pairs = pc.head_dim / 2;
+    bool is_q = head < pc.n_q;
+    int n_heads = is_q ? pc.n_q : pc.n_kv;
+    int local_head = is_q ? head : head - pc.n_q;
+    if (pair >= n_pairs || local_head >= n_heads) return;
+    F32Buf buf = F32Buf(is_q ? pc.q : pc.k);
+    int stride = n_heads * pc.head_dim;
+    float freq = pow(pc.theta, -2.0 * float(pair) / float(pc.head_dim));
+    float ang = float(pc.pos + t) * freq;
+    float s = sin(ang), c = cos(ang);
+    uint base = uint(t * stride + local_head * pc.head_dim + 2 * pair);
+    float x0 = buf.v[base], x1 = buf.v[base + 1u];
+    buf.v[base] = x0 * c - x1 * s;
+    buf.v[base + 1u] = x0 * s + x1 * c;
+}

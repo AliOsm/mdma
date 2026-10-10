@@ -1,0 +1,20 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = SPLIT_ROPE_THREADS) in;
+layout(push_constant, std430) uniform PC {
+    uint64_t x; uint64_t factors; uint n; uint head_dim; uint pos; float theta;
+} pc;
+void main() {
+    uint pair = gl_GlobalInvocationID.x;
+    if (pair >= pc.n / 2u) return;
+    uint half_dim = pc.head_dim / 2u;
+    uint j = pair % half_dim;
+    uint i = (pair / half_dim) * pc.head_dim + j;
+    float angle = float(pc.pos) * pow(pc.theta, -2.0 * float(j) / float(pc.head_dim)) / F32Buf(pc.factors).v[j];
+    float c = cos(angle), s = sin(angle);
+    F32Buf x = F32Buf(pc.x);
+    float a = x.v[i], b = x.v[i + half_dim];
+    x.v[i] = a * c - b * s;
+    x.v[i + half_dim] = a * s + b * c;
+}

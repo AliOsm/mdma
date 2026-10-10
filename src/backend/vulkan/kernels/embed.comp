@@ -1,0 +1,74 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+#include "q5k.glsl"
+// Gather dequantized rows. x: token, y: element.
+layout(local_size_x = 1, local_size_y = EMBED_DIM_THREADS) in;
+layout(push_constant, std430) uniform PC { uint64_t table; uint64_t ids; uint64_t o; uint n_embd; uint n_tokens; uint dtype; uint block_bytes; } pc;
+void main() {
+    uint t = gl_GlobalInvocationID.x;
+    uint i = gl_GlobalInvocationID.y;
+    if (t >= pc.n_tokens || i >= pc.n_embd) return;
+    uint id = uint(I32Buf(pc.ids).v[t]);
+    float v = 0.0;
+    switch (pc.dtype) {
+    case DTYPE_F32:
+        v = F32Buf(pc.table).v[id * pc.n_embd + i];
+        break;
+    case DTYPE_F16:
+        v = half_elem(U32Buf(pc.table), id * pc.n_embd + i);
+        break;
+    case DTYPE_BF16:
+        v = bf16_elem(U32Buf(pc.table), id * pc.n_embd + i);
+        break;
+    default: {
+        U32Buf w = U32Buf(pc.table);
+        uint n_blocks = pc.n_embd / 256u;
+        uint blk = id * n_blocks * pc.block_bytes + (i / 256u) * pc.block_bytes;
+        uint e = i % 256u;
+        switch (pc.dtype) {
+        case DTYPE_Q5K:
+            v = q5k_elem(w, blk, e);
+            break;
+        case DTYPE_Q4K: {
+            float d = half_at_bytes(w, blk);
+            float dmin = half_at_bytes(w, blk + 2u);
+            uint sc = blk + 4u;
+            uint qs = blk + 16u;
+            uint j = e / 32u, l = e % 32u;
+            uint scale, mn;
+            if (j < 4u) {
+                scale = byte_at(w, sc + j) & 63u;
+                mn = byte_at(w, sc + j + 4u) & 63u;
+            } else {
+                scale = (byte_at(w, sc + j + 4u) & 0xFu) | ((byte_at(w, sc + j - 4u) >> 6u) << 4u);
+                mn = (byte_at(w, sc + j + 4u) >> 4u) | ((byte_at(w, sc + j) >> 6u) << 4u);
+            }
+            uint qbase = (j / 2u) * 32u;
+            uint shift = (j & 1u) != 0u ? 4u : 0u;
+            float q = float((byte_at(w, qs + qbase + l) >> shift) & 0xFu);
+            v = d * float(scale) * q - dmin * float(mn);
+            break;
+        }
+        case 3u: {
+            uint ql = blk, qh = blk + 128u, scales = blk + 192u;
+            float d = half_at_bytes(w, blk + 208u);
+            uint jb = e / 128u, within = e % 128u, j = jb * 128u, quad = within / 32u, l = within % 32u;
+            uint lo = byte_at(w, ql + j / 2u + l), lo32 = byte_at(w, ql + j / 2u + l + 32u), hi = byte_at(w, qh + j / 4u + l);
+            int qv;
+            switch (quad) {
+            case 0u: qv = int((lo & 0xFu) | ((hi & 3u) << 4u)); break;
+            case 1u: qv = int((lo32 & 0xFu) | (((hi >> 2u) & 3u) << 4u)); break;
+            case 2u: qv = int((lo >> 4u) | (((hi >> 4u) & 3u) << 4u)); break;
+            default: qv = int((lo32 >> 4u) | (((hi >> 6u) & 3u) << 4u)); break;
+            }
+            int s = sbyte_at(w, scales + (j + quad * 32u + l) / 16u);
+            v = d * float(s) * float(qv - 32);
+            break;
+        }
+        }
+        break;
+    }
+    }
+    F32Buf(pc.o).v[t * pc.n_embd + i] = v;
+}

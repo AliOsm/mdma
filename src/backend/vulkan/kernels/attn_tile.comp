@@ -1,0 +1,106 @@
+#version 450
+// Adapted from llama.cpp bed0a8566, flash_attn.comp: staged K/V, query tiles
+// and online softmax. F32-only wave32 specialization; no matrix instructions.
+// Copyright (c) 2023-2026 The ggml authors. MIT; see LICENSE-llama.cpp.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : enable
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#include "common.glsl"
+layout(local_size_x = 128) in;
+layout(push_constant, std430) uniform PC {
+    uint64_t q; uint64_t k; uint64_t v; uint64_t o;
+    uint head_dim; uint n_q_heads; uint n_kv_heads; uint n_q; uint prefix;
+    float scale; uint window;
+} pc;
+
+const uint BR = ATTN_QUERY_TILE, BC = 32u, PITCH = 33u;
+shared vec4 kvsh[BC * PITCH];
+shared float probs[BR * BC];
+
+vec4 load4(F32Buf b, uint base, uint d) {
+    vec4 v = vec4(0.0);
+    [[unroll]] for (uint j = 0u; j < 4u; j++)
+        if (d + j < pc.head_dim) v[j] = b.v[base + d + j];
+    return v;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x, lane = gl_SubgroupInvocationID;
+    uint row0 = gl_WorkGroupID.y * BR, head = gl_WorkGroupID.x;
+    uint kv_head = head / (pc.n_q_heads / pc.n_kv_heads);
+    uint kv_stride = pc.n_kv_heads * pc.head_dim;
+    uint kv_off = kv_head * pc.head_dim;
+    uint q_stride = pc.n_q_heads * pc.head_dim;
+    uint end = pc.prefix + min(row0 + BR, pc.n_q);
+    uint first_visible = pc.prefix + row0 + 1u;
+    uint begin = pc.window == 0u ? 0u : first_visible - min(first_visible, pc.window);
+    F32Buf q = F32Buf(pc.q), k = F32Buf(pc.k), v = F32Buf(pc.v), o = F32Buf(pc.o);
+    vec4 qf[2], acc[2];
+    float mf[2], lf[2];
+    uint rows[2], visible[2], starts[2];
+    [[unroll]] for (uint r = 0u; r < 2u; r++) {
+        rows[r] = gl_SubgroupID + r * 4u;
+        uint qi = row0 + rows[r];
+        visible[r] = pc.prefix + qi + 1u;
+        starts[r] = pc.window == 0u ? 0u : visible[r] - min(visible[r], pc.window);
+        qf[r] = qi < pc.n_q ? load4(q, qi * q_stride + head * pc.head_dim, lane * 4u) : vec4(0.0);
+        acc[r] = vec4(0.0);
+        mf[r] = -1.0 / 0.0;
+        lf[r] = 0.0;
+    }
+    for (uint c0 = begin; c0 < end; c0 += BC) {
+        uint count = min(BC, end - c0);
+        for (uint i = lid; i < BC * 32u; i += 128u) {
+            uint t = i / 32u, d = i % 32u;
+            kvsh[t * PITCH + d] = t < count ? load4(k, (c0 + t) * kv_stride + kv_off, d * 4u) : vec4(0.0);
+        }
+        barrier();
+        float rowmax[2] = float[2](-1.0 / 0.0, -1.0 / 0.0);
+        [[unroll]] for (uint t = 0u; t < BC; t++) {
+            vec4 key = kvsh[t * PITCH + lane];
+            [[unroll]] for (uint r = 0u; r < 2u; r++) {
+                float score = subgroupAdd(dot(qf[r], key)) * pc.scale;
+                bool valid = row0 + rows[r] < pc.n_q && t < count
+                    && c0 + t >= starts[r] && c0 + t < visible[r];
+                score = valid ? score : -1.0 / 0.0;
+                rowmax[r] = max(rowmax[r], score);
+                if (lane == 0u) probs[rows[r] * BC + t] = score;
+            }
+        }
+        barrier();
+        [[unroll]] for (uint r = 0u; r < 2u; r++) {
+            float next_max = max(mf[r], rowmax[r]);
+            float correction = lf[r] > 0.0 ? exp(mf[r] - next_max) : 0.0;
+            acc[r] *= correction;
+            float score = probs[rows[r] * BC + lane];
+            // An entirely masked row has zero mass, not exp(-inf - -inf).
+            float p = score == -1.0 / 0.0 ? 0.0 : exp(score - next_max);
+            probs[rows[r] * BC + lane] = p;
+            lf[r] = lf[r] * correction + subgroupAdd(p);
+            mf[r] = next_max;
+        }
+        // K is no longer read: reuse the same LDS tile for V.
+        barrier();
+        for (uint i = lid; i < BC * 32u; i += 128u) {
+            uint t = i / 32u, d = i % 32u;
+            kvsh[t * PITCH + d] = t < count ? load4(v, (c0 + t) * kv_stride + kv_off, d * 4u) : vec4(0.0);
+        }
+        barrier();
+        for (uint t = 0u; t < count; t++) {
+            vec4 value = kvsh[t * PITCH + lane];
+            [[unroll]] for (uint r = 0u; r < 2u; r++)
+                acc[r] += value * probs[rows[r] * BC + t];
+        }
+        barrier();
+    }
+    [[unroll]] for (uint r = 0u; r < 2u; r++) {
+        uint qi = row0 + rows[r];
+        if (qi < pc.n_q) {
+            vec4 out_value = acc[r] / lf[r];
+            [[unroll]] for (uint j = 0u; j < 4u; j++) {
+                uint d = lane * 4u + j;
+                if (d < pc.head_dim) o.v[qi * q_stride + head * pc.head_dim + d] = out_value[j];
+            }
+        }
+    }
+}

@@ -1,0 +1,31 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant, std430) uniform PC {
+    uint64_t w; uint64_t a; uint64_t b; uint64_t sum; uint64_t y;
+    uint dim; float eps;
+} pc;
+shared float red[256];
+
+void main() {
+    uint lid = gl_LocalInvocationID.x, base = gl_WorkGroupID.x * pc.dim;
+    F32Buf a = F32Buf(pc.a), b = F32Buf(pc.b), s = F32Buf(pc.sum);
+    F32Buf w = F32Buf(pc.w), y = F32Buf(pc.y);
+    float ss = 0.0;
+    for (uint i = lid; i < pc.dim; i += 256u) {
+        // Preserve the f32 residual rounding of a separate add dispatch.
+        precise float v = a.v[base + i] + b.v[base + i];
+        s.v[base + i] = v;
+        ss += v * v;
+    }
+    red[lid] = ss;
+    barrier();
+    for (uint step = 128u; step > 0u; step >>= 1u) {
+        if (lid < step) red[lid] += red[lid + step];
+        barrier();
+    }
+    float scale = 1.0 / sqrt(red[0] / float(pc.dim) + pc.eps);
+    for (uint i = lid; i < pc.dim; i += 256u)
+        y.v[base + i] = s.v[base + i] * scale * w.v[i];
+}

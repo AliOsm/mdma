@@ -1,0 +1,126 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#include "common.glsl"
+#include "kquant.glsl"
+// K-quant matvec, the decode path (n_tokens == 1). One 64-lane workgroup
+// per NR rows; 16 lanes share a superblock, so the wave works four
+// superblocks at a time and a lane owns 16 elements of each: four quads
+// from two words (low and high nibbles), which is the Q4_K/Q6_K layout's
+// natural unit. The scale decode is paid once per 16 elements, nibbles
+// become floats with unpack8 (one cvt per byte, no shift/mask), and the
+// 64 partials reduce with subgroupAdd.
+// Q4_K (144 B / 256) or Q6_K (210 B / 256). n_in % 256 == 0.
+layout(local_size_x = 64) in;
+layout(push_constant, std430) uniform PC { uint64_t w; uint64_t x; uint64_t y; uint n_out; uint n_in; uint n_tokens; uint dtype; uint block_bytes; } pc;
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer Vec4Buf { vec4 v[]; };
+const uint NR = 2u;
+// One partial per subgroup and row; 64 lanes are 1 (wave64) to 8 subgroups.
+shared float red[8][NR];
+
+vec4 bytes_f(uint packed) {
+    return vec4(unpack8(packed));
+}
+
+float sum4(vec4 v) {
+    return v.x + v.y + v.z + v.w;
+}
+
+// Q4_K, lane `itid` of the 16 on superblock `w0` (first word; blocks are
+// 16-byte aligned). Returns d * sum(q*x) - dmin * sum(m*x) over the
+// lane's 16 elements. `xq` is the vec4 index of the superblock's x.
+float q4k_16(U32Buf w, uint w0, Vec4Buf x, uint xq, uint itid) {
+    uint il = itid / 4u, ir = itid % 4u;
+    uint v_im = il / 2u, v_in = il % 2u;
+    uint l0 = 4u * (2u * ir + v_in);
+    uint q_word = (32u * v_im + l0) / 4u;
+    uint y1 = (64u * v_im + l0) / 4u;
+    vec2 dm = unpackHalf2x16(w.v[w0]);
+    // Sub-blocks j0 = 2 v_im, j0+1 (words' low/high nibbles) and j0+4,
+    // j0+5 (16 words on); their d and m from the 12 scale bytes.
+    uint sh = 16u * v_im;
+    uint A = w.v[w0 + 1u] >> sh, B = w.v[w0 + 2u] >> sh, C = w.v[w0 + 3u] >> sh;
+    uint d01 = A & 0x3F3Fu, m01 = B & 0x3F3Fu;
+    uint d45 = (C & 0x0F0Fu) | ((A & 0xC0C0u) >> 2u);
+    uint m45 = ((C >> 4u) & 0x0F0Fu) | ((B & 0xC0C0u) >> 2u);
+    vec4 sd = bytes_f(d01 | (d45 << 16u));
+    vec4 sm = bytes_f(m01 | (m45 << 16u));
+    uint qa = w.v[w0 + 4u + q_word], qb = w.v[w0 + 4u + q_word + 16u];
+    vec4 x0 = x.v[xq + y1], x1 = x.v[xq + y1 + 8u], x2 = x.v[xq + y1 + 32u], x3 = x.v[xq + y1 + 40u];
+    vec4 s = vec4(
+        dot(bytes_f(qa & 0x0F0F0F0Fu), x0),
+        dot(bytes_f((qa >> 4u) & 0x0F0F0F0Fu), x1),
+        dot(bytes_f(qb & 0x0F0F0F0Fu), x2),
+        dot(bytes_f((qb >> 4u) & 0x0F0F0F0Fu), x3));
+    vec4 xs = vec4(sum4(x0), sum4(x1), sum4(x2), sum4(x3));
+    return dm.x * dot(s, sd) - dm.y * dot(xs, sm);
+}
+
+// Q6_K, lane `itid` on the superblock at byte offset `blk` (2-aligned).
+float q6k_16(U32Buf w, uint blk, Vec4Buf x, uint xq, uint itid) {
+    uint n = itid / 8u, l0 = 4u * (itid % 8u);
+    uint ql0 = bytes4_at(w, blk + 64u * n + l0);
+    uint ql32 = bytes4_at(w, blk + 64u * n + l0 + 32u);
+    uint qh = bytes4_at(w, blk + 128u + 32u * n + l0);
+    // scales[8n + l0/16 + {0,2,4,6}]
+    uint sbase = blk + 192u + 8u * n + l0 / 16u;
+    vec4 sc = vec4(
+        float(sbyte_at(w, sbase)),
+        float(sbyte_at(w, sbase + 2u)),
+        float(sbyte_at(w, sbase + 4u)),
+        float(sbyte_at(w, sbase + 6u)));
+    float d = half_at_bytes(w, blk + 208u);
+    uint q0 = (ql0 & 0x0F0F0F0Fu) | ((qh & 0x03030303u) << 4u);
+    uint q1 = (ql32 & 0x0F0F0F0Fu) | ((qh & 0x0C0C0C0Cu) << 2u);
+    uint q2 = ((ql0 >> 4u) & 0x0F0F0F0Fu) | (qh & 0x30303030u);
+    uint q3 = ((ql32 >> 4u) & 0x0F0F0F0Fu) | ((qh & 0xC0C0C0C0u) >> 2u);
+    uint y0 = (128u * n + l0) / 4u;
+    vec4 x0 = x.v[xq + y0], x1 = x.v[xq + y0 + 8u], x2 = x.v[xq + y0 + 16u], x3 = x.v[xq + y0 + 24u];
+    vec4 s = vec4(
+        dot(bytes_f(q0) - vec4(32.0), x0),
+        dot(bytes_f(q1) - vec4(32.0), x1),
+        dot(bytes_f(q2) - vec4(32.0), x2),
+        dot(bytes_f(q3) - vec4(32.0), x3));
+    return d * dot(s, sc);
+}
+
+void main() {
+    uint row0 = gl_WorkGroupID.x * NR;
+    uint t = gl_WorkGroupID.y;
+    uint lane = gl_LocalInvocationID.x;
+    uint itid = lane % 16u, ix = lane / 16u;
+    U32Buf w = U32Buf(pc.w);
+    Vec4Buf x = Vec4Buf(pc.x);
+    uint n_blocks = pc.n_in / 256u;
+    uint xt = (t * pc.n_in) / 4u;
+    float acc[NR];
+    for (uint r = 0u; r < NR; r++) acc[r] = 0.0;
+    if (t < pc.n_tokens) {
+        // Rows past n_out are clamped onto the last row for the loads and
+        // never written.
+        uint rowp[NR];
+        for (uint r = 0u; r < NR; r++) rowp[r] = min(row0 + r, pc.n_out - 1u) * n_blocks * pc.block_bytes;
+        if (pc.dtype == DTYPE_Q4K) {
+            for (uint b = ix; b < n_blocks; b += 4u) {
+                uint xq = xt + b * 64u;
+                for (uint r = 0u; r < NR; r++) acc[r] += q4k_16(w, rowp[r] / 4u + b * 36u, x, xq, itid);
+            }
+        } else {
+            for (uint b = ix; b < n_blocks; b += 4u) {
+                uint xq = xt + b * 64u;
+                for (uint r = 0u; r < NR; r++) acc[r] += q6k_16(w, rowp[r] + b * 210u, x, xq, itid);
+            }
+        }
+    }
+    for (uint r = 0u; r < NR; r++) {
+        float v = subgroupAdd(acc[r]);
+        if (subgroupElect()) red[gl_SubgroupID][r] = v;
+    }
+    barrier();
+    if (lane < NR && t < pc.n_tokens && row0 + lane < pc.n_out) {
+        float v = 0.0;
+        for (uint sg = 0u; sg < gl_NumSubgroups; sg++) v += red[sg][lane];
+        F32Buf(pc.y).v[t * pc.n_out + row0 + lane] = v;
+    }
+}

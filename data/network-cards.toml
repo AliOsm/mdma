@@ -1,0 +1,78 @@
+# Community-maintained ceilings, not negotiated rates or bandwidth promises.
+# See doc/network-catalog.md before adding records.
+schema_version = 1
+catalog_version = "2026-10-04.1"
+
+[[hardware]]
+id = "apple-airport-14e4-4378"
+bus = "apple_airport"
+vendor = "14e4"
+device = "4378"
+model = "Broadcom Apple AirPort chipset 4378"
+standards = ["802.11a", "802.11b", "802.11g", "802.11n", "802.11ac", "802.11ax"]
+sources = ["doc/network-catalog.md#observed-hardware"]
+notes = "Apple Card Type IDs are not PCI IDs. Numeric PHY ceiling and antenna configuration unverified."
+
+[[hardware]]
+id = "apple-airport-14e4-4387"
+bus = "apple_airport"
+vendor = "14e4"
+device = "4387"
+model = "Broadcom Apple AirPort chipset 4387"
+standards = ["802.11a", "802.11b", "802.11g", "802.11n", "802.11ac", "802.11ax"]
+sources = ["doc/network-catalog.md#observed-hardware"]
+notes = "Numeric PHY ceiling and antenna configuration unverified."
+
+[[hardware]]
+id = "intel-alder-lake-p-cnvi"
+bus = "pci"
+vendor = "8086"
+device = "51f0"
+model = "Intel Alder Lake-P PCH CNVi Wi-Fi"
+sources = ["doc/network-catalog.md#observed-hardware"]
+notes = "PCI controller identity. Do not infer AX211, bands, streams or a radio-module ceiling from this controller ID."
+
+[[hardware]]
+id = "realtek-8168-family"
+bus = "pci"
+vendor = "10ec"
+device = "8168"
+model = "Realtek RTL8168/RTL8111 family"
+max_phy_bps = 1000000000
+sources = ["https://cgit.freebsd.org/src/tree/share/man/man4/re.4?id=7c94a196f533"]
+notes = "re(4) documents 10/100/1000 Mbps for the 8168/8111 family. This does not change an observed 100 Mbps link."
+
+[[driver_limits]]
+id = "freebsd-14.2-iwlwifi"
+os = "freebsd"
+driver = "iwlwifi"
+os_min = "14.2"
+os_before = "14.3"
+standards = ["802.11a", "802.11b", "802.11g"]
+max_phy_bps = 54000000
+sources = ["https://man.freebsd.org/cgi/man.cgi?query=iwlwifi&sektion=4&manpath=FreeBSD+14.2-RELEASE"]
+notes = "Documented compatibility-layer ceiling, not a measured rate. Firmware, configuration and hardware can lower it."
+
+[[driver_limits]]
+id = "freebsd-14.3-iwlwifi"
+os = "freebsd"
+driver = "iwlwifi"
+os_min = "14.3"
+os_before = "14.4"
+standards = ["802.11a", "802.11b", "802.11g", "802.11n", "802.11ac"]
+sources = ["https://man.freebsd.org/cgi/man.cgi?query=iwlwifi&sektion=4&manpath=FreeBSD+14.3-RELEASE"]
+notes = "n/ac only for 22000 and newer generations, subject to firmware/tunables. ax/be and 6 GHz not supported by the documented compatibility layer. No numeric ceiling inferred."
+
+[[driver_limits]]
+id = "freebsd-current-re-7c94a196f533"
+os = "freebsd"
+driver = "re"
+os_min = "16.0"
+os_before = "16.1"
+kernel_revision = "7c94a196f533"
+bus = "pci"
+vendor = "10ec"
+device = "8168"
+max_phy_bps = 1000000000
+sources = ["https://cgit.freebsd.org/src/tree/share/man/man4/re.4?id=7c94a196f533"]
+notes = "Pinned to the documented source/kernel revision. Other CURRENT builds must not inherit this rule."

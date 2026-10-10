@@ -1,0 +1,109 @@
+syntax = "proto3";
+package mdma.federation.v1;
+
+// Authentication is the completed full mTLS connection, never these strings.
+service Federation {
+  rpc Identify(IdentifyRequest) returns (IdentifyResponse);
+  rpc ScanCapabilities(ScanCapabilitiesRequest) returns (SignedCatalog);
+  rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeEvent);
+  rpc Decide(DecideRequest) returns (DecideResponse);
+}
+
+message IdentifyRequest {
+  string origin = 1;
+  string destination = 2;
+  repeated uint32 supported_major_versions = 3;
+}
+
+message IdentifyResponse {
+  string server_id = 1;
+  repeated uint32 supported_major_versions = 2;
+}
+
+message ScanCapabilitiesRequest {
+  string origin = 1;
+  string destination = 2;
+  uint32 major_version = 3;
+  bytes nonce = 4;
+}
+
+message SignedCatalog {
+  string key_id = 1;
+  bytes body_json = 2;
+  bytes signature = 3;
+}
+
+// No URLs, onward-hop allowance, remote defaults or user impersonation.
+message ExecutionEnvelope {
+  string origin = 1;
+  string destination = 2;
+  bytes request_id = 3;
+  string model = 4;
+  string artifact_id = 5;
+  string profile_id = 6;
+  uint32 timeout_ms = 7;
+}
+
+// Match ordinary MDMA presence semantics, including explicit zero.
+message SamplerConfig {
+  optional float temperature = 1;
+  optional float top_p = 2;
+  optional float min_p = 3;
+  optional float repetition_penalty = 4;
+  optional uint32 repetition_window = 5;
+}
+
+message SynthesizeRequest {
+  ExecutionEnvelope envelope = 1;
+  string prompt = 2;
+  uint32 max_tokens = 3;
+  SamplerConfig sampler = 4;
+}
+
+message Accepted {
+  bytes request_id = 1;
+  string executor = 2;
+  string model = 3;
+  string artifact_id = 4;
+  string profile_id = 5;
+  SamplerConfig sampler = 6;
+  uint32 prompt_tokens = 7;
+  uint32 max_tokens = 8;
+  uint32 n_ctx = 9;
+}
+
+message Token {
+  uint32 index = 1;
+  uint32 token_id = 2;
+  string text = 3;
+}
+
+message Completed {
+  bytes request_id = 1;
+  uint32 emitted_tokens = 2;
+  // Exactly "eos", "max_tokens" or "context_limit".
+  string finish_reason = 3;
+}
+
+message SynthesizeEvent {
+  oneof event {
+    Accepted accepted = 1;
+    Token token = 2;
+    Completed completed = 3;
+  }
+}
+
+message DecideRequest {
+  ExecutionEnvelope envelope = 1;
+  string state_json = 2;
+  string questions_json = 3;
+}
+
+message DecideResponse {
+  bytes request_id = 1;
+  string executor = 2;
+  string model = 3;
+  string artifact_id = 4;
+  string profile_id = 5;
+  string result_json = 6;
+}

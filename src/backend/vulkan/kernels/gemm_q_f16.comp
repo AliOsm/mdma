@@ -1,0 +1,5 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// Prefill matmul with f16 tile staging and f32 products and sums.
+#define A_F16 1
+#include "gemm_tile.glsl"

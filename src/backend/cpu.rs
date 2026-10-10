@@ -1,0 +1,349 @@
+mod dequant;
+mod encoder;
+
+use super::{AttnSpec, Backend, EncoderSpec, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec, shape};
+use crate::gguf::GgmlDType;
+use dequant::dequantize_row;
+use rayon::prelude::*;
+
+#[derive(Default)]
+pub struct CpuBackend;
+
+pub struct CpuBuf(pub Vec<u8>);
+
+fn as_f32(bytes: &[u8]) -> Result<&[f32]> {
+    bytemuck::try_cast_slice(bytes).map_err(|e| Error::ShapeMismatch(e.to_string()))
+}
+
+fn as_f32_mut(bytes: &mut [u8]) -> Result<&mut [f32]> {
+    bytemuck::try_cast_slice_mut(bytes).map_err(|e| Error::ShapeMismatch(e.to_string()))
+}
+
+/// Dequantize row `row` of a [n_rows, n_cols] weight into `out`.
+fn dequant_row_at(w: &QWeight<CpuBuf>, row: usize, n_cols: usize, out: &mut [f32]) -> Result<()> {
+    let row_bytes = w.dtype.type_size() * (n_cols / w.dtype.block_size());
+    let start = row * row_bytes;
+    let bytes = w
+        .buf
+        .0
+        .get(start..start + row_bytes)
+        .ok_or_else(|| Error::ShapeMismatch(format!("row {row} out of range for weight buffer")))?;
+    dequantize_row(w.dtype, bytes, out)
+}
+
+fn softmax_inplace(xs: &mut [f32]) {
+    let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut sum = 0.0;
+    for x in xs.iter_mut() {
+        *x = (*x - max).exp();
+        sum += *x;
+    }
+    for x in xs.iter_mut() {
+        *x /= sum;
+    }
+}
+
+fn gelu_tanh(x: f32) -> f32 {
+    0.5 * x * (1.0 + (0.797_884_6 * x * (1.0 + 0.044715 * x * x)).tanh())
+}
+
+/// Interleaved-pair RoPE on `[n_tokens, n_heads, head_dim]`.
+/// Token `t` uses position `pos + t` for every head.
+fn apply_rope(buf: &mut [f32], pos: u32, n_tokens: usize, spec: &RopeSpec) {
+    let token_stride = buf.len() / n_tokens;
+    let half = spec.head_dim / 2;
+    for (t, token_buf) in buf.chunks_exact_mut(token_stride).enumerate() {
+        let token_pos = pos + t as u32;
+        for head in token_buf.chunks_exact_mut(spec.head_dim) {
+            for i in 0..half {
+                let freq = spec.theta.powf(-2.0 * i as f32 / spec.head_dim as f32);
+                let (sin_a, cos_a) = (token_pos as f32 * freq).sin_cos();
+                let x0 = head[2 * i];
+                let x1 = head[2 * i + 1];
+                head[2 * i] = x0 * cos_a - x1 * sin_a;
+                head[2 * i + 1] = x0 * sin_a + x1 * cos_a;
+            }
+        }
+    }
+}
+
+impl Backend for CpuBackend {
+    type Buf = CpuBuf;
+
+    fn device_label(&self) -> Option<String> { Some("CPU".into()) }
+
+    fn supports(&self, operation: Operation) -> bool {
+        match operation {
+            Operation::Scale | Operation::GeluTanhMul | Operation::Softcap
+                | Operation::RopeSplitHalf | Operation::WindowedAttention | Operation::AddBias
+                | Operation::RopePartialInterleaved => true,
+        }
+    }
+
+    fn scale(&self, x: &mut CpuBuf, factor: f32) -> Result<()> {
+        if !factor.is_finite() { return Err(Error::ShapeMismatch("nonfinite scale".into())); }
+        for v in as_f32_mut(&mut x.0)? { *v *= factor; }
+        Ok(())
+    }
+
+    fn softcap(&self, x: &mut CpuBuf, cap: f32) -> Result<()> {
+        shape::softcap(cap)?;
+        for v in as_f32_mut(&mut x.0)? { *v = (*v / cap).tanh() * cap; }
+        Ok(())
+    }
+
+    fn gelu_tanh_mul(&self, a: &CpuBuf, b: &CpuBuf, y: &mut CpuBuf) -> Result<()> {
+        let (a, b, y) = (as_f32(&a.0)?, as_f32(&b.0)?, as_f32_mut(&mut y.0)?);
+        shape::elementwise("gelu_tanh_mul", &[a.len(), b.len()], &[y.len()])?;
+        for ((a, b), y) in a.iter().zip(b).zip(y) { *y = gelu_tanh(*a) * b; }
+        Ok(())
+    }
+
+    fn rope_split_half(&self, x: &mut CpuBuf, pos: u32, spec: &RopeSpec, factors: &CpuBuf) -> Result<()> {
+        let x = as_f32_mut(&mut x.0)?;
+        let factors = as_f32(&factors.0)?;
+        shape::rope_split_half(x.len(), factors.len(), spec)?;
+        for head in x.chunks_exact_mut(spec.head_dim) {
+            for i in 0..spec.head_dim / 2 {
+                let angle = pos as f32 * spec.theta.powf(-2.0 * i as f32 / spec.head_dim as f32) / factors[i];
+                let (s, c) = angle.sin_cos();
+                let (a, b) = (head[i], head[i + spec.head_dim / 2]);
+                head[i] = a * c - b * s;
+                head[i + spec.head_dim / 2] = a * s + b * c;
+            }
+        }
+        Ok(())
+    }
+
+    fn attn_windowed(&self, q: &CpuBuf, kv: &KvView<CpuBuf>, spec: &AttnSpec, scale: f32, window: usize, o: &mut CpuBuf) -> Result<()> {
+        shape::attention_scale(scale)?;
+        self.attention(q, kv, spec, window, scale, o)
+    }
+
+    fn rope_partial_interleaved(&self, x: &mut CpuBuf, pos: u32, spec: &RopeSpec, rotary_dim: usize) -> Result<()> {
+        let x = as_f32_mut(&mut x.0)?;
+        shape::rope_partial_interleaved(x.len(), spec, rotary_dim)?;
+        for head in x.chunks_exact_mut(spec.head_dim) {
+            for i in (0..rotary_dim).step_by(2) {
+                let angle = pos as f32 * spec.theta.powf(-(i as f32) / rotary_dim as f32);
+                let (s, c) = angle.sin_cos();
+                let (a, b) = (head[i], head[i + 1]);
+                head[i] = a * c - b * s;
+                head[i + 1] = a * s + b * c;
+            }
+        }
+        Ok(())
+    }
+
+    fn supports_weight_dtype(&self, _dtype: GgmlDType) -> bool {
+        true
+    }
+
+    fn alloc(&self, bytes: usize, _pool: Pool) -> Result<Self::Buf> {
+        Ok(CpuBuf(vec![0u8; bytes]))
+    }
+
+    fn upload(&self, dst: &mut Self::Buf, offset: usize, src: &[u8]) -> Result<()> {
+        shape::range("upload", offset, src.len(), dst.0.len())?;
+        dst.0[offset..offset + src.len()].copy_from_slice(src);
+        Ok(())
+    }
+
+    fn download(&self, src: &Self::Buf, offset: usize, dst: &mut [u8]) -> Result<()> {
+        shape::range("download", offset, dst.len(), src.0.len())?;
+        dst.copy_from_slice(&src.0[offset..offset + dst.len()]);
+        Ok(())
+    }
+
+    fn copy(&self, src: &Self::Buf, src_off: usize, dst: &mut Self::Buf, dst_off: usize, len: usize) -> Result<()> {
+        shape::range("copy", src_off, len, src.0.len())?;
+        shape::range("copy", dst_off, len, dst.0.len())?;
+        dst.0[dst_off..dst_off + len].copy_from_slice(&src.0[src_off..src_off + len]);
+        Ok(())
+    }
+
+    /// x/y are [n_tokens, n_in]/[n_tokens, n_out] row-major; n_tokens is
+    /// inferred from x's length.
+    fn qmatmul(&self, w: &QWeight<Self::Buf>, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
+        let x_f32 = as_f32(&x.0)?;
+        let y_f32 = as_f32_mut(&mut y.0)?;
+        let shape::Matmul { n_out, n_in, n_tokens } = shape::matmul(&w.shape, x_f32.len(), y_f32.len())?;
+
+        // Rows in parallel, each dequantized once and dotted against every
+        // token into a row-major [n_out, n_tokens] scratch (contiguous per
+        // thread); the transpose into y keeps every element's reduction
+        // order independent of thread scheduling.
+        let mut yt = vec![0f32; n_out * n_tokens];
+        yt.par_chunks_mut(n_tokens).enumerate().try_for_each_init(
+            || vec![0f32; n_in],
+            |row_f32, (row, out)| {
+                dequant_row_at(w, row, n_in, row_f32)?;
+                for (t, y) in out.iter_mut().enumerate() {
+                    let x_t = &x_f32[t * n_in..(t + 1) * n_in];
+                    *y = row_f32.iter().zip(x_t).map(|(a, b)| a * b).sum();
+                }
+                Ok::<(), Error>(())
+            },
+        )?;
+        for t in 0..n_tokens {
+            for row in 0..n_out {
+                y_f32[t * n_out + row] = yt[row * n_tokens + t];
+            }
+        }
+        Ok(())
+    }
+
+    fn embed(&self, table: &QWeight<Self::Buf>, token_ids: &[u32], out: &mut Self::Buf) -> Result<()> {
+        let out_f32 = as_f32_mut(&mut out.0)?;
+        let shape::Embed { n_embd, .. } = shape::embed(&table.shape, token_ids, out_f32.len())?;
+        let mut row_f32 = vec![0f32; n_embd];
+        for (t, &token_id) in token_ids.iter().enumerate() {
+            dequant_row_at(table, token_id as usize, n_embd, &mut row_f32)?;
+            out_f32[t * n_embd..(t + 1) * n_embd].copy_from_slice(&row_f32);
+        }
+        Ok(())
+    }
+
+    /// x/y are [n_tokens, dim]; dim = w.len(). RMS is computed per token
+    /// over `dim`, never over the whole buffer.
+    fn rmsnorm(&self, w: &Self::Buf, x: &Self::Buf, y: &mut Self::Buf, eps: f32) -> Result<()> {
+        let w_f32 = as_f32(&w.0)?;
+        let x_f32 = as_f32(&x.0)?;
+        let y_f32 = as_f32_mut(&mut y.0)?;
+        let dim = w_f32.len();
+        shape::rows("rmsnorm", dim, x_f32.len(), y_f32.len())?;
+        for (row, out) in x_f32.chunks_exact(dim).zip(y_f32.chunks_exact_mut(dim)) {
+            let mean_sq = row.iter().map(|v| v * v).sum::<f32>() / dim as f32;
+            let scale = 1.0 / (mean_sq + eps).sqrt();
+            for i in 0..dim {
+                out[i] = row[i] * scale * w_f32[i];
+            }
+        }
+        Ok(())
+    }
+
+    fn rope(&self, q: &mut Self::Buf, k: &mut Self::Buf, pos: u32, n_tokens: usize, spec: &RopeSpec) -> Result<()> {
+        let q_f32 = as_f32_mut(&mut q.0)?;
+        let k_f32 = as_f32_mut(&mut k.0)?;
+        shape::rope(spec, q_f32.len(), k_f32.len(), n_tokens)?;
+        apply_rope(q_f32, pos, n_tokens, spec);
+        apply_rope(k_f32, pos, n_tokens, spec);
+        Ok(())
+    }
+
+    fn add(&self, a: &Self::Buf, b: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
+        let a_f32 = as_f32(&a.0)?;
+        let b_f32 = as_f32(&b.0)?;
+        let y_f32 = as_f32_mut(&mut y.0)?;
+        shape::elementwise("add", &[a_f32.len(), b_f32.len()], &[y_f32.len()])?;
+        for i in 0..a_f32.len() {
+            y_f32[i] = a_f32[i] + b_f32[i];
+        }
+        Ok(())
+    }
+
+    /// q/o are [n_q, n_q_heads, head_dim]; n_q is inferred from q's
+    /// length. kv.len is the *total* keys already written (prefix +
+    /// this batch); prefix = kv.len - n_q. Query i attends to keys
+    /// [0, prefix+i] inclusive -- standard causal masking, with the
+    /// already-cached prefix always fully visible. n_q==1 (decode):
+    /// the one query attends to all cached keys.
+    fn attn(&self, q: &Self::Buf, kv: &KvView<Self::Buf>, spec: &AttnSpec, o: &mut Self::Buf) -> Result<()> {
+        self.attention(q, kv, spec, 0, 1.0 / (spec.head_dim as f32).sqrt(), o)
+    }
+
+    fn silu_mul(&self, gate: &Self::Buf, up: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
+        let gate_f32 = as_f32(&gate.0)?;
+        let up_f32 = as_f32(&up.0)?;
+        let y_f32 = as_f32_mut(&mut y.0)?;
+        shape::elementwise("silu_mul", &[gate_f32.len(), up_f32.len()], &[y_f32.len()])?;
+        for i in 0..gate_f32.len() {
+            let g = gate_f32[i];
+            let silu = g / (1.0 + (-g).exp());
+            y_f32[i] = silu * up_f32[i];
+        }
+        Ok(())
+    }
+
+    fn layernorm(&self, w: &Self::Buf, b: Option<&Self::Buf>, x: &Self::Buf, y: &mut Self::Buf, eps: f32) -> Result<()> {
+        let b = b.map(|b| as_f32(&b.0)).transpose()?;
+        encoder::layernorm(as_f32(&w.0)?, b, as_f32(&x.0)?, as_f32_mut(&mut y.0)?, eps)
+    }
+
+    fn add_bias(&self, b: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
+        encoder::add_bias(as_f32(&b.0)?, as_f32_mut(&mut y.0)?)
+    }
+
+    fn gelu(&self, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
+        encoder::map("gelu", as_f32(&x.0)?, as_f32_mut(&mut y.0)?, encoder::gelu_scalar)
+    }
+
+    fn gelu_mul(&self, a: &Self::Buf, gate: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
+        encoder::gelu_mul(as_f32(&a.0)?, as_f32(&gate.0)?, as_f32_mut(&mut y.0)?)
+    }
+
+    fn relu(&self, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
+        encoder::map("relu", as_f32(&x.0)?, as_f32_mut(&mut y.0)?, |v| v.max(0.0))
+    }
+
+    fn rope_neox(&self, q: &mut Self::Buf, k: &mut Self::Buf, spec: &EncoderSpec, theta: f32) -> Result<()> {
+        let q_f32 = as_f32_mut(&mut q.0)?;
+        let k_f32 = as_f32_mut(&mut k.0)?;
+        shape::rope_neox(spec, q_f32.len(), k_f32.len())?;
+        encoder::rope_neox(q_f32, spec, theta);
+        encoder::rope_neox(k_f32, spec, theta);
+        Ok(())
+    }
+
+    fn attn_bidir(&self, q: &Self::Buf, k: &Self::Buf, v: &Self::Buf, lens: &[u32], spec: &EncoderSpec, o: &mut Self::Buf) -> Result<()> {
+        encoder::attn_bidir(as_f32(&q.0)?, as_f32(&k.0)?, as_f32(&v.0)?, lens, spec, as_f32_mut(&mut o.0)?)
+    }
+}
+
+impl CpuBackend {
+    #[expect(clippy::unused_self, reason = "backend operations are methods")]
+    fn attention(&self, q: &CpuBuf, kv: &KvView<CpuBuf>, spec: &AttnSpec, window: usize, scale: f32, o: &mut CpuBuf) -> Result<()> {
+        let q_f32 = as_f32(&q.0)?;
+        let k_f32 = as_f32(&kv.k.0)?;
+        let v_f32 = as_f32(&kv.v.0)?;
+        let o_f32 = as_f32_mut(&mut o.0)?;
+        let shape::Attn { n_q, prefix } = shape::attn(spec, q_f32.len(), kv.len, k_f32.len(), v_f32.len(), o_f32.len())?;
+
+        let per_token = spec.n_q_heads * spec.head_dim;
+        let group = spec.n_q_heads / spec.n_kv_heads;
+        let kv_row = spec.n_kv_heads * spec.head_dim;
+
+        o_f32[..n_q * per_token].fill(0.0);
+        for i in 0..n_q {
+            let visible = prefix + i + 1; // exclusive upper bound, causal
+            let first = if window == 0 { 0 } else { visible.saturating_sub(window) };
+            let mut scores = vec![0f32; visible - first];
+            for qh in 0..spec.n_q_heads {
+                let kvh = qh / group;
+                let q_start = (i * spec.n_q_heads + qh) * spec.head_dim;
+                let q_vec = &q_f32[q_start..q_start + spec.head_dim];
+
+                for (offset, score) in scores.iter_mut().enumerate() {
+                    let t = first + offset;
+                    let k_vec = &k_f32[t * kv_row + kvh * spec.head_dim..t * kv_row + (kvh + 1) * spec.head_dim];
+                    *score = q_vec.iter().zip(k_vec).map(|(a, b)| a * b).sum::<f32>() * scale;
+                }
+                softmax_inplace(&mut scores);
+
+                let o_vec = &mut o_f32[q_start..q_start + spec.head_dim];
+                for (offset, &weight) in scores.iter().enumerate() {
+                    let t = first + offset;
+                    let v_vec = &v_f32[t * kv_row + kvh * spec.head_dim..t * kv_row + (kvh + 1) * spec.head_dim];
+                    for (o_val, v_val) in o_vec.iter_mut().zip(v_vec) {
+                        *o_val += weight * v_val;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+config="$HOME/.config/mdma/client.env"
+if [ ! -r "$config" ]; then
+    printf 'mdma: missing client configuration: %s\n' "$config" >&2
+    exit 1
+fi
+set -a
+. "$config"
+set +a
+exec "$HOME/.local/bin/mdma-client" "$@"

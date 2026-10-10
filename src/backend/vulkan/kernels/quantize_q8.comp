@@ -1,0 +1,66 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
+#include "common.glsl"
+layout(local_size_x = 128) in;
+layout(push_constant, std430) uniform PC { uint64_t x; uint64_t q8; uint n_blocks; } pc;
+
+// packHalf2x16 may truncate on Vulkan. Define RNE for the nonnegative scale,
+// including subnormals, rather than inheriting the driver's conversion mode.
+float scale_half_rne(float v) {
+    uint bits = floatBitsToUint(v);
+    uint exponent = (bits >> 23u) & 255u;
+    uint h;
+    if (exponent >= 143u) return uintBitsToFloat(0x7F800000u);
+    if (exponent < 102u) return 0.0;
+    if (exponent >= 113u) {
+        bits += 0xFFFu + ((bits >> 13u) & 1u);
+        h = (bits - 0x38000000u) >> 13u;
+    } else {
+        uint sig = (bits & 0x7FFFFFu) | 0x800000u;
+        uint shift = 126u - exponent;
+        h = sig >> shift;
+        uint rem = sig & ((1u << shift) - 1u);
+        uint half_bit = 1u << (shift - 1u);
+        h += uint(rem > half_bit || (rem == half_bit && (h & 1u) != 0u));
+    }
+    return unpackHalf2x16(h).x;
+}
+
+// Ten words per 32 values: eight packed int8 words, f16-defined scale,
+// and exact integer sum. Four independent eight-lane reductions per wave32.
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint block = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 16u + lane / 8u;
+    uint sub = lane % 8u;
+    F32Buf x = F32Buf(pc.x);
+    vec4 v = vec4(0.0);
+    if (block < pc.n_blocks) {
+        uint i = block * 32u + sub * 4u;
+        v = vec4(x.v[i], x.v[i + 1u], x.v[i + 2u], x.v[i + 3u]);
+    }
+    float amax = max(max(abs(v.x), abs(v.y)), max(abs(v.z), abs(v.w)));
+    for (uint mask = 4u; mask > 0u; mask >>= 1u)
+        amax = max(amax, subgroupShuffleXor(amax, mask));
+    precise float inv = amax > 0.0 ? 127.0 / amax : 0.0;
+    precise vec4 z = v * inv;
+    // Half-away-from-zero without a rounded +0.5 or a contracted multiply.
+    vec4 az = abs(z);
+    ivec4 qi = ivec4(az);
+    ivec4 q = ivec4(sign(z)) * (qi + ivec4(greaterThanEqual(az - vec4(qi), vec4(0.5))));
+    uint packed = (uint(q.x) & 255u) | ((uint(q.y) & 255u) << 8u)
+        | ((uint(q.z) & 255u) << 16u) | ((uint(q.w) & 255u) << 24u);
+    int sum = q.x + q.y + q.z + q.w;
+    for (uint mask = 4u; mask > 0u; mask >>= 1u)
+        sum += subgroupShuffleXor(sum, mask);
+    if (block >= pc.n_blocks) return;
+    U32Buf out_q = U32Buf(pc.q8);
+    out_q.v[block * 10u + sub] = packed;
+    if (sub == 0u) {
+        precise float d32 = amax / 127.0;
+        float d = scale_half_rne(d32);
+        out_q.v[block * 10u + 8u] = floatBitsToUint(d);
+        out_q.v[block * 10u + 9u] = uint(sum);
+    }
+}

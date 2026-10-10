@@ -1,0 +1,104 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+// One 128-lane workgroup per (query head, query). Keys are scored in
+// chunks of CHUNK with lanes spread over keys, then the chunk's softmax
+// weights are applied with lanes spread over head dims (coalesced V
+// rows). Online softmax across chunks, so any context length fits in
+// the fixed shared arrays. head_dim <= 512 (host-checked).
+layout(local_size_x = 128) in;
+layout(push_constant, std430) uniform PC {
+    uint64_t q; uint64_t k; uint64_t v; uint64_t o;
+    int head_dim; int n_q_heads; int n_kv_heads; int n_q; int prefix;
+    float scale; uint window;
+} pc;
+const uint CHUNK = 1024u;
+shared float qs[512];
+shared float sc[CHUNK];
+shared float red[128];
+
+float block_max(float v) {
+    uint lid = gl_LocalInvocationID.x;
+    red[lid] = v;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1u) {
+        if (lid < s) red[lid] = max(red[lid], red[lid + s]);
+        barrier();
+    }
+    float r = red[0];
+    barrier();
+    return r;
+}
+
+float block_sum(float v) {
+    uint lid = gl_LocalInvocationID.x;
+    red[lid] = v;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1u) {
+        if (lid < s) red[lid] += red[lid + s];
+        barrier();
+    }
+    float r = red[0];
+    barrier();
+    return r;
+}
+
+void main() {
+    uint qh = gl_WorkGroupID.x;
+    uint qi = gl_WorkGroupID.y;
+    uint lid = gl_LocalInvocationID.x;
+    F32Buf q = F32Buf(pc.q); F32Buf k = F32Buf(pc.k); F32Buf v = F32Buf(pc.v); F32Buf o = F32Buf(pc.o);
+    uint hd = uint(pc.head_dim);
+    uint group = uint(pc.n_q_heads / pc.n_kv_heads);
+    uint kvh = qh / group;
+    uint kv_row = uint(pc.n_kv_heads) * hd;
+    uint kv_off = kvh * hd;
+    uint q_base = (qi * uint(pc.n_q_heads) + qh) * hd;
+    uint visible = uint(pc.prefix) + qi + 1u;
+
+    for (uint d = lid; d < hd; d += 128u) qs[d] = q.v[q_base + d];
+    barrier();
+
+    float m = -1.0 / 0.0;
+    float sum = 0.0;
+    float acc[4] = float[4](0.0, 0.0, 0.0, 0.0);
+    uint start = pc.window == 0u ? 0u : visible - min(visible, pc.window);
+    for (uint c0 = start; c0 < visible; c0 += CHUNK) {
+        uint n = min(CHUNK, visible - c0);
+        float local_max = -1.0 / 0.0;
+        for (uint t = lid; t < n; t += 128u) {
+            uint k_base = (c0 + t) * kv_row + kv_off;
+            float dot = 0.0;
+            for (uint d = 0u; d < hd; d++) dot += qs[d] * k.v[k_base + d];
+            dot *= pc.scale;
+            sc[t] = dot;
+            local_max = max(local_max, dot);
+        }
+        float m_new = max(m, block_max(local_max));
+        float corr = exp(m - m_new);
+        sum *= corr;
+        for (uint j = 0u; j < 4u; j++) acc[j] *= corr;
+        float local_sum = 0.0;
+        for (uint t = lid; t < n; t += 128u) {
+            float p = exp(sc[t] - m_new);
+            sc[t] = p;
+            local_sum += p;
+        }
+        sum += block_sum(local_sum);
+        for (uint t = 0u; t < n; t++) {
+            uint v_base = (c0 + t) * kv_row + kv_off;
+            float p = sc[t];
+            for (uint j = 0u; j < 4u; j++) {
+                uint d = lid + 128u * j;
+                if (d < hd) acc[j] += p * v.v[v_base + d];
+            }
+        }
+        barrier();
+        m = m_new;
+    }
+    float inv = 1.0 / sum;
+    for (uint j = 0u; j < 4u; j++) {
+        uint d = lid + 128u * j;
+        if (d < hd) o.v[q_base + d] = acc[j] * inv;
+    }
+}

@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define QUANT_Q4K
+#include "gemm_i8.glsl"

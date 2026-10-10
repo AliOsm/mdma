@@ -1,0 +1,28 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "common.glsl"
+// One workgroup per token: block-wide sum of squares, then scale.
+layout(local_size_x = 256) in;
+layout(push_constant, std430) uniform PC { uint64_t w; uint64_t x; uint64_t y; uint dim; float eps; } pc;
+shared float red[256];
+void main() {
+    uint t = gl_WorkGroupID.x;
+    uint lid = gl_LocalInvocationID.x;
+    F32Buf x = F32Buf(pc.x);
+    F32Buf y = F32Buf(pc.y);
+    F32Buf w = F32Buf(pc.w);
+    uint base = t * pc.dim;
+    float ss = 0.0;
+    for (uint i = lid; i < pc.dim; i += 256u) {
+        float v = x.v[base + i];
+        ss += v * v;
+    }
+    red[lid] = ss;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u) {
+        if (lid < s) red[lid] += red[lid + s];
+        barrier();
+    }
+    float scale = 1.0 / sqrt(red[0] / float(pc.dim) + pc.eps);
+    for (uint i = lid; i < pc.dim; i += 256u) y.v[base + i] = x.v[base + i] * scale * w.v[i];
+}

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.seuros.mdma</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/mdma-serve</string>
+    </array>
+    <key>UserName</key>
+    <string>_mdma</string>
+    <key>GroupName</key>
+    <string>_mdma</string>
+    <key>WorkingDirectory</key>
+    <string>/usr/local/var/lib/mdma</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/usr/local/var/lib/mdma</string>
+        <key>MDMA_GGUF_PATH</key>
+        <string>/usr/local/var/lib/mdma/model.gguf</string>
+        <key>MDMA_LISTEN</key>
+        <string>127.0.0.1:50051</string>
+        <key>MDMA_TLS_CERT</key>
+        <string>/usr/local/etc/mdma/server.pem</string>
+        <key>MDMA_TLS_KEY</key>
+        <string>/usr/local/etc/mdma/server-key.pem</string>
+        <key>MDMA_TLS_CA</key>
+        <string>/usr/local/etc/mdma/ca.pem</string>
+        <key>MDMA_BACKEND</key>
+        <string>cpu</string>
+        <key>MDMA_N_CTX</key>
+        <string>4096</string>
+        <key>MDMA_WARMUP_ROUNDS</key>
+        <string>2</string>
+        <key>MDMA_SHUTDOWN_TIMEOUT_SECS</key>
+        <string>30</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>ExitTimeOut</key>
+    <integer>40</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/mdma/serve.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/mdma/serve.log</string>
+</dict>
+</plist>

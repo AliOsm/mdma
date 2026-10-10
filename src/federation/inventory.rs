@@ -1,0 +1,161 @@
+//! Recipient-filtered, local-only inventory. Constructors are crate-private:
+//! callers cannot inject descriptors or claim an execution backend.
+
+use super::catalog::{self, Kind, Limits, ModelDescriptor, ServerState};
+use crate::backend::Backend;
+use crate::power::{DegradedLimits, PowerStatus};
+use crate::registry::{Entry, Registry};
+use rama::futures::FutureExt;
+use rama::graceful::WeakShutdownGuard;
+use std::sync::Arc;
+use tokio::sync::watch;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Snapshot {
+    pub state: ServerState,
+    pub models: Vec<ModelDescriptor>,
+}
+
+pub(crate) trait Inventory: Send + Sync {
+    fn snapshot(&self, exports: &[String]) -> Snapshot;
+}
+
+pub(crate) fn draining(guard: Option<&WeakShutdownGuard>) -> bool {
+    guard.is_some_and(|guard| guard.cancelled().now_or_never().is_some())
+}
+
+pub(crate) struct Empty;
+
+impl Inventory for Empty {
+    fn snapshot(&self, _: &[String]) -> Snapshot {
+        Snapshot {
+            state: ServerState::Serving,
+            models: vec![],
+        }
+    }
+}
+
+pub(crate) struct Native<B: Backend> {
+    pub registry: Arc<Registry<B>>,
+    pub shutdown: Option<WeakShutdownGuard>,
+    pub power: Option<(watch::Receiver<PowerStatus>, DegradedLimits)>,
+}
+
+impl<B> Inventory for Native<B>
+where
+    B: Backend + Send + Sync + 'static,
+    B::Buf: Send + Sync,
+{
+    fn snapshot(&self, exports: &[String]) -> Snapshot {
+        let power = self
+            .power
+            .as_ref()
+            .map(|(rx, caps)| (*rx.borrow(), *caps, rx.has_changed().is_err()));
+        let mut state = if draining(self.shutdown.as_ref()) {
+            ServerState::Draining
+        } else if let Some((power, _, closed)) = power {
+            // A dead watcher cannot promise readiness from its last observation.
+            if closed && power.state != crate::power::ServerState::Draining {
+                ServerState::Critical
+            } else {
+                match power.state {
+                    crate::power::ServerState::Serving => ServerState::Serving,
+                    crate::power::ServerState::Degraded => ServerState::Degraded,
+                    crate::power::ServerState::Critical => ServerState::Critical,
+                    crate::power::ServerState::Draining => ServerState::Draining,
+                }
+            }
+        } else {
+            ServerState::Serving
+        };
+        if state == ServerState::Serving
+            && self
+                .registry
+                .iter()
+                .any(|m| matches!(m.entry, Entry::Unavailable(_)))
+        {
+            state = ServerState::Degraded;
+        }
+        // Policy order is stable and bounded (<=256); no default-name fallback,
+        // upstream introspection, filesystem discovery or export inference.
+        let mut models = Vec::new();
+        for name in exports {
+            if super::config::validate_model(name).is_err() {
+                continue;
+            }
+            let Some(loaded) = self.registry.get(name) else {
+                continue;
+            };
+            let Some(artifact) = self.registry.artifact_id(name) else {
+                continue;
+            };
+            let Some(profile) = self.registry.execution_profile(name) else {
+                continue;
+            };
+            let backend = profile
+                .manifest()
+                .as_object()
+                .and_then(|manifest| manifest.get("backend"))
+                .and_then(|value| value.as_str());
+            let Some(backend @ ("cpu" | "metal" | "rocm" | "vulkan")) = backend else {
+                continue;
+            };
+            let (kind, architecture, limits) = match &loaded.entry {
+                Entry::Decoder(decoder) => {
+                    let n_ctx = decoder.n_ctx.min(decoder.model.config().n_ctx);
+                    // Use the power observation, not registry degradation, for
+                    // request caps, exactly as the native service does.
+                    let (n_ctx, output) = match power {
+                        Some((power, caps, _)) if power.state == crate::power::ServerState::Degraded => {
+                            let n_ctx = n_ctx.min(caps.n_ctx);
+                            (n_ctx, n_ctx.min(caps.max_tokens))
+                        }
+                        _ => (n_ctx, n_ctx),
+                    };
+                    let (Ok(n_ctx), Ok(max_output_tokens)) =
+                        (u32::try_from(n_ctx), u32::try_from(output))
+                    else {
+                        continue;
+                    };
+                    (
+                        Kind::Gguf,
+                        decoder.architecture.clone(),
+                        Limits::Synthesize {
+                            n_ctx,
+                            max_output_tokens,
+                        },
+                    )
+                }
+                Entry::Laya(predictor) => (
+                    Kind::Laya,
+                    predictor.architecture().into(),
+                    Limits::Decide {
+                        max_questions: catalog::MAX_DECIDE_QUESTIONS,
+                        max_result_bytes: catalog::MAX_DECIDE_RESULT_BYTES,
+                    },
+                ),
+                Entry::Upstream(_) | Entry::Unavailable(_) => continue,
+            };
+            let descriptor = ModelDescriptor {
+                model: loaded.name.clone(),
+                kind,
+                artifact_id: artifact.as_str().into(),
+                profile_id: profile.as_str().into(),
+                architecture,
+                // Taken from a concrete loader-created, still-current profile.
+                backend: backend.into(),
+                ready: !state.forces_unready(),
+                max_input_bytes: catalog::MAX_MAX_INPUT_BYTES,
+                limits,
+            };
+            // Invalid/unsupported local names or limits are unexportable.
+            if descriptor.validate().is_ok() {
+                models.push(descriptor);
+            }
+        }
+        Snapshot { state, models }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests;

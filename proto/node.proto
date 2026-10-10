@@ -1,0 +1,73 @@
+syntax = "proto3";
+package mdma.node.poc;
+
+// Insecure resource-only POC; not the draft federation execution protocol.
+service Node {
+  rpc Identify(IdentifyRequest) returns (NodeIdentity);
+  rpc ScanCapabilities(ScanCapabilitiesRequest) returns (ResourceSnapshot);
+}
+message NodeIdentity {
+  string mdma_version = 1;
+  string build_id = 2;
+  uint32 protocol_version = 3;
+}
+message IdentifyRequest { NodeIdentity requester = 1; }
+message ScanCapabilitiesRequest { NodeIdentity requester = 1; }
+message ResourceSnapshot {
+  string node_name = 1;
+  string os = 2;
+  string architecture = 3;
+  string mdma_version = 4;
+  uint64 collected_at_unix_ms = 5;
+  string cpu_model = 6;
+  uint32 logical_cpu_count = 7;
+  uint64 memory_total_bytes = 8;
+  uint64 memory_available_bytes = 9;
+  string storage_path = 10;
+  uint64 disk_total_bytes = 11;
+  uint64 disk_available_bytes = 12;
+  NetworkInterface network_interface = 13;
+  NodeIdentity identity = 14;
+}
+message NetworkInterface {
+  string name = 1;
+  string address = 2;
+  uint64 mtu_bytes = 3;
+  // Negotiated link rate, not measured throughput. Absent when unavailable.
+  optional uint64 link_speed_bps = 4;
+  // Linux lower interfaces (bridge/bond/VLAN members); not flow selection.
+  repeated NetworkInterface underlying_interfaces = 5;
+  // Best-effort metadata; empty values from older peers mean unknown.
+  string interface_kind = 6;
+  string physical_medium = 7;
+  string driver = 8;
+  // Positive VM evidence only; "host_or_unknown" does not prove bare metal.
+  string visibility = 9;
+  string classification_source = 10;
+  NetworkHardwareIdentity hardware_identity = 11;
+  NetworkCapabilityProfile hardware_capabilities = 12;
+  NetworkCapabilityProfile driver_capabilities = 13;
+  string os_version = 14;
+  string kernel_build = 15;
+  string catalog_version = 16;
+  string catalog_status = 17;
+  string os_name = 18;
+}
+message NetworkHardwareIdentity {
+  // Apple AirPort IDs are deliberately a separate namespace from PCI.
+  string bus = 1;
+  string vendor = 2;
+  string device = 3;
+  string subsystem_vendor = 4;
+  string subsystem_device = 5;
+  string revision = 6;
+}
+message NetworkCapabilityProfile {
+  string entry_id = 1;
+  string model = 2;
+  repeated string standards = 3;
+  // Catalog PHY ceiling only; never fills negotiated link_speed_bps.
+  optional uint64 max_phy_bps = 4;
+  repeated string sources = 5;
+  string notes = 6;
+}

@@ -1,0 +1,24 @@
+[package]
+name = "mdma-hardware-cli-tests"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "mdma"
+path = "mdma.rs"
+
+[[test]]
+name = "hardware_cli"
+path = "../hardware_cli.rs"
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.152", features = ["preserve_order"] }
+usage-rs = { version = "7.0.0", default-features = false, features = ["help", "diagnostics"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

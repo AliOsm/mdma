@@ -1,0 +1,83 @@
+syntax = "proto3";
+package mdma;
+
+// Every field is `optional` (proto3 explicit presence) so the server can
+// tell "client didn't set this" apart from "client set it to zero" - a
+// bare zero is degenerate for top_p/repetition_penalty and would
+// silently collapse sampling to near-greedy if treated as a real value.
+// Missing fields fall back to SamplerConfig::default() per field, not to 0.
+message SamplerConfig {
+  optional float temperature = 1;
+  optional float top_p = 2;
+  optional float min_p = 3;
+  optional float repetition_penalty = 4;
+  optional uint32 repetition_window = 5;
+}
+
+message SynthesizeRequest {
+  string prompt = 1;
+  uint32 max_tokens = 2;
+  SamplerConfig sampler = 3;
+  // A name from the server's model registry; empty means the default model.
+  string model = 4;
+}
+
+// Laya typed decisions: a state and a set of questions in, a distribution
+// per question out. Both sides are JSON.
+message DecideRequest {
+  string model = 1;
+  string state_json = 2;
+  string questions_json = 3;
+}
+
+message DecideResponse {
+  string result_json = 1;
+}
+
+message ModelStatus {
+  string name = 1;
+  // "gguf" (native decoder), "laya" (native typed decisions, CPU) or
+  // "upstream" (a model on another MDMA node).
+  string kind = 2;
+  string backend = 3;
+  string architecture = 4;
+  uint32 n_ctx = 5;
+  bool ready = 6;
+  // Weights as stored on disk; 0 for upstreams.
+  uint64 weight_bytes = 7;
+  string upstream = 8;
+}
+
+message SynthesizeResponse {
+  uint32 token_id = 1;
+  string text = 2;
+}
+
+message IntrospectRequest {}
+
+message IntrospectResponse {
+  bool ready = 1;
+  // e.g. "internlm2" - from the GGUF's general.architecture metadata.
+  string model_architecture = 2;
+  // "cpu" or "rocm" - which Backend this node is actually running.
+  string backend = 3;
+  // "serving", "degraded" (power-capped or some models unloaded for memory),
+  // "critical" (battery
+  // nearly empty: new generations refused) or "draining".
+  string server_state = 4;
+  bool on_battery = 5;
+  // -1 when the host reports no battery percentage.
+  int32 battery_percent = 6;
+  // The GPU's enforced and default power limits in milliwatts; 0 when the
+  // backend has no probe (only cuda reads them, through NVML).
+  uint32 gpu_power_limit_mw = 7;
+  uint32 gpu_power_default_mw = 8;
+  repeated ModelStatus models = 9;
+  string default_model = 10;
+}
+
+service Mdma {
+  rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeResponse);
+  rpc Decide(DecideRequest) returns (DecideResponse);
+  rpc Introspect(IntrospectRequest) returns (IntrospectResponse);
+}

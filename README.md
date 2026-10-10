@@ -1,0 +1,269 @@
+# mdma
+
+**Model Dispatch and Memory Allocator.** Run language models on the machines
+you already own, know exactly where every byte goes, and let those machines
+serve each other privately.
+
+mdma is an inference engine written from scratch in Rust: GGUF loader,
+tokenizers, transformer decoders, KV cache, sampler, and hand-written compute
+kernels behind one `Backend` trait, served over gRPC with mandatory mTLS.
+
+> **Status: experimental.** mdma runs, and is tested, on the specific hardware
+> and models listed below. Expect rough edges, missing features and breaking
+> changes between releases. The federation protocol is v1 and not frozen.
+
+mdma is being extracted from a larger private system that reached about
+1,000 tokens/s on off-the-shelf hardware. The public reimplementation is in
+progress: pieces land here as they are rebuilt, tested and documented, and it
+does not reach that number yet. You can speed it up by
+[testing it on your hardware](#help-wanted-test-it-on-your-hardware).
+
+## Vision
+
+mdma starts from a desk, a closet or a lab full of mismatched machines: a
+workstation with an AMD card, a laptop with an NVIDIA chip, a Mac, an APU box,
+a FreeBSD server. The goal is to make every one of them useful for inference,
+and to let them work together without handing prompts to anyone you did not
+choose.
+
+### Use the hardware you own
+
+One `Backend` trait, six implementations: CPU (FreeBSD included), ROCm,
+Vulkan (AMD APUs and pre-RDNA3 GPUs through RADV), Level Zero for Intel iGPUs,
+CUDA through the driver API alone (no toolkit), and Metal. The kernels are
+written for mdma, not wrapped from a vendor library.
+
+`mdma info` inventories a machine, `mdma doctor` proves which compiled backends
+actually work on it, and `mdma plan` estimates whether a model fits before
+anything loads. On a laptop, the server follows the power supply, shrinks its
+limits on battery and refuses new work at critical charge.
+
+### Know where every byte goes
+
+The memory allocator is half the name. Weights, KV cache and workspace are
+reserved before they are allocated, so a request that cannot fit is rejected
+up front with `RESOURCE_EXHAUSTED` rather than taking the process down later.
+Aliases of the same GGUF share one upload, explicit backend buffers can be
+capped on HIP, CUDA and Vulkan, and unified memory is counted once, never as
+RAM plus VRAM. When a model is larger than the GPU, `mdma run --gpu-layers auto`
+places the largest suffix of layers that fits and keeps the rest on the CPU.
+
+### Correct before fast
+
+Every GPU kernel is tested against the CPU backend. Checkpoint gates require
+exact greedy tokens and bounded log-probability error against pinned llama.cpp
+reference runs. Tolerances are never relaxed to make a test pass; known-failing
+diagnostics stay marked as failing until they are fixed. Fast paths that change
+numerics, such as int8 activations, are documented as such, gated separately,
+and backed by f32 reference modes.
+
+### A private inference fabric
+
+Machines you trust, yours and the people you choose, can form a federation.
+Every peer is enrolled explicitly. Transport is TLS 1.3 mutual authentication
+with pinned keys. Catalogs are signed, and routes are pinned to exact model
+artifacts and executable profiles. Seeing a model, running it, routing to it
+and disclosing a caller's input are separate grants. There is no central
+scheduler, no shared certificate authority and no cloud. A request runs whole
+on one peer, and failed work is never silently retried elsewhere. Federation
+is off by default.
+
+### Where it is going
+
+Phones joining the fabric, embedding models on the encoder path that already
+runs Laya, placement across several devices in one machine, and NPUs as
+prefill co-processors. See the [roadmap](#roadmap).
+
+The compute and memory planes are hand-rolled on purpose; everything else
+(HTTP/gRPC, TLS, serialization, state machines) comes from established crates.
+
+## What works today
+
+### Backends
+
+| Backend | Feature | Hardware | State |
+|---|---|---|---|
+| CPU | `cpu` (default) | any, incl. FreeBSD | reference implementation; every GPU kernel is tested against it |
+| ROCm / HIP | `rocm` | AMD gfx1201 (RDNA4, Radeon AI PRO R9700), ROCm 7.2 | production path; packed int8 GEMV, fused FFN, int8 WMMA GEMM, WMMA flash attention |
+| Level Zero | `level0` | Intel Xe iGPU (Meteor Lake `mtl` by default) | elementwise, RoPE, attention, f32/f16 and Q4_K/Q6_K matvec; tested against the CPU backend |
+| Vulkan | `vulkan` | Vulkan 1.2 GPU with buffer-device-address + int64, including AMD APUs and pre-RDNA3 parts via RADV | f32 math, device-local buffers, wave-cooperative matvec and attention, LDS-tiled prefill GEMM; optional f16 staging selected by load-time speed and logit-drift checks (`MDMA_VK_F16_WEIGHTS=auto\|1\|0`) |
+| CUDA | `cuda` | NVIDIA via the driver API (`sm_86` by default; tested on an RTX 3070 Ti Laptop, GA104) | vectorized K-quant matvec (4 rows per warp), key-split attention; kernels compiled to PTX by clang, no CUDA toolkit |
+| Metal | `metal` | unified-memory macOS GPU; tested on Apple M1 | request-owned decode batching, f32 tiled prefill, fused FFN/residual-norm, online causal attention; F32/F16/BF16 and Q4_K/Q5_K/Q6_K weights, f32 KV |
+
+### Models
+
+Native GGUF loading dispatches on `general.architecture` and validates
+geometry, tensor shapes, backend dtypes and file extents before uploading
+weights. Unsupported architectures are rejected, not approximated.
+
+| Architecture | Checkpoint gates | Backends |
+|---|---|---|
+| `llama`, `internlm2` | Bespoke-MiniCheck-7B, TinyLlama 1.1B Chat | all |
+| `gemma4` (text only) | Gemma 4 E2B IT | CPU, Metal, ROCm, Vulkan, CUDA |
+| `qwen2`, `qwen3`, `qwen2vl` (text only) | NuMarkdown-8B; Qwen3-8B still open | CPU, ROCm |
+| `glm4` | GLM-4-32B-0414 | CPU, ROCm |
+
+[Laya](doc/laya.md) typed decisions (a ModernBERT encoder plus decision
+heads) run on the CPU; the published Laya checkpoint currently fails tokenizer
+loading. See [architectures](doc/architectures.md) for per-model boundaries
+and remaining work.
+
+## Help wanted: test it on your hardware
+
+Each backend has been validated on one or two devices. Reports from other
+hardware are the most useful contribution right now, whether they pass or fail.
+
+| Vendor | Wanted | Backends |
+|---|---|---|
+| AMD | RDNA2 (RX 6000), RDNA3 (RX 7000), RDNA3.5 (Ryzen AI APUs), RDNA4 beyond the R9700, Vega and older APUs | `rocm` (set `MDMA_HIP_OFFLOAD_ARCH=gfx...`), `vulkan` |
+| NVIDIA | Turing, Ada, Hopper, Blackwell, and Ampere beyond the RTX 3070 Ti Laptop | `cuda` (set `MDMA_CUDA_ARCH=sm_...`), `vulkan` |
+| Intel | Arc and other Xe GPUs beyond Meteor Lake | `level0` (set `MDMA_OCLOC_DEVICE=...`), `vulkan` |
+| Apple | M2, M3, M4 | `metal` |
+| Other | FreeBSD hosts, Coral Edge TPUs (detection only for now) | `cpu`, `mdma info` |
+
+```sh
+cargo build --release --features vulkan --bin mdma          # or rocm, cuda, level0, metal
+target/release/mdma info --json > info.json
+target/release/mdma doctor --backend vulkan --json > doctor.json
+cargo test --release --features vulkan                      # fixture-free kernel tests
+```
+
+If you have TinyLlama or Gemma 4 E2B GGUFs, the checkpoint gates in
+[tests](doc/testing.md) say whether the output matches the reference.
+Open an [issue](https://github.com/seuros/mdma/issues) with the two JSON
+files, the test output, and your OS, driver and toolkit versions. The inventory
+does not collect serial numbers or UUIDs.
+
+## Quick start
+
+```sh
+cargo build --release
+target/release/mdma info                  # hardware inventory
+target/release/mdma doctor                # smoke-test compiled backends
+
+# Local greedy generation, no server. Prompts are raw text: supply chat markers yourself.
+target/release/mdma-run /path/to/model.gguf "The capital of France is" 16
+
+# Development certificates: a new CA, a localhost server cert and one client cert in ./certs
+target/release/mdma-certs
+
+MDMA_GGUF_PATH=/path/to/model.gguf \
+MDMA_LISTEN=127.0.0.1:50051 \
+MDMA_TLS_CERT=certs/server.pem MDMA_TLS_KEY=certs/server-key.pem MDMA_TLS_CA=certs/ca.pem \
+  target/release/mdma-serve
+
+MDMA_ADDR=localhost:50051 \
+MDMA_TLS_CERT=certs/client.pem MDMA_TLS_KEY=certs/client-key.pem MDMA_TLS_CA=certs/ca.pem \
+  target/release/mdma-client The capital of France is
+```
+
+Select a GPU with `MDMA_BACKEND=metal|rocm|vulkan|cuda|level0` on a build with
+the matching feature. Use your own PKI beyond localhost.
+
+| Binary | Purpose |
+|---|---|
+| `mdma` | `info`, `doctor`, `plan`, `run` (CPU/GPU layer offloading), `bench`, `node` |
+| `mdma-serve` | mTLS gRPC server, configured by environment variables |
+| `mdma-client` | minimal mTLS client: Introspect, streamed completion or `--decide` |
+| `mdma-certs` | development CA, server and client certificates |
+| `mdma-run` | local greedy generation |
+| `mdma-cache` | prepared ROCm Q4_K weight cache (experimental) |
+| `mdma-bench` | isolated load, memory, prefill and decode measurements |
+| `mdma-laya` | Laya typed decisions from a JSON request |
+
+## Build
+
+Rust 1.99+ (`mise.toml` pins it).
+
+```sh
+cargo build --release                    # CPU backend
+cargo build --release --features rocm    # + HIP backend (needs /opt/rocm; gfx1201 by default,
+                                         #   MDMA_HIP_OFFLOAD_ARCH=gfx... to override)
+cargo build --release --features level0  # + Intel Level Zero (needs ocloc; mtl by default,
+                                         #   MDMA_OCLOC_DEVICE=... to override)
+cargo build --release --features vulkan  # + Vulkan (needs glslangValidator and libvulkan; GLSLANG= to override)
+cargo build --release --features cuda    # + NVIDIA (needs clang with the NVPTX target and libcuda from the driver;
+                                         #   sm_86 by default, MDMA_CUDA_ARCH=sm_... and CLANG= to override)
+cargo build --release --features metal   # + native Metal on macOS 12+, unified-memory GPU
+```
+
+FreeBSD builds need `protoc` on `PATH`. See [backend details](doc/backends.md)
+for kernel compilation and runtime switches.
+
+## Serving
+
+`mdma-serve` refuses to start without mTLS material. It keeps weights resident,
+finishes warm-up before listening and caps each request to its context
+budget. One process can serve several native decoders, Laya checkpoints and
+models on other MDMA nodes from a TOML registry (`MDMA_MODELS`).
+
+```proto
+service Mdma {
+  rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeResponse);  // token stream; `model` names a registry entry
+  rpc Decide(DecideRequest)         returns (DecideResponse);             // Laya typed decisions, JSON in and out
+  rpc Introspect(IntrospectRequest) returns (IntrospectResponse);         // server state, power, and one ModelStatus per model
+}
+```
+
+- [Serving](doc/serving.md): environment variables, memory budgets, model registry, client, power and shutdown.
+- [Services](doc/services.md): systemd, launchd and FreeBSD rc.d templates, warm-up and readiness.
+- [Federation](doc/federation.md): enrollment, signed catalogs, routing and the [runtime switches](doc/federation/routing-runtime.md).
+
+## Tests
+
+```sh
+cargo test --release                              # CPU: unit + kernel tests, no model needed
+cargo test --release --features rocm              # + fixture-free HIP kernel tests; requires an AMD GPU
+cargo test --features metal --lib backend::metal  # macOS GPU tests; no model fixture needed
+```
+
+Tests that load external checkpoints are ignored by default and take model
+paths from `MDMA_TEST_*` variables. See [tests](doc/testing.md) for the
+checkpoint gates and their references.
+
+## Documentation
+
+| Topic | Document |
+|---|---|
+| Architectures and validation boundaries | [doc/architectures.md](doc/architectures.md) |
+| Backend build details and execution modes | [doc/backends.md](doc/backends.md) |
+| Vulkan fusion and tiled attention | [doc/vulkan-fusion.md](doc/vulkan-fusion.md) |
+| Vulkan int8 prefill | [doc/vulkan-int8.md](doc/vulkan-int8.md) |
+| Hardware inventory | [doc/hardware-info.md](doc/hardware-info.md) |
+| `doctor`, `plan`, `run`, `bench` and layer offloading | [doc/runtime-tools.md](doc/runtime-tools.md) |
+| Prepared model cache | [doc/model-cache.md](doc/model-cache.md) |
+| Serving and configuration | [doc/serving.md](doc/serving.md) |
+| Service installation | [doc/services.md](doc/services.md) |
+| Laya typed decisions | [doc/laya.md](doc/laya.md) |
+| Federation | [doc/federation.md](doc/federation.md) |
+| LAN resource discovery POC | [doc/federation/poc-resources.md](doc/federation/poc-resources.md) |
+| Network capability catalog | [doc/network-catalog.md](doc/network-catalog.md) |
+| Tests | [doc/testing.md](doc/testing.md) |
+| Benchmarks | [doc/benchmarks.md](doc/benchmarks.md) |
+| Source layout | [doc/layout.md](doc/layout.md) |
+
+## Roadmap
+
+- **Phones.** Bring mdma to phones so they can take part in the fabric.
+- **Embeddings.** Serve embedding models through the native encoder path
+  that already runs Laya's ModernBERT.
+- **Heterogeneous placement.** Beyond today's CPU-prefix/GPU-suffix split,
+  a composite backend that assigns layers or ops to devices and knows when
+  buffers are shared (unified memory → zero copies). Prerequisite for MoE
+  expert placement and NPU splits.
+- **NPUs (AMD XDNA, Intel NPU)** as prefill or draft-model co-processors
+  behind the placement layer. They stream from the same DDR as the iGPU, so
+  they cannot beat it at memory-bound decode; they can win prefill. Each is
+  its own toolchain (XRT/MLIR-AIE, Level Zero); research item.
+- **Reference activation traces.** Per-layer checkpoint/reference dumps.
+  Current diagnostics use CPU kernel parity and sampled output logits;
+  there is no general activation-dump interface.
+- **CUDA performance.** Profile the existing int8 GEMM and `dp4a` paths
+  across supported GPUs and power limits.
+- **Vulkan prefill.** Improve tile selection and LDS usage on Vega;
+  validate the int8 packed-dot path on RDNA2 hardware.
+
+## License
+
+BSD-2-Clause - see `LICENSE`. Parts of the Vulkan kernels are adapted from
+llama.cpp (MIT); see `LICENSE-llama.cpp`.

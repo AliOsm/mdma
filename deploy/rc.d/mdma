@@ -1,0 +1,39 @@
+#!/bin/sh
+#
+# PROVIDE: mdma
+# REQUIRE: LOGIN
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="mdma"
+rcvar="mdma_enable"
+load_rc_config "$name"
+
+: "${mdma_enable:=NO}"
+: "${mdma_run_user:=mdma}"
+: "${mdma_program:=/usr/local/bin/mdma-serve}"
+: "${mdma_config:=/usr/local/etc/mdma/mdma.env}"
+
+# Stop the supervisor, not the child: daemon forwards TERM and suppresses restart.
+pidfile="/var/run/mdma.pid"
+command="/usr/sbin/daemon"
+procname="/usr/sbin/daemon"
+command_args="-c -f -R 5 -P ${pidfile} -u ${mdma_run_user} -S -T mdma ${mdma_program}"
+required_files="${mdma_config}"
+start_precmd="mdma_prestart"
+
+mdma_prestart()
+{
+    if [ ! -x "${mdma_program}" ]; then
+        warn "${mdma_program} is not executable"
+        return 1
+    fi
+    # This is a root-owned shell configuration file, not untrusted dotenv input.
+    set -a
+    . "${mdma_config}"
+    set +a
+    umask 077
+}
+
+run_rc_command "$1"
