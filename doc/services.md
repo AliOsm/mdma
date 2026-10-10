@@ -216,7 +216,7 @@ Use `MDMA_CACHE=off` again to return to the raw layout.
 For a Metal build, add `--features metal` to the build command and set
 `MDMA_BACKEND` to `metal` in the installed plist. Verify GPU access and
 startup under the service account before enabling it; the Metal kernel
-tests validate an interactive M1 session, not launchd deployment. Shaders
+tests validate an interactive Apple silicon session, not launchd deployment. Shaders
 compile at runtime, without the standalone Metal compiler.
 
 Provision a dedicated non-login **`_mdma` user and `_mdma` group** using

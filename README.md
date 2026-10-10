@@ -4,7 +4,7 @@
 you already own, know exactly where every byte goes, and let those machines
 serve each other privately.
 
-mdma is an inference engine written from scratch in Rust: GGUF loader,
+mdma is an inference engine: GGUF loader,
 tokenizers, transformer decoders, KV cache, sampler, and hand-written compute
 kernels behind one `Backend` trait, served over gRPC with mandatory mTLS.
 
@@ -20,9 +20,8 @@ does not reach that number yet. You can speed it up by
 
 ## Vision
 
-mdma starts from a desk, a closet or a lab full of mismatched machines: a
-workstation with an AMD card, a laptop with an NVIDIA chip, a Mac, an APU box,
-a FreeBSD server. The goal is to make every one of them useful for inference,
+mdma starts from the machines people already have: desktops, laptops, Macs,
+mini PCs and home servers, each with a different GPU or none at all. The goal is to make every one of them useful for inference,
 and to let them work together without handing prompts to anyone you did not
 choose.
 
@@ -30,8 +29,9 @@ choose.
 
 One `Backend` trait, six implementations: CPU (FreeBSD included), ROCm,
 Vulkan (AMD APUs and pre-RDNA3 GPUs through RADV), Level Zero for Intel iGPUs,
-CUDA through the driver API alone (no toolkit), and Metal. The kernels are
-written for mdma, not wrapped from a vendor library.
+CUDA through the driver API alone (no toolkit), and Metal, with a Coral Edge
+TPU backend in progress. The kernels are written for mdma, not wrapped from a
+vendor library.
 
 `mdma info` inventories a machine, `mdma doctor` proves which compiled backends
 actually work on it, and `mdma plan` estimates whether a model fits before
@@ -75,7 +75,7 @@ runs Laya, placement across several devices in one machine, and NPUs as
 prefill co-processors. See the [roadmap](#roadmap).
 
 The compute and memory planes are hand-rolled on purpose; everything else
-(HTTP/gRPC, TLS, serialization, state machines) comes from established crates.
+(HTTP/gRPC, TLS, serialization, state machines) comes from established libraries.
 
 ## What works today
 
@@ -84,11 +84,12 @@ The compute and memory planes are hand-rolled on purpose; everything else
 | Backend | Feature | Hardware | State |
 |---|---|---|---|
 | CPU | `cpu` (default) | any, incl. FreeBSD | reference implementation; every GPU kernel is tested against it |
-| ROCm / HIP | `rocm` | AMD gfx1201 (RDNA4, Radeon AI PRO R9700), ROCm 7.2 | production path; packed int8 GEMV, fused FFN, int8 WMMA GEMM, WMMA flash attention |
-| Level Zero | `level0` | Intel Xe iGPU (Meteor Lake `mtl` by default) | elementwise, RoPE, attention, f32/f16 and Q4_K/Q6_K matvec; tested against the CPU backend |
+| ROCm / HIP | `rocm` | AMD RDNA4 (`gfx1201` by default), ROCm 7.2 | production path; packed int8 GEMV, fused FFN, int8 WMMA GEMM, WMMA flash attention |
+| Level Zero | `level0` | Intel Xe iGPU (`mtl` by default) | elementwise, RoPE, attention, f32/f16 and Q4_K/Q6_K matvec; tested against the CPU backend |
 | Vulkan | `vulkan` | Vulkan 1.2 GPU with buffer-device-address + int64, including AMD APUs and pre-RDNA3 parts via RADV | f32 math, device-local buffers, wave-cooperative matvec and attention, LDS-tiled prefill GEMM; optional f16 staging selected by load-time speed and logit-drift checks (`MDMA_VK_F16_WEIGHTS=auto\|1\|0`) |
-| CUDA | `cuda` | NVIDIA via the driver API (`sm_86` by default; tested on an RTX 3070 Ti Laptop, GA104) | vectorized K-quant matvec (4 rows per warp), key-split attention; kernels compiled to PTX by clang, no CUDA toolkit |
-| Metal | `metal` | unified-memory macOS GPU; tested on Apple M1 | request-owned decode batching, f32 tiled prefill, fused FFN/residual-norm, online causal attention; F32/F16/BF16 and Q4_K/Q5_K/Q6_K weights, f32 KV |
+| CUDA | `cuda` | NVIDIA through the driver API (Ampere `sm_86` by default) | vectorized K-quant matvec (4 rows per warp), key-split attention; kernels compiled to PTX by clang, no CUDA toolkit |
+| Metal | `metal` | Apple silicon (unified memory), macOS 12+ | request-owned decode batching, f32 tiled prefill, fused FFN/residual-norm, online causal attention; F32/F16/BF16 and Q4_K/Q5_K/Q6_K weights, f32 KV |
+| Coral Edge TPU | in progress | PCIe/M.2 and USB Coral | detected by `mdma info` and `mdma doctor` on Linux and FreeBSD; compute backend in progress |
 
 ### Models
 
@@ -115,10 +116,10 @@ hardware are the most useful contribution right now, whether they pass or fail.
 
 | Vendor | Wanted | Backends |
 |---|---|---|
-| AMD | RDNA2 (RX 6000), RDNA3 (RX 7000), RDNA3.5 (Ryzen AI APUs), RDNA4 beyond the R9700, Vega and older APUs | `rocm` (set `MDMA_HIP_OFFLOAD_ARCH=gfx...`), `vulkan` |
-| NVIDIA | Turing, Ada, Hopper, Blackwell, and Ampere beyond the RTX 3070 Ti Laptop | `cuda` (set `MDMA_CUDA_ARCH=sm_...`), `vulkan` |
-| Intel | Arc and other Xe GPUs beyond Meteor Lake | `level0` (set `MDMA_OCLOC_DEVICE=...`), `vulkan` |
-| Apple | M2, M3, M4 | `metal` |
+| AMD | RDNA2 (RX 6000), RDNA3 (RX 7000), RDNA3.5 (Ryzen AI APUs), more RDNA4 cards, Vega and older APUs | `rocm` (set `MDMA_HIP_OFFLOAD_ARCH=gfx...`), `vulkan` |
+| NVIDIA | Turing, Ada, Hopper, Blackwell, and more Ampere cards | `cuda` (set `MDMA_CUDA_ARCH=sm_...`), `vulkan` |
+| Intel | Arc and other Xe GPUs | `level0` (set `MDMA_OCLOC_DEVICE=...`), `vulkan` |
+| Apple | M2, M3, M4 and their Pro/Max/Ultra variants | `metal` |
 | Other | FreeBSD hosts, Coral Edge TPUs (detection only for now) | `cpu`, `mdma info` |
 
 ```sh

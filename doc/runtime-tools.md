@@ -17,7 +17,7 @@ feature and a working driver; they do not silently fall back to CPU.
 Backend names are `cpu`, `vulkan`, `rocm`, `cuda`, `metal` and `level0`.
 
 ROCm embeds kernels for one architecture, defaulting to `gfx1201` (RDNA4).
-For an RX 6800 XT (`gfx1030`, RDNA2), build with:
+For an RDNA2 card (`gfx1030`), build with:
 
 ```sh
 MDMA_HIP_OFFLOAD_ARCH=gfx1030 cargo build --release --features rocm,vulkan --bin mdma
