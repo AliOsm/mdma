@@ -192,7 +192,7 @@ enable model exports or workload grants.
 
 Each unique GGUF is streamed into a private anonymous temporary file while
 hashing its entire contents, including metadata, tokenizer and trailing bytes.
-Aliases share that snapshot and one upload, retaining their own context caps.
+Aliases share that snapshot, one upload and the file's context.
 Source changes during capture fail; later pathname replacement or writes do
 not alter the loaded bytes or their digest. Snapshot files are dropped after
 upload. This requires temporary disk capacity approximately equal to the unique
@@ -227,10 +227,10 @@ use separate [GPU profiles](execution-profile-gpu-v1.md), never a manual CPU lab
 The federation listener reads the **same immutable loaded registry**, power
 receiver and shutdown guard as the native client service. It never calls
 other nodes, transfers models, reopens model paths or invents descriptors from
-grants. CPU Laya remains CPU even in a GPU daemon. Concrete Metal, ROCm and
-Vulkan decoders can export current loader-created GPU profiles; unsupported
+grants. CPU Laya remains CPU even in a GPU daemon. Concrete CUDA, Metal, ROCm
+and Vulkan decoders can export current loader-created GPU profiles; unsupported
 backends cannot invent descriptors from grants.
-Aliases retain their individual context caps while sharing artifact/profile IDs.
+Aliases share the file's context as well as its artifact/profile IDs.
 
 Catalog state follows serving/degraded/critical/draining; native load failures
 also degrade serving state. Critical/draining models are unready. A closed power

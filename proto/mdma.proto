@@ -108,7 +108,7 @@ message ModelGeometry {
 // The admitted request.
 message SynthesizeAccepted {
   uint32 prompt_tokens = 1;
-  // Output cap after context and power limits.
+  // Output cap after context, power and the server's output cap.
   uint32 max_tokens = 2;
   uint32 n_ctx = 3;
 }

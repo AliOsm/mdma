@@ -340,6 +340,14 @@ async fn degraded_clamps_max_tokens_and_reports_power() {
     assert!(tokens.len() <= 4);
     let expected = if tokens.len() == 4 { "max_tokens" } else { "eos" };
     assert_eq!(completed.finish_reason, expected);
+
+    // The lower of the server's output cap and the degraded cap wins.
+    let capped = service.with_max_output_tokens(2);
+    let stream = capped.synthesize(Request::new(proto::SynthesizeRequest {
+        prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(), emit_events: true, chat: false, system: String::new(),
+    })).await.unwrap().into_inner();
+    let messages: Vec<_> = stream.map(Result::unwrap).collect().await;
+    assert_eq!(messages[0].accepted.unwrap().max_tokens, 2);
 }
 
 #[tokio::test]
@@ -363,6 +371,19 @@ async fn emitted_events_report_context_limit_and_zero_output() {
     assert_eq!(accepted.max_tokens + accepted.prompt_tokens, 8);
     let completed = messages.last().unwrap().completed.clone().unwrap();
     assert_matches!(completed.finish_reason.as_str(), "context_limit" | "eos", "{completed:?}");
+
+    // The server's output cap lowers what a request asks for; it ends as
+    // max_tokens, not context_limit, and zero output still only prefills.
+    let capped = service.clone().with_max_output_tokens(3);
+    let run = |prompt: &str, max_tokens| capped.synthesize(Request::new(proto::SynthesizeRequest {
+        prompt: prompt.into(), max_tokens, sampler: None, model: String::new(), emit_events: true, chat: false, system: String::new(),
+    }));
+    let messages: Vec<_> = run("hi", 40).await.unwrap().into_inner().map(Result::unwrap).collect().await;
+    assert_eq!(messages[0].accepted.unwrap().max_tokens, 3);
+    let completed = messages.last().unwrap().completed.clone().unwrap();
+    assert_matches!(completed.finish_reason.as_str(), "max_tokens" | "eos", "{completed:?}");
+    let messages: Vec<_> = run("hello", 0).await.unwrap().into_inner().map(Result::unwrap).collect().await;
+    assert_eq!((messages[0].accepted.unwrap().max_tokens, messages.len()), (0, 2));
 }
 
 #[tokio::test]

@@ -194,8 +194,8 @@ for kernel compilation and runtime switches.
 ## Serving
 
 `mdma-serve` refuses to start without mTLS material. It loads each model on its
-first use, warms it up and keeps it resident, and caps each request to its
-context budget. One process serves every GGUF and Laya checkpoint in a folder
+first use, warms it up and keeps it resident, and gives each model the context
+it was trained for, capping each request's output (`MDMA_MAX_OUTPUT_TOKENS`). One process serves every GGUF and Laya checkpoint in a folder
 (`MDMA_MODELS_DIR`); other MDMA nodes' models are reached through federation.
 
 ```proto

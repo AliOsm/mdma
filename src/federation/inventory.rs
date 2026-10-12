@@ -52,6 +52,8 @@ pub(crate) struct Native<B: Backend> {
     pub shutdown: Option<WeakShutdownGuard>,
     pub power: Option<(watch::Receiver<PowerStatus>, DegradedLimits)>,
     pub host: Arc<Host>,
+    /// The service's output cap, advertised as `max_output_tokens`.
+    pub max_output_tokens: usize,
 }
 
 impl<B> Inventory for Native<B>
@@ -122,9 +124,9 @@ where
                     let (n_ctx, output) = match power {
                         Some((power, caps, _)) if power.state == crate::power::ServerState::Degraded => {
                             let n_ctx = n_ctx.min(caps.n_ctx);
-                            (n_ctx, n_ctx.min(caps.max_tokens))
+                            (n_ctx, n_ctx.min(caps.max_tokens).min(self.max_output_tokens))
                         }
-                        _ => (n_ctx, n_ctx),
+                        _ => (n_ctx, n_ctx.min(self.max_output_tokens)),
                     };
                     let (Ok(n_ctx), Ok(max_output_tokens)) =
                         (u32::try_from(n_ctx), u32::try_from(output))

@@ -4,7 +4,8 @@ use rama::net::address::SocketAddress;
 use std::env::VarError;
 use std::time::Duration;
 
-const DEFAULT_N_CTX: u32 = 4096;
+/// Output tokens one request may ask for; its KV is reserved up front.
+const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
 /// "mdma" on a phone keypad.
 const DEFAULT_LISTEN: &str = "127.0.0.1:6362";
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u32 = 30;
@@ -35,7 +36,10 @@ pub(super) struct Config {
     /// Validated on every build so `MDMA_HIP_F32` typos fail startup; read by ROCm.
     #[cfg_attr(not(any(feature = "rocm", test)), expect(dead_code, reason = "consumed only by the ROCm backend"))]
     pub rocm_f32: bool,
-    pub n_ctx: usize,
+    /// MDMA_N_CTX lowers every model's context; `None` uses each model's trained context.
+    pub n_ctx: Option<usize>,
+    /// MDMA_MAX_OUTPUT_TOKENS: the most tokens one request may generate.
+    pub max_output_tokens: usize,
     pub native_tensor_bytes: Option<usize>,
     pub device_buffer_bytes: Option<usize>,
     pub host_buffer_bytes: Option<usize>,
@@ -74,6 +78,14 @@ impl Config {
                 return Err(format!("{name} must be between 1 and {max}").into());
             }
             Ok(value)
+        };
+        let optional_positive = |name: &str, max: u32| -> Result<Option<u32>, BoxError> {
+            match env(name) {
+                Ok(value) => value.parse::<u32>().ok().filter(|n| (1..=max).contains(n)).map(Some)
+                    .ok_or_else(|| format!("{name} must be between 1 and {max}").into()),
+                Err(VarError::NotPresent) => Ok(None),
+                Err(e) => Err(format!("{name}: {e}").into()),
+            }
         };
         let percentage = |name: &str, default: u8, max: u8| -> Result<u8, BoxError> {
             match env(name) {
@@ -207,7 +219,8 @@ impl Config {
             node,
             backend,
             rocm_f32,
-            n_ctx: positive("MDMA_N_CTX", DEFAULT_N_CTX, u32::MAX)? as usize,
+            n_ctx: optional_positive("MDMA_N_CTX", u32::MAX)?.map(|n| n as usize),
+            max_output_tokens: positive("MDMA_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS, u32::MAX)? as usize,
             native_tensor_bytes,
             device_buffer_bytes,
             host_buffer_bytes,

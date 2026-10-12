@@ -68,7 +68,7 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
     drop(listener);
     let serve_log = dir.path().join("serve.log");
     let server = Process(command(env!("CARGO_BIN_EXE_mdma-serve"))
-        .env("MDMA_MODELS_DIR", &models).env("MDMA_N_CTX", "64").env("MDMA_BACKEND", "cpu")
+        .env("MDMA_MODELS_DIR", &models).env("MDMA_MAX_OUTPUT_TOKENS", "4").env("MDMA_BACKEND", "cpu")
         .env("MDMA_LISTEN", serve_addr.to_string()).env("MDMA_POWER", "off")
         .env("MDMA_OPERATOR_SPKI", &pin).env("MDMA_NODE_NAME", "e2e-node")
         .env("MDMA_TLS_CERT", certs.join("server.pem"))
@@ -129,11 +129,13 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
         "POST /playground/run HTTP/1.1\r\nHost: {host}\r\nCookie: {cookie}\r\nOrigin: {origin}\r\nDatastar-Request: true\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()), |_| false);
     assert!(status_line(&run("http://attacker.example", "{}")).contains("403"), "cross-origin POST is refused");
-    let generated = run(&format!("http://{host}"), r#"{"prompt":"hi","model":"tiny","max_tokens":4,"temperature":0}"#);
+    // Asks for 8; the server's output cap admits 4.
+    let generated = run(&format!("http://{host}"), r#"{"prompt":"hi","model":"tiny","max_tokens":8,"temperature":0}"#);
     assert!(status_line(&generated).contains("200"), "{generated}");
     assert!(generated.contains("event: datastar-patch-elements"), "{generated}");
     assert!(generated.contains(r#""phase":"loading""#), "the first use loads the model: {generated}");
-    assert!(generated.contains(r#""phase":"prefill""#) && generated.contains(r#""n_ctx":64"#), "{generated}");
+    assert!(generated.contains(r#""phase":"prefill""#), "{generated}");
+    assert!(generated.contains(r#""max_tokens":4,"n_ctx":64"#), "the trained context, the capped output: {generated}");
     assert!(generated.contains(r#""emitted":4"#), "four tokens decode: {generated}");
     assert!(generated.contains(r#""phase":"done""#), "{generated}");
     // Server lifecycle events (emit_events): the admitted prompt and how it ended.

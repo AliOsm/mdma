@@ -44,6 +44,8 @@ pub struct MdmaService<B: Backend> {
     /// Pins allowed to see the federation topology.
     operators: Arc<[String]>,
     host: Arc<Host>,
+    /// The most tokens one request may generate; its KV is reserved up front.
+    max_output_tokens: usize,
 }
 
 impl<B: Backend> Clone for MdmaService<B> {
@@ -60,6 +62,7 @@ impl<B: Backend> Clone for MdmaService<B> {
             topology: self.topology.clone(),
             operators: self.operators.clone(),
             host: self.host.clone(),
+            max_output_tokens: self.max_output_tokens,
         }
     }
 }
@@ -85,8 +88,15 @@ impl<B: Backend> MdmaService<B> {
         Self {
             backend: registry.backend().clone(), registry: Arc::new(registry), backend_name, shutdown: None, power: None, routes: None,
             memory: None, active: Arc::default(), topology: None, operators: Arc::default(),
-            host: Arc::default(),
+            host: Arc::default(), max_output_tokens: usize::MAX,
         }
+    }
+
+    /// Caps every request's output; asking for more is lowered, not refused.
+    #[must_use]
+    pub const fn with_max_output_tokens(mut self, tokens: usize) -> Self {
+        self.max_output_tokens = tokens;
+        self
     }
 
     pub const fn registry(&self) -> &Arc<Registry<B>> {
@@ -135,12 +145,17 @@ impl<B: Backend> MdmaService<B> {
         B: Send + Sync + 'static,
         B::Buf: Send + Sync,
     {
-        Arc::new(crate::federation::inventory::Native {
+        Arc::new(self.inventory())
+    }
+
+    fn inventory(&self) -> crate::federation::inventory::Native<B> {
+        crate::federation::inventory::Native {
             registry: self.registry.clone(),
             shutdown: self.shutdown.clone(),
             power: self.power.clone(),
             host: self.host.clone(),
-        })
+            max_output_tokens: self.max_output_tokens,
+        }
     }
 
     pub(crate) fn federation_executor(&self) -> Arc<dyn crate::federation::execution::Executor>
@@ -153,12 +168,7 @@ impl<B: Backend> MdmaService<B> {
             // Dedicated bounded federation Laya request scratch; ordinary
             // Laya/weights remain outside the decoder's shared tensor budget.
             decision_budget: crate::memory::NativeMemoryBudget::new(128 * 1024 * 1024),
-            inventory: crate::federation::inventory::Native {
-                registry: self.registry.clone(),
-                shutdown: self.shutdown.clone(),
-                power: self.power.clone(),
-                host: self.host.clone(),
-            },
+            inventory: self.inventory(),
         })
     }
 
@@ -200,13 +210,15 @@ impl<B: Backend> MdmaService<B> {
         Ok(())
     }
 
-    /// The admission decision every request shares: refused while
-    /// draining or critical, capped while degraded. Returns the
-    /// (max_tokens, n_ctx) to run with; `n_ctx` is the caller's cap.
+    /// The admission decision every request shares: output capped by
+    /// `max_output_tokens`, refused while draining or critical, capped further
+    /// while degraded. Returns the (max_tokens, n_ctx) to run with; `n_ctx` is
+    /// the caller's cap.
     fn admit(&self, prompt_tokens: impl FnOnce() -> Result<usize, Status>, max_tokens: usize, n_ctx: usize) -> Result<(usize, usize), Status> {
         if self.shutting_down() {
             return Err(Status::unavailable("server is shutting down"));
         }
+        let max_tokens = max_tokens.min(self.max_output_tokens);
         // Read once per request; a state change mid-stream does not cut it off.
         let power = self.power_status();
         match power.state {

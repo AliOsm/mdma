@@ -301,6 +301,18 @@ export function stateRole(state) {
 export const RING_CELLS = 2048
 export const RING_PER_ROW = 128
 
+/**
+ * KV memory of a generation: per token until the server admits it, then what
+ * it reserved up front, one row per position it may reach.
+ */
+export function reservedKv(gen) {
+  const perToken = gen.kv_bytes_per_token ?? 0
+  if (!perToken) return ''
+  if (!gen.prompt_tokens) return `${bytes(perToken)} KV per token`
+  const rows = gen.prompt_tokens + Math.max(0, (gen.max_tokens ?? 0) - 1)
+  return `${bytes(perToken * rows)} KV reserved`
+}
+
 /** The context window as a tube of cells; one cell covers `perCell` positions. */
 export function contextRing(nCtx, maxCells = RING_CELLS) {
   const positions = Math.max(1, nCtx || 1)

@@ -128,6 +128,11 @@ fn preflight_reads_metadata_once_per_file_and_uploads_nothing() {
     let info = registry.info("m1").unwrap();
     assert_eq!((info.kind, info.architecture.as_str(), info.n_ctx), (Kind::Gguf, "internlm2", 16));
     assert_eq!(info.disk_bytes, file.as_file().metadata().unwrap().len());
+    // Uncapped, a model gets its trained context; a cap never raises it.
+    for cap in [usize::MAX, 1000] {
+        let uncapped = Registry::new(backend.clone(), models(&[file.path()]), None, Options::new(cap)).unwrap();
+        assert_eq!(uncapped.info("m0").unwrap().n_ctx, 64, "cap {cap}");
+    }
     assert_eq!((backend.allocations.get(), backend.uploads.get()), (0, 0));
     assert!(registry.resident("m0").is_none());
 }
@@ -531,7 +536,9 @@ where
     for (&actual, &expected) in actual.iter().zip(&expected) {
         assert!(actual.is_finite() && (actual - expected).abs() < 2e-3, "{actual} != {expected}");
     }
-    let inventory = crate::federation::inventory::Native { registry: Arc::new(gpu), shutdown: None, power: None, host: Arc::default() };
+    let inventory = crate::federation::inventory::Native {
+        registry: Arc::new(gpu), shutdown: None, power: None, host: Arc::default(), max_output_tokens: usize::MAX,
+    };
     let snapshot = crate::federation::inventory::Inventory::snapshot(&inventory, &["m0".into(), "m1".into()]);
     assert_eq!(snapshot.models.len(), 2, "actual current GPU profiles can be cataloged");
     assert!(snapshot.models.iter().all(|m| m.backend != "cpu"));

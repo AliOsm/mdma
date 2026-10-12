@@ -1,6 +1,6 @@
 // The three views.
 import * as THREE from 'three'
-import { CHIP_BOND, bytes, cellPosition, cellState, contextRing, federationLayout, hostLine, isUp, layerBands, memoryLayout, osRole, resources, stateRole } from './layout.js'
+import { CHIP_BOND, bytes, cellPosition, cellState, contextRing, federationLayout, hostLine, isUp, layerBands, memoryLayout, osRole, reservedKv, resources, stateRole } from './layout.js'
 
 const SEGMENT_ROLE = { weights: 'series-1', kv: 'series-2', workspace: 'series-3' }
 /** How a model atom shows its residency. */
@@ -165,8 +165,8 @@ export class PlaygroundView {
     this.mesh = new THREE.InstancedMesh(geometry, new THREE.MeshStandardMaterial({ roughness: 0.6 }), this.ring.cells)
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     stage.content.add(this.mesh)
-    const kv = this.gen.kv_bytes_per_token ? ` · ${bytes(this.gen.kv_bytes_per_token * this.nCtx())} KV when full` : ''
-    stage.label(['context window', `${this.nCtx()} positions${this.ring.perCell > 1 ? ` · ${this.ring.perCell} per cell` : ''}${kv}`], [0, this.ring.rows * 0.14 + 0.6, 0], 'device')
+    const kv = reservedKv(this.gen)
+    stage.label(['context window', `${this.nCtx()} positions${this.ring.perCell > 1 ? ` · ${this.ring.perCell} per cell` : ''}${kv ? ` · ${kv}` : ''}`], [0, this.ring.rows * 0.14 + 0.6, 0], 'device')
     stage.label(['prompt'], [-5.2, 0, 0], 'legend prompt', [1, 0.5])
     stage.label(['generated'], [5.2, 0, 0], 'legend generated', [0, 0.5])
     this.paint()

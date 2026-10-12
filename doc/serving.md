@@ -13,7 +13,6 @@ MDMA_TLS_CERT=certs/server.pem \
 MDMA_TLS_KEY=certs/server-key.pem \
 MDMA_TLS_CA=certs/ca.pem \
 MDMA_BACKEND=rocm \
-MDMA_N_CTX=4096 \
 cargo run --release --features rocm --bin mdma-serve
 ```
 
@@ -23,11 +22,14 @@ Clients default to `MDMA_ADDR=localhost:6362`.
 
 `MDMA_BACKEND` accepts `cpu` (default), `rocm`, `level0`, `vulkan`, `cuda`,
 or `metal`, with the corresponding build feature and supported hardware.
-`MDMA_N_CTX` defaults to 4096 and caps each native request's prompt plus
-output, bounded by the model's trained context. Output is capped to the
-remaining space; prompts that leave no room for requested output are
-rejected. Explicit invalid configuration values fail startup.
-Context rejection is reported as gRPC `RESOURCE_EXHAUSTED`, before tensor allocation.
+Each model uses the context it was trained for (`<arch>.context_length` in its
+GGUF); `MDMA_N_CTX` optionally lowers it for every model and never raises it. A
+prompt must fit that context. Output is capped by the space left and by
+`MDMA_MAX_OUTPUT_TOKENS` (default 4096): asking for more is lowered, not refused,
+and the `accepted` event reports the cap. Prompts that leave no room for
+requested output are rejected. Explicit invalid configuration values fail
+startup. Context rejection is reported as gRPC `RESOURCE_EXHAUSTED`, before
+tensor allocation.
 
 `mdma-serve` opens its listener once the models folder is read; it loads no
 weights at startup. A model loads on its first use (one load at a time per
@@ -40,7 +42,10 @@ it `failed`. Temporary KV/workspace/graphs do not seed user requests.
 See [service startup and readiness](services.md#startup-warm-up).
 
 Fresh request KV caches are sized to the prompt plus the output tokens
-that actually need evaluation, not the full context limit. One-token
+that actually need evaluation, not the full context limit, and are reserved up
+front for that whole case; the output cap is what bounds it. With 128 KiB of
+f16 KV per token (a 7B model on CUDA), a 4096-token cap reserves at most about
+512 MiB beyond the prompt's share. One-token
 verdicts use prefill logits directly, without a decode workspace, graph,
 or extra forward pass. Allocation runs on the blocking inference worker;
 allocation/backend failures are reported through the response stream.
@@ -113,7 +118,7 @@ model that does not fit in memory stays `available` with its `error` and is
 retried on the next use; a corrupt file or one changed on disk is `failed`
 until restart and marks the server `degraded`. Names for the **same file**
 (symlinks, hardlinks) share one weight upload and tokenizer; request KV is not
-shared. Every model uses `MDMA_N_CTX`, capped by its trained context.
+shared, and so is the context: the trained one, or `MDMA_N_CTX` when lower.
 
 Vulkan's f16 prefill staging is fixed at startup by `MDMA_VK_F16_WEIGHTS=1`
 (f32 otherwise) and shared by every decoder; it cannot enable a staging

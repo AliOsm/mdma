@@ -85,7 +85,8 @@ where
         };
         let memory = mdma::memory::NativeMemoryBudget::new(config.native_tensor_bytes.unwrap_or_else(|| default_budget(backend_name)));
         let options = mdma::registry::Options {
-            n_ctx: config.n_ctx,
+            // Unset: each model's trained context.
+            n_ctx: config.n_ctx.unwrap_or(usize::MAX),
             warmup_rounds: config.warmup_rounds,
             frozen: federation.is_some(),
             budget: Some(memory.clone()),
@@ -116,6 +117,7 @@ where
             .with_shutdown_guard(guard.clone_weak())
             .with_memory_budget(memory)
             .with_operators(std::mem::take(&mut config.operators))
+            .with_max_output_tokens(config.max_output_tokens)
             .with_host(host);
         if federation.is_some() {
             // Federation names a model by its bytes; hash them before the first load.

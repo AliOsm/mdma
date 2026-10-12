@@ -74,6 +74,7 @@ where
     assert_eq!(manifest["kv_dtype"].as_str(), Some("none"));
     let inventory = crate::federation::inventory::Native {
         registry: std::sync::Arc::new(registry), shutdown: None, power: None, host: std::sync::Arc::default(),
+        max_output_tokens: usize::MAX,
     };
     let snapshot = crate::federation::inventory::Inventory::snapshot(&inventory, &["laya".into()]);
     assert_eq!(snapshot.models.len(), 1);

@@ -202,7 +202,9 @@ Each descriptor contains:
 | `resident` | Weights are loaded now; otherwise the first request loads them. Not part of the selection: routes and admission ignore it |
 
 `synthesize` limits contain positive `n_ctx` and `max_output_tokens`, with
-`max_output_tokens <= n_ctx`. `decide` limits contain positive
+`max_output_tokens <= n_ctx`. A native executor advertises its model's context
+(the trained one, or its `MDMA_N_CTX` when lower) and the lower of that and its
+output cap (`MDMA_MAX_OUTPUT_TOKENS`); both shrink while it is degraded. `decide` limits contain positive
 `max_questions` and `max_result_bytes`, capped at 128 and 524288 respectively.
 Only the matching operation's limit fields are permitted.
 

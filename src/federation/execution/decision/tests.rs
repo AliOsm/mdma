@@ -43,6 +43,7 @@ fn setup_with_budget(
                 shutdown: None,
                 power: None,
                 host: Arc::default(),
+                max_output_tokens: usize::MAX,
             },
             decision_budget: budget,
         });

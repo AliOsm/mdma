@@ -30,7 +30,7 @@
         <string>/usr/local/etc/mdma/ca.pem</string>
         <key>MDMA_BACKEND</key>
         <string>cpu</string>
-        <key>MDMA_N_CTX</key>
+        <key>MDMA_MAX_OUTPUT_TOKENS</key>
         <string>4096</string>
         <key>MDMA_WARMUP_ROUNDS</key>
         <string>2</string>

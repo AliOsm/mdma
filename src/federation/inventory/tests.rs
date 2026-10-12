@@ -54,6 +54,10 @@ fn only_explicit_loaded_exact_identities_are_visible_with_alias_caps() {
     );
     assert_eq!(alias.limits, native.limits, "aliases share the global context");
     assert!(native.resident && alias.resident);
+
+    // The service's output cap is what peers may ask for.
+    let capped = native_service().with_max_output_tokens(8).federation_inventory().snapshot(&exports());
+    assert_eq!(capped.models[0].limits, Limits::Synthesize { n_ctx: 32, max_output_tokens: 8 });
 }
 
 #[test]

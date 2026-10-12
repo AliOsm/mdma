@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { COLUMN_HEIGHT, PEER_SPACING, RING_LIMIT, bytes, residency, residencyNote, cellPosition, cellState, contextRing, federationLayout, hostLine, isUp, layerBands, memoryLayout, osRole, peerShell, resources, share, stateRole } from './layout.js'
+import { COLUMN_HEIGHT, PEER_SPACING, RING_LIMIT, bytes, reservedKv, residency, residencyNote, cellPosition, cellState, contextRing, federationLayout, hostLine, isUp, layerBands, memoryLayout, osRole, peerShell, resources, share, stateRole } from './layout.js'
 import { stubStatus } from './stub.js'
 
 const MiB = 1024 ** 2
@@ -211,5 +211,15 @@ describe('residency', () => {
     const catalog = federationLayout({ status: { models: [model('here', { residency: 'failed' })], federation: topology } })
     expect(catalog.peers[0].chips.map((c) => [c.name, c.residency])).toEqual([['big', 'resident'], ['small', 'available']])
     expect(catalog.self.chips[0]).toMatchObject({ residency: 'failed', note: 'failed' })
+  })
+})
+
+describe('reservedKv', () => {
+  test('per token until admitted, then one row per position the request may reach', () => {
+    const KiB = 1024
+    expect(reservedKv({})).toBe('')
+    expect(reservedKv({ kv_bytes_per_token: 128 * KiB })).toBe('128.0 KiB KV per token')
+    expect(reservedKv({ kv_bytes_per_token: 128 * KiB, prompt_tokens: 12, max_tokens: 4096 })).toBe('513.4 MiB KV reserved')
+    expect(reservedKv({ kv_bytes_per_token: 128 * KiB, prompt_tokens: 12, max_tokens: 0 })).toBe('1.5 MiB KV reserved')
   })
 })

@@ -27,7 +27,8 @@ fn defaults_and_overrides() {
     let config = load(&env).unwrap();
     assert_eq!(config.backend, "cpu");
     assert!(!config.rocm_f32);
-    assert_eq!(config.n_ctx, 4096);
+    assert_eq!(config.n_ctx, None, "each model's trained context");
+    assert_eq!(config.max_output_tokens, 4096, "bounds a request's up-front KV");
     assert_eq!(config.native_tensor_bytes, None);
     assert_eq!(config.device_buffer_bytes, None);
     assert_eq!(config.host_buffer_bytes, None);
@@ -37,13 +38,15 @@ fn defaults_and_overrides() {
     assert!(config.federation_config.is_none());
     env.insert("MDMA_BACKEND", "rocm".into());
     env.insert("MDMA_N_CTX", "128".into());
+    env.insert("MDMA_MAX_OUTPUT_TOKENS", "512".into());
     env.insert("MDMA_NATIVE_TENSOR_BYTES", "8589934592".into());
     env.insert("MDMA_DEVICE_BUFFER_BYTES", "17179869184".into());
     env.insert("MDMA_HOST_BUFFER_BYTES", "1073741824".into());
     env.insert("MDMA_SHUTDOWN_TIMEOUT_SECS", "90".into());
     let config = load(&env).unwrap();
     assert_eq!(config.backend, "rocm");
-    assert_eq!(config.n_ctx, 128);
+    assert_eq!(config.n_ctx, Some(128));
+    assert_eq!(config.max_output_tokens, 512);
     assert_eq!(config.native_tensor_bytes, Some(8 * 1024 * 1024 * 1024));
     assert_eq!(config.device_buffer_bytes, Some(16 * 1024 * 1024 * 1024));
     assert_eq!(config.host_buffer_bytes, Some(1024 * 1024 * 1024));
@@ -171,7 +174,7 @@ fn required_values_cannot_be_missing_or_blank() {
 
 #[test]
 fn invalid_numeric_configuration_is_not_silently_defaulted() {
-    for key in ["MDMA_N_CTX", "MDMA_SHUTDOWN_TIMEOUT_SECS"] {
+    for key in ["MDMA_N_CTX", "MDMA_MAX_OUTPUT_TOKENS", "MDMA_SHUTDOWN_TIMEOUT_SECS"] {
         for value in ["", "0", "-1", "many", "1.5", "4294967296"] {
             let mut env = environment();
             env.insert(key, value.into());
@@ -265,7 +268,7 @@ fn partial_power_override_keeps_other_defaults() {
 fn numeric_settings_do_not_default_non_unicode_values() {
     let env = environment();
     for key in [
-        "MDMA_N_CTX", "MDMA_SHUTDOWN_TIMEOUT_SECS",
+        "MDMA_N_CTX", "MDMA_MAX_OUTPUT_TOKENS", "MDMA_SHUTDOWN_TIMEOUT_SECS",
         "MDMA_WARMUP_ROUNDS",
         "MDMA_POWER_POLL_SECS", "MDMA_POWER_DEBOUNCE",
         "MDMA_POWER_CRITICAL_PCT", "MDMA_POWER_GPU_CAP_PCT",
