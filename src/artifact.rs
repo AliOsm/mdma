@@ -51,6 +51,26 @@ fn freeze_file_with(mut source: File, after_copy: impl FnOnce()) -> io::Result<(
     ))
 }
 
+/// The same digest as a frozen copy, read in place with positional reads so a
+/// concurrent loader's file offset is untouched. Fails if the file changes meanwhile.
+pub(crate) fn hash_at(file: &File) -> io::Result<ArtifactId> {
+    use std::os::unix::fs::FileExt;
+    let stamp = Stamp::read(&file.metadata()?)?;
+    let mut hash = Sha256::new();
+    let mut chunk = vec![0; 1024 * 1024];
+    let mut offset = 0;
+    loop {
+        let n = file.read_at(&mut chunk, offset)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&chunk[..n]);
+        offset += n as u64;
+    }
+    stamp.check(file.metadata()?)?;
+    Ok(ArtifactId(format!("sha256:{}", hex::encode(hash.finalize()))))
+}
+
 /// Logical paths are fixed by the consuming loader, never supplied by a
 /// manifest or filesystem traversal. Hash the original bytes before parsing
 /// or tokenizer canonicalization.

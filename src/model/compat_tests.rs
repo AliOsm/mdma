@@ -270,12 +270,11 @@ fn compat_rejects_bad_metadata_and_missing_tensors() {
 
 #[test]
 fn registry_compat_caps_reported_context_to_model_limit() {
-    use crate::registry::{Entry, ModelsFile, Registry};
+    use crate::registry::{Options, Registry, Source};
     for gemma in [false, true] {
         let f = fixture(gemma).write();
-        let registry = Registry::load(&CpuBackend, &ModelsFile::single_gguf(f.0.to_str().unwrap()), 2048, |_| {}).unwrap();
-        let Entry::Decoder(decoder) = &registry.default_model().entry else { panic!("expected decoder") };
-        assert_eq!(decoder.n_ctx, 16);
+        let registry = Registry::new(std::sync::Arc::new(CpuBackend), vec![("m".into(), Source::Gguf(f.0.clone()))], None, Options::new(2048)).unwrap();
+        assert_eq!(registry.info("").unwrap().n_ctx, 16);
     }
 }
 

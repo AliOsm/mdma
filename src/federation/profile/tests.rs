@@ -152,7 +152,7 @@ fn dropped_gpu_backend_withdraws_retained_provenance() {
     assert!(!snapshot.current());
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn running_executable_digest_matches_the_complete_kernel_backed_descriptor() {
     let captured = ExecutorIdentity::capture().unwrap();
@@ -163,7 +163,7 @@ fn running_executable_digest_matches_the_complete_kernel_backed_descriptor() {
     assert_eq!(captured.build_id(), format!("sha256:{expected}"));
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[test]
 fn executable_replacement_and_unlink_never_hash_the_new_path() {
     use std::os::unix::fs::PermissionsExt;
@@ -197,7 +197,7 @@ fn executable_replacement_and_unlink_never_hash_the_new_path() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd"))]
 #[test]
 #[ignore = "private subprocess executable mutation probe only"]
 fn child_image_probe() {

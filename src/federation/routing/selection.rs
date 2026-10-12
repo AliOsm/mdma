@@ -36,7 +36,7 @@ impl Route {
             .map_err(|_| config::Error::Policy("invalid route peer".into()))?;
         Ok(())
     }
-    fn action(&self) -> Action<'_> {
+    pub(crate) fn action(&self) -> Action<'_> {
         Action::Import {
             model: &self.model,
             artifact_id: &self.artifact_id,
@@ -77,7 +77,7 @@ impl Selection {
         cache: &Cache,
         route: &Route,
         request: &Request<T>,
-    ) -> Result<ModelDescriptor, Status> {
+    ) -> Result<(ModelDescriptor, crate::grpc::Host), Status> {
         let caller = request
             .extensions()
             .get_ref::<TransportIngress<Extensions>>()
@@ -129,7 +129,7 @@ impl Selection {
                 Instant::now(),
             )
             .map_err(|_| denied())?;
-        Ok(descriptor)
+        Ok((descriptor, catalog.host))
     }
 
     pub(crate) fn new<T>(
@@ -288,7 +288,7 @@ impl Selection {
             || !catalog
                 .models
                 .iter()
-                .any(|d| d == &self.descriptor && d.ready)
+                .any(|d| d.same_selection(&self.descriptor) && d.ready)
         {
             return Err(Status::failed_precondition("selection_changed"));
         }

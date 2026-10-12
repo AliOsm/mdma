@@ -11,6 +11,8 @@
 use crate::federation::canonical_json::{self, Value};
 use crate::federation::server_id;
 use crate::federation::signing::{self, KeyPairHandle};
+use crate::grpc::Host;
+use crate::registry::{Capability, Class};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::collections::{BTreeMap, HashSet};
@@ -78,7 +80,7 @@ impl Kind {
         }
     }
 
-    /// `synthesize` for GGUF, `decide` for Laya; never `upstream`.
+    /// `synthesize` for GGUF, `decide` for Laya.
     pub fn operation(&self) -> &'static str {
         match self {
             Self::Gguf => "synthesize",
@@ -148,9 +150,19 @@ pub struct ModelDescriptor {
     pub ready: bool,
     pub max_input_bytes: u32,
     pub limits: Limits,
+    pub class: Class,
+    /// In `Capability` order, no repeats.
+    pub capabilities: Vec<Capability>,
+    /// The weights are loaded; otherwise the first request loads them.
+    pub resident: bool,
 }
 
 impl ModelDescriptor {
+    /// The same model and limits, whether or not it is loaded right now.
+    pub fn same_selection(&self, other: &Self) -> bool {
+        *self == Self { resident: self.resident, ..other.clone() }
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
         if self.model.is_empty() || self.model.len() > MAX_MODEL_NAME_BYTES {
             return Err(Error::InvalidField("model"));
@@ -168,6 +180,9 @@ impl ModelDescriptor {
         }
         if self.max_input_bytes == 0 || self.max_input_bytes > MAX_MAX_INPUT_BYTES {
             return Err(Error::InvalidField("max_input_bytes"));
+        }
+        if !self.capabilities.is_sorted_by(|a, b| a < b) {
+            return Err(Error::InvalidField("capabilities"));
         }
         match (self.kind, &self.limits) {
             (Kind::Gguf, Limits::Synthesize { n_ctx, max_output_tokens }) => {
@@ -210,6 +225,9 @@ impl ModelDescriptor {
             ("ready".into(), Value::Bool(self.ready)),
             ("max_input_bytes".into(), Value::Integer(i64::from(self.max_input_bytes))),
             ("limits".into(), Value::Object(limits)),
+            ("class".into(), Value::String(self.class.as_str().into())),
+            ("capabilities".into(), Value::Array(self.capabilities.iter().map(|c| Value::String(c.as_str().into())).collect())),
+            ("resident".into(), Value::Bool(self.resident)),
         ];
         Value::object(fields).expect("static field set has no duplicate keys")
     }
@@ -229,6 +247,9 @@ impl ModelDescriptor {
                 "ready",
                 "max_input_bytes",
                 "limits",
+                "class",
+                "capabilities",
+                "resident",
             ],
         )?;
         let model = field_str(obj, "model")?;
@@ -261,10 +282,55 @@ impl ModelDescriptor {
                 }
             }
         };
-        let descriptor = Self { model, kind, artifact_id, profile_id, architecture, backend, ready, max_input_bytes, limits };
+        let class = Class::parse(&field_str(obj, "class")?).ok_or(Error::InvalidField("class"))?;
+        let capabilities = obj.get("capabilities").and_then(Value::as_array).ok_or(Error::MissingField("capabilities"))?
+            .iter()
+            .map(|c| c.as_str().and_then(Capability::parse).ok_or(Error::InvalidField("capabilities")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let resident = obj.get("resident").and_then(Value::as_bool).ok_or(Error::MissingField("resident"))?;
+        let descriptor = Self { model, kind, artifact_id, profile_id, architecture, backend, ready, max_input_bytes, limits, class, capabilities, resident };
         descriptor.validate()?;
         Ok(descriptor)
     }
+}
+
+fn host_to_canonical(host: &Host) -> Value {
+    let fields: Vec<(String, Value)> = vec![
+        ("name".into(), Value::String(host.name.clone())),
+        ("os".into(), Value::String(host.os.clone())),
+        ("os_name".into(), Value::String(host.os_name.clone())),
+        ("arch".into(), Value::String(host.arch.clone())),
+        ("cpu".into(), Value::String(host.cpu.clone())),
+        ("memory_bytes".into(), Value::Integer(host.memory_bytes.cast_signed())),
+        ("device".into(), Value::String(host.device.clone())),
+        ("memory_available_bytes".into(), Value::Integer(host.memory_available_bytes.cast_signed())),
+        ("device_memory_bytes".into(), Value::Integer(host.device_memory_bytes.cast_signed())),
+        ("device_available_bytes".into(), Value::Integer(host.device_available_bytes.cast_signed())),
+        ("disk_bytes".into(), Value::Integer(host.disk_bytes.cast_signed())),
+        ("disk_available_bytes".into(), Value::Integer(host.disk_available_bytes.cast_signed())),
+    ];
+    Value::object(fields).expect("static field set has no duplicate keys")
+}
+
+fn host_from_canonical(obj: &BTreeMap<String, Value>) -> Result<Host, Error> {
+    reject_unknown_fields(obj, &[
+        "name", "os", "os_name", "arch", "cpu", "memory_bytes", "device", "memory_available_bytes",
+        "device_memory_bytes", "device_available_bytes", "disk_bytes", "disk_available_bytes",
+    ])?;
+    Ok(Host {
+        name: field_str(obj, "name")?,
+        os: field_str(obj, "os")?,
+        os_name: field_str(obj, "os_name")?,
+        arch: field_str(obj, "arch")?,
+        cpu: field_str(obj, "cpu")?,
+        memory_bytes: field_u64(obj, "memory_bytes")?,
+        device: field_str(obj, "device")?,
+        memory_available_bytes: field_u64(obj, "memory_available_bytes")?,
+        device_memory_bytes: field_u64(obj, "device_memory_bytes")?,
+        device_available_bytes: field_u64(obj, "device_available_bytes")?,
+        disk_bytes: field_u64(obj, "disk_bytes")?,
+        disk_available_bytes: field_u64(obj, "disk_available_bytes")?,
+    })
 }
 
 fn validate_digest(s: &str) -> Result<(), ()> {
@@ -311,6 +377,8 @@ pub struct CatalogBody {
     pub expires_at_ms: u64,
     pub server_state: ServerState,
     pub models: Vec<ModelDescriptor>,
+    /// The machine the origin runs on.
+    pub host: Host,
 }
 
 impl CatalogBody {
@@ -325,6 +393,9 @@ impl CatalogBody {
         }
         if self.models.len() > MAX_DESCRIPTORS {
             return Err(Error::TooManyModels(self.models.len()));
+        }
+        if !crate::host::is_valid(&self.host) {
+            return Err(Error::InvalidField("host"));
         }
         let mut seen = HashSet::new();
         for model in &self.models {
@@ -349,13 +420,14 @@ impl CatalogBody {
             ("expires_at_ms".into(), Value::Integer(self.expires_at_ms.cast_signed())),
             ("server_state".into(), Value::String(self.server_state.as_str().into())),
             ("models".into(), Value::Array(self.models.iter().map(ModelDescriptor::to_canonical).collect())),
+            ("host".into(), host_to_canonical(&self.host)),
         ];
         Value::object(fields).expect("static field set has no duplicate keys")
     }
 
     pub fn from_canonical(value: &Value) -> Result<Self, Error> {
         let obj = value.as_object().ok_or(Error::InvalidField("body"))?;
-        reject_unknown_fields(obj, &["type", "origin", "destination", "nonce", "issued_at_ms", "expires_at_ms", "server_state", "models"])?;
+        reject_unknown_fields(obj, &["type", "origin", "destination", "nonce", "issued_at_ms", "expires_at_ms", "server_state", "models", "host"])?;
         if field_str(obj, "type")? != CATALOG_TYPE {
             return Err(Error::WrongType);
         }
@@ -367,7 +439,8 @@ impl CatalogBody {
         let server_state = ServerState::parse(&field_str(obj, "server_state")?)?;
         let models_v = obj.get("models").and_then(Value::as_array).ok_or(Error::MissingField("models"))?;
         let models = models_v.iter().map(ModelDescriptor::from_canonical).collect::<Result<Vec<_>, _>>()?;
-        let body = Self { origin, destination, nonce, issued_at_ms, expires_at_ms, server_state, models };
+        let host = host_from_canonical(obj.get("host").and_then(Value::as_object).ok_or(Error::MissingField("host"))?)?;
+        let body = Self { origin, destination, nonce, issued_at_ms, expires_at_ms, server_state, models, host };
         body.validate()?;
         Ok(body)
     }

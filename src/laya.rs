@@ -7,6 +7,11 @@ pub mod config;
 pub mod model;
 pub mod predictor;
 mod sources;
+
+/// The digest a frozen load of this checkpoint would report.
+pub(crate) fn artifact_id(dir: &std::path::Path) -> std::io::Result<crate::artifact::ArtifactId> {
+    sources::Sources::capture(dir).map(|sources| sources.id())
+}
 pub mod prompt;
 pub mod pyjson;
 pub mod tokenizer;

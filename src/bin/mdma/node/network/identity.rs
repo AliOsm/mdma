@@ -82,11 +82,10 @@ fn platform(nic: &mut proto::NetworkInterface) -> Option<proto::NetworkHardwareI
         let key = format!("net.wlan.{unit}.%parent");
         if let Some(parent) = command("/sbin/sysctl", &["-n", &key]) {
             name = parent.trim().into();
-        } else if let Some(output) = command("/sbin/ifconfig", &["-v", &name]) {
-            if let Some(parent) = output.lines().find_map(|line|
+        } else if let Some(output) = command("/sbin/ifconfig", &["-v", &name])
+            && let Some(parent) = output.lines().find_map(|line|
                 line.trim().strip_prefix("parent interface: ").map(str::trim)) {
-                name = parent.into();
-            }
+            name = parent.into();
         }
     }
     let identity = freebsd_pci(pci, &name)?;

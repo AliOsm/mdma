@@ -1,0 +1,12 @@
+{
+  "name": "mdma-web-scene",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/main.js --minify --target=browser --outfile=../src/bin/mdma-web/assets/scene.js",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "three": "0.186.0"
+  }
+}

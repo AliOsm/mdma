@@ -1,0 +1,23 @@
+[Unit]
+Description=MDMA browser UI (loopback gateway to the local server)
+After=mdma.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/mdma/web.env
+ExecStart=%h/.local/bin/mdma-web
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+KillSignal=SIGTERM
+UMask=0077
+LimitCORE=0
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mdma-web
+
+[Install]
+WantedBy=default.target

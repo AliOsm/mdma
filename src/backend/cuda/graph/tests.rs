@@ -24,7 +24,7 @@ fn capture<'a>(
 #[test]
 #[ignore = "requires MDMA_TEST_GGUF and CUDA hardware"]
 fn graph_matches_eager_with_changing_tokens_positions_and_sessions() {
-    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let backend = CudaBackend::new().unwrap().with_attn_chunk(37);
     let model = Model::load(&backend, &mut GgufModel::open(fixture()).unwrap()).unwrap();
     replay_matches_eager(&backend, &model, capture, PROMPT, EXPECTED, 70, 128);
@@ -33,7 +33,7 @@ fn graph_matches_eager_with_changing_tokens_positions_and_sessions() {
 #[test]
 #[ignore = "requires MDMA_TEST_GGUF and CUDA hardware"]
 fn concurrent_prefill_capture_and_replay_keep_requests_isolated() {
-    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let backend = CudaBackend::new().unwrap();
     let model = Model::load(&backend, &mut GgufModel::open(fixture()).unwrap()).unwrap();
     concurrent_prefill_replay(&backend, &model, CudaBackend::decoder, 4096, PROMPT, EXPECTED);

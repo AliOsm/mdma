@@ -3,8 +3,8 @@ use std::{assert_matches, collections::HashMap};
 
 fn environment() -> HashMap<&'static str, String> {
     [
-        ("MDMA_GGUF_PATH", "/models/model.gguf"),
-        ("MDMA_LISTEN", "127.0.0.1:50051"),
+        ("MDMA_MODELS_DIR", "/models"),
+        ("MDMA_LISTEN", "127.0.0.1:6362"),
         ("MDMA_TLS_CERT", "/certs/server.pem"),
         ("MDMA_TLS_KEY", "/certs/server-key.pem"),
         ("MDMA_TLS_CA", "/certs/ca.pem"),
@@ -21,6 +21,9 @@ fn load(env: &HashMap<&str, String>) -> Result<Config, BoxError> {
 #[test]
 fn defaults_and_overrides() {
     let mut env = environment();
+    env.remove("MDMA_LISTEN");
+    assert_eq!(load(&env).unwrap().listen.to_string(), "127.0.0.1:6362", "loopback on the mdma keypad port");
+    env = environment();
     let config = load(&env).unwrap();
     assert_eq!(config.backend, "cpu");
     assert!(!config.rocm_f32);
@@ -29,7 +32,8 @@ fn defaults_and_overrides() {
     assert_eq!(config.device_buffer_bytes, None);
     assert_eq!(config.host_buffer_bytes, None);
     assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
-    assert_eq!(config.warmup_rounds, 2);
+    assert_eq!(config.warmup_rounds, 1, "warm-up delays a model's first request");
+    assert_eq!(config.idle_unload, None, "models stay until evicted");
     assert!(config.federation_config.is_none());
     env.insert("MDMA_BACKEND", "rocm".into());
     env.insert("MDMA_N_CTX", "128".into());
@@ -80,8 +84,8 @@ fn control_only_bootstrap_never_loads_models_or_initializes_compute() {
     let mut env = environment();
     env.insert("MDMA_FEDERATION_CONTROL_ONLY", "1".into());
     env.insert("MDMA_FEDERATION_CONFIG", "/private/federation.toml".into());
-    assert!(load(&env).is_err()); // Model path conflicts with control-only mode.
-    env.remove("MDMA_GGUF_PATH");
+    assert!(load(&env).is_err()); // A models folder conflicts with control-only mode.
+    env.remove("MDMA_MODELS_DIR");
     assert_matches!(load(&env).unwrap().models, ModelsSource::ControlOnly);
     env.remove("MDMA_FEDERATION_CONFIG");
     assert!(load(&env).is_err());
@@ -143,23 +147,23 @@ fn buffer_limits_are_strict_and_require_a_supported_backend() {
 }
 
 #[test]
-fn models_file_replaces_the_single_gguf_path() {
+fn models_come_from_one_folder_with_an_optional_default() {
     let mut env = environment();
-    env.remove("MDMA_GGUF_PATH");
-    env.insert("MDMA_MODELS", "/etc/mdma/models.toml".into());
-    assert_matches!(load(&env).unwrap().models, ModelsSource::File(p) if p == "/etc/mdma/models.toml");
-    env.insert("MDMA_MODELS", " ".into());
-    assert!(load(&env).err().unwrap().to_string().contains("MDMA_MODELS"));
-    let config = load(&environment()).unwrap();
-    assert_matches!(config.models, ModelsSource::Gguf(p) if p == "/models/model.gguf");
+    assert_matches!(load(&env).unwrap().models, ModelsSource::Dir { path, default: None } if path == "/models");
+    env.insert("MDMA_DEFAULT_MODEL", " minicheck ".into());
+    assert_matches!(load(&env).unwrap().models, ModelsSource::Dir { default: Some(name), .. } if name == "minicheck");
+    env.insert("MDMA_DEFAULT_MODEL", " ".into());
+    assert!(load(&env).err().unwrap().to_string().contains("MDMA_DEFAULT_MODEL"));
 }
 
 #[test]
 fn required_values_cannot_be_missing_or_blank() {
     for key in environment().keys() {
         let mut env = environment();
-        env.remove(key);
-        assert!(load(&env).err().unwrap().to_string().contains(key));
+        if *key != "MDMA_LISTEN" {
+            env.remove(key);
+            assert!(load(&env).err().unwrap().to_string().contains(key));
+        }
         env.insert(key, "  ".into());
         assert!(load(&env).err().unwrap().to_string().contains(key));
     }
@@ -289,4 +293,42 @@ fn warmup_rounds_are_bounded_and_zero_explicitly_disables() {
         env.insert("MDMA_WARMUP_ROUNDS", value.into());
         assert!(load(&env).err().unwrap().to_string().contains("MDMA_WARMUP_ROUNDS"));
     }
+}
+
+#[test]
+fn idle_unload_is_bounded_and_zero_means_never() {
+    let mut env = environment();
+    for (value, expected) in [("0", None), ("1", Some(Duration::from_secs(1))), ("86400", Some(Duration::from_hours(24)))] {
+        env.insert("MDMA_IDLE_UNLOAD_SECS", value.into());
+        assert_eq!(load(&env).unwrap().idle_unload, expected, "{value}");
+    }
+    for value in ["", "-1", "86401", "soon"] {
+        env.insert("MDMA_IDLE_UNLOAD_SECS", value.into());
+        assert!(load(&env).err().unwrap().to_string().contains("MDMA_IDLE_UNLOAD_SECS"), "{value}");
+    }
+}
+
+#[test]
+fn operator_pins_are_validated() {
+    let mut env = environment();
+    assert!(load(&env).unwrap().operators.is_empty());
+    let pin = format!("sha256:{}", "ab".repeat(32));
+    env.insert("MDMA_OPERATOR_SPKI", format!(" {pin} , sha256:{} ,", "0".repeat(64)));
+    assert_eq!(load(&env).unwrap().operators, [pin, format!("sha256:{}", "0".repeat(64))]);
+    for bad in ["ab".repeat(32), format!("sha256:{}", "AB".repeat(32)), "sha256:abc".into(), format!("sha1:{}", "0".repeat(64))] {
+        env.insert("MDMA_OPERATOR_SPKI", bad.clone());
+        let error = load(&env).err().unwrap().to_string();
+        assert!(error.contains("MDMA_OPERATOR_SPKI"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn node_name_defaults_to_the_short_host_name() {
+    let mut env = environment();
+    let host = sysinfo::System::host_name().unwrap_or_default();
+    assert_eq!(load(&env).unwrap().node, host.split('.').next().unwrap_or_default());
+    env.insert("MDMA_NODE_NAME", " foundry ".into());
+    assert_eq!(load(&env).unwrap().node, "foundry");
+    env.insert("MDMA_NODE_NAME", " ".into());
+    assert!(load(&env).err().unwrap().to_string().contains("MDMA_NODE_NAME"));
 }

@@ -21,7 +21,7 @@ impl PowerSource for SysctlPower {
         };
         let battery_percent = sysctl("hw.acpi.battery.life")?
             .filter(|life| (0..=100).contains(life))
-            .map(|life| life as u8);
+            .and_then(|life| u8::try_from(life).ok());
         Ok(Some(PowerReading {
             on_battery: acline == 0,
             battery_percent,

@@ -30,6 +30,9 @@ pub struct Config {
     pub signer_id: String,
     /// DER PKCS#8; private key material is never part of a peer bundle.
     pub signer_key: PathBuf,
+    /// Where peers reach this node, as exported in its peer bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
     /// Explicit outbound control-only polling; never enrolls or grants routes.
     #[serde(default)]
     pub poll_catalogs: bool,
@@ -60,10 +63,10 @@ impl Config {
         Ok(config)
     }
 
-    fn local_policy(&self) -> config::Peer {
+    pub(crate) fn local_policy(&self) -> config::Peer {
         config::Peer {
             server_id: self.server_id.clone(),
-            endpoint: format!("https://{}", self.listen),
+            endpoint: self.endpoint.clone().unwrap_or_else(|| format!("https://{}", self.listen)),
             tls_name: self.tls_name.clone(),
             ca_roots: self.identity_roots.clone(),
             tls_pins: vec![], signing_keys: vec![],
@@ -176,10 +179,14 @@ impl Prepared {
     where B: crate::backend::Backend + Send + Sync + 'static, B::Buf: Send + Sync {
         self.service = self.service.with_inventory(service.federation_inventory());
         if self.execution_enabled { self.service = self.service.with_execution(service.federation_executor()); }
+        let cache = self.polling.as_ref().map(|poller| poller.cache.clone());
+        let mut configured = Vec::new();
         if let Some((credentials, cache, routes)) = self.routing.take() {
+            configured.clone_from(&routes);
             let router = super::routing::Router::new(routes, credentials, cache, executor, &service.federation_local_names())?;
             service.set_federation_router(router);
         }
+        service.set_federation_topology(super::topology::Topology::new(self.store.clone(), cache, configured));
         self.integrated = true;
         Ok(self)
     }

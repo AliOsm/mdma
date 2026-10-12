@@ -60,6 +60,12 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, BoxError> {
     })
 }
 
+/// SPKI pin (`sha256:<hex>`) of the first certificate in a PEM file.
+pub fn spki_pin(cert: &Path) -> Result<String, BoxError> {
+    let leaf = load_certs(cert)?.swap_remove(0);
+    Ok(crate::federation::tls::certificate_spki_sha256(&leaf)?)
+}
+
 /// Loads PEM credentials without connecting. Both peers must trust the other's CA.
 pub fn mtls_client(url: &str, cert: &Path, key: &Path, ca: &Path) -> Result<Client, BoxError> {
     let origin = origin(url)?;

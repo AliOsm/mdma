@@ -1,3 +1,4 @@
+use std::assert_matches;
 use super::canonical_json::{self, Value};
 use super::catalog::{self, CatalogBody, Kind, Limits, ModelDescriptor, ServerState, VerifyContext};
 use super::server_id;
@@ -194,6 +195,9 @@ fn sample_descriptor() -> ModelDescriptor {
         backend: "cuda".to_string(),
         ready: true,
         max_input_bytes: 4096,
+        class: crate::registry::Class::Decision,
+        capabilities: vec![crate::registry::Capability::Reasoning, crate::registry::Capability::Vision],
+        resident: true,
         limits: Limits::Synthesize { n_ctx: 8192, max_output_tokens: 2048 },
     }
 }
@@ -207,6 +211,20 @@ fn sample_body() -> CatalogBody {
         expires_at_ms: 1_030_000,
         server_state: ServerState::Serving,
         models: vec![sample_descriptor()],
+        host: crate::grpc::Host {
+            name: "alice".into(),
+            os: "freebsd".into(),
+            os_name: "FreeBSD 15.1-RELEASE".into(),
+            arch: "amd64".into(),
+            cpu: "AMD EPYC 9124".into(),
+            memory_bytes: 64 << 30,
+            device: "CPU".into(),
+            memory_available_bytes: 41 << 30,
+            device_memory_bytes: 0,
+            device_available_bytes: 0,
+            disk_bytes: 2 << 40,
+            disk_available_bytes: 1 << 40,
+        },
     }
 }
 
@@ -235,6 +253,41 @@ fn descriptor_round_trips_through_canonical() {
     let v = d.to_canonical();
     let decoded = ModelDescriptor::from_canonical(&v).unwrap();
     assert_eq!(d, decoded);
+}
+
+#[test]
+fn residency_is_not_part_of_the_selection() {
+    let loaded = sample_descriptor();
+    let on_disk = ModelDescriptor { resident: false, ..loaded.clone() };
+    assert_ne!(loaded, on_disk);
+    assert!(loaded.same_selection(&on_disk) && on_disk.same_selection(&loaded));
+    let swapped = ModelDescriptor { artifact_id: format!("sha256:{}", "c".repeat(64)), ..on_disk };
+    assert!(!loaded.same_selection(&swapped));
+    let Value::Object(mut obj) = loaded.to_canonical() else { unreachable!() };
+    obj.remove("resident");
+    assert_eq!(ModelDescriptor::from_canonical(&Value::Object(obj)).unwrap_err(), catalog::Error::MissingField("resident"));
+}
+
+#[test]
+fn class_capabilities_and_host_are_closed_and_bounded() {
+    let mut d = sample_descriptor();
+    d.capabilities.reverse();
+    assert_eq!(d.validate(), Err(catalog::Error::InvalidField("capabilities")));
+    let mut body = sample_body();
+    body.host.cpu = "x".repeat(crate::host::MAX_FIELD_BYTES + 1);
+    assert_eq!(body.validate(), Err(catalog::Error::InvalidField("host")));
+
+    let descriptor = |key: &str, value: Value| {
+        let Value::Object(mut obj) = sample_descriptor().to_canonical() else { unreachable!() };
+        obj.insert(key.into(), value);
+        ModelDescriptor::from_canonical(&Value::Object(obj)).unwrap_err()
+    };
+    assert_eq!(descriptor("class", Value::String("llm".into())), catalog::Error::InvalidField("class"));
+    assert_eq!(descriptor("capabilities", Value::Array(vec![Value::String("telepathy".into())])), catalog::Error::InvalidField("capabilities"));
+    let Value::Object(mut body) = sample_body().to_canonical() else { unreachable!() };
+    let Some(Value::Object(host)) = body.get_mut("host") else { unreachable!() };
+    host.insert("serial".into(), Value::String("C02X".into()));
+    assert_eq!(CatalogBody::from_canonical(&Value::Object(body)).unwrap_err(), catalog::Error::UnknownField("serial".into()));
 }
 
 #[test]
@@ -404,10 +457,10 @@ fn catalog_signer_refuses_oversized_inventory_before_issuance() {
     let key_pair = KeyPairHandle::generate().unwrap();
     let mut body = sample_body();
     body.models[0].architecture = "a".repeat(catalog::MAX_BODY_JSON_BYTES);
-    assert!(matches!(
+    assert_matches!(
         catalog::sign_catalog(&body, "ed25519:prod-1", &key_pair),
         Err(catalog::Error::BodyTooLarge(_))
-    ));
+    );
 }
 
 #[test]

@@ -1,7 +1,7 @@
 # Native GPU execution profiles
 
 These loader-created vocabularies extend `mdma.execution-profile.v1` for frozen
-GGUF decoders on the concrete Metal, ROCm and Vulkan backends. They do not
+GGUF decoders on the concrete CUDA, Metal, ROCm and Vulkan backends. They do not
 authorize export/execution, attest a remote machine, or guarantee bit-identical
 results across GPUs. CPU Laya retains its CPU profile.
 
@@ -15,6 +15,13 @@ prepared caches.
 
 ## Backend vocabularies
 
+- **`mdma.cuda.v1`**: actual device name with compute capability, PCI address
+  and UUID, driver version; built PTX target and SHA-256 of the embedded PTX the
+  driver JIT-compiles. Activations/norms are f32, KV is f16 and quantized
+  matrices retain GGUF dtype. Captured modes are the int8 prefill GEMM
+  (mma.sync on Q8_1) and dp4a decode switches, eager or eligible request graph
+  capture with eager fallback, and the attention split (fixed chunk or over
+  the device's SM count).
 - **`mdma.metal.v1`**: actual Metal registry ID/name and unified-memory property;
   OS/kernel runtime versions; SHA-256 of the exact compiled shader source,
   including selected matrix definitions; created pipeline names and actual
@@ -39,16 +46,16 @@ prepared caches.
 All include compiled OS/architecture. Kernel implementation changes also change
 the executable digest. Runtime identifiers are queried locally; driver/shared
 library bytes, root/kernel state and other processes are **not attested**.
-Metal/HIP batch/graph switches are fixed at instance construction, rather than
+Metal/HIP/CUDA batch/graph switches are fixed at instance construction, rather than
 re-read from the environment during delegated requests.
 
 ## Currentness and completion
 
-Capture occurs after load, calibration and warm-up. Vulkan calibration setters
-invalidate previously captured profiles, including when restoring the old mode;
-recapture is explicit. Device/submission completion failures withdraw GPU
+Capture occurs after load and warm-up; `mdma-serve` no longer calibrates. Vulkan
+mode setters invalidate previously captured profiles, including when restoring
+the old mode; recapture is explicit. Device/submission completion failures withdraw GPU
 profiles. Existing executable and model-availability checks remain mandatory.
-CUDA and Level Zero do not yet have native federation vocabularies.
+Level Zero does not yet have a native federation vocabulary.
 
 Cancellation does not preempt a kernel. Native generation joins device work on
 success, error, cancellation and unwind before finishing its job and releasing

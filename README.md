@@ -148,12 +148,10 @@ target/release/mdma-run /path/to/model.gguf "The capital of France is" 16
 # Development certificates: a new CA, a localhost server cert and one client cert in ./certs
 target/release/mdma-certs
 
-MDMA_GGUF_PATH=/path/to/model.gguf \
-MDMA_LISTEN=127.0.0.1:50051 \
+MDMA_MODELS_DIR=/path/to/models \
 MDMA_TLS_CERT=certs/server.pem MDMA_TLS_KEY=certs/server-key.pem MDMA_TLS_CA=certs/ca.pem \
   target/release/mdma-serve
 
-MDMA_ADDR=localhost:50051 \
 MDMA_TLS_CERT=certs/client.pem MDMA_TLS_KEY=certs/client-key.pem MDMA_TLS_CA=certs/ca.pem \
   target/release/mdma-client The capital of France is
 ```
@@ -166,7 +164,9 @@ the matching feature. Use your own PKI beyond localhost.
 | `mdma` | `info`, `doctor`, `plan`, `run` (CPU/GPU layer offloading), `bench`, `node` |
 | `mdma-serve` | mTLS gRPC server, configured by environment variables |
 | `mdma-client` | minimal mTLS client: Introspect, streamed completion or `--decide` |
-| `mdma-certs` | development CA, server and client certificates |
+| `mdma-web` | loopback browser UI: 3D memory, federation and playground views over mTLS |
+| `mdma-certs` | development CA, server and client certificates; `--spki` prints a certificate pin |
+| `mdma-fed` | federation setup: node identity, peer enrollment and grants, routes, status |
 | `mdma-run` | local greedy generation |
 | `mdma-cache` | prepared ROCm Q4_K weight cache (experimental) |
 | `mdma-bench` | isolated load, memory, prefill and decode measurements |
@@ -193,10 +193,10 @@ for kernel compilation and runtime switches.
 
 ## Serving
 
-`mdma-serve` refuses to start without mTLS material. It keeps weights resident,
-finishes warm-up before listening and caps each request to its context
-budget. One process can serve several native decoders, Laya checkpoints and
-models on other MDMA nodes from a TOML registry (`MDMA_MODELS`).
+`mdma-serve` refuses to start without mTLS material. It loads each model on its
+first use, warms it up and keeps it resident, and caps each request to its
+context budget. One process serves every GGUF and Laya checkpoint in a folder
+(`MDMA_MODELS_DIR`); other MDMA nodes' models are reached through federation.
 
 ```proto
 service Mdma {
@@ -235,6 +235,7 @@ checkpoint gates and their references.
 | Prepared model cache | [doc/model-cache.md](doc/model-cache.md) |
 | Serving and configuration | [doc/serving.md](doc/serving.md) |
 | Service installation | [doc/services.md](doc/services.md) |
+| Web UI | [doc/web.md](doc/web.md) |
 | Laya typed decisions | [doc/laya.md](doc/laya.md) |
 | Federation | [doc/federation.md](doc/federation.md) |
 | LAN resource discovery POC | [doc/federation/poc-resources.md](doc/federation/poc-resources.md) |

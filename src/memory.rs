@@ -1,5 +1,7 @@
 //! Independent native tensor admission and backend buffer quotas.
 use crate::backend::{Error, Result};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 mod counter;
 #[cfg_attr(not(any(test, feature = "rocm", feature = "cuda", feature = "vulkan")), allow(dead_code))]
 mod buffers;
@@ -7,32 +9,64 @@ pub use buffers::{BufferBudget, MemoryDomain};
 #[cfg(any(feature = "rocm", feature = "cuda", feature = "vulkan"))]
 pub(crate) use buffers::BufferCharge;
 
+/// What a native reservation holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryCategory {
+    Weights,
+    Kv,
+    Workspace,
+}
+
+/// A point-in-time view of a [`NativeMemoryBudget`]; categories sum to `used`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BudgetSnapshot {
+    pub limit: usize,
+    pub used: usize,
+    pub weights: usize,
+    pub kv: usize,
+    pub workspace: usize,
+}
+
 /// Share one budget across native models and their sessions. Counts weight
 /// payloads, KV and workspace reservations only. Backend-private allocations,
 /// driver overhead, staging and tokenizers are outside this budget. The registry
 /// decoder budget excludes Laya; federated Laya uses a separate bounded logical
 /// request-workspace instance, not shared decoder/model-weight accounting.
 #[derive(Clone, Debug)]
-pub struct NativeMemoryBudget(counter::Counter);
+pub struct NativeMemoryBudget {
+    counter: counter::Counter,
+    categories: Arc<[AtomicUsize; 3]>,
+}
 
 impl NativeMemoryBudget {
     pub fn new(limit: usize) -> Self {
-        Self(counter::Counter::new(limit))
+        Self { counter: counter::Counter::new(limit), categories: Arc::default() }
     }
 
     pub fn limit(&self) -> usize {
-        self.0.limit()
+        self.counter.limit()
     }
 
     /// Live and reserved logical tensor bytes; not measured physical residency.
     pub fn used(&self) -> usize {
-        self.0.used()
+        self.counter.used()
     }
 
-    pub(crate) fn reserve(&self, bytes: usize) -> Result<Reservation> {
-        let charge = self.0.reserve(bytes)
+    pub fn snapshot(&self) -> BudgetSnapshot {
+        let [weights, kv, workspace] = [MemoryCategory::Weights, MemoryCategory::Kv, MemoryCategory::Workspace]
+            .map(|category| self.tally(category).load(Ordering::Relaxed));
+        BudgetSnapshot { limit: self.limit(), used: self.used(), weights, kv, workspace }
+    }
+
+    fn tally(&self, category: MemoryCategory) -> &AtomicUsize {
+        &self.categories[category as usize]
+    }
+
+    pub(crate) fn reserve(&self, bytes: usize, category: MemoryCategory) -> Result<Reservation> {
+        let charge = self.counter.reserve(bytes)
             .map_err(|used| Error::MemoryBudget { requested: bytes, used, limit: self.limit() })?;
-        Ok(Reservation { budget: self.clone(), charge })
+        self.tally(category).fetch_add(bytes, Ordering::Relaxed);
+        Ok(Reservation { budget: self.clone(), charge, category })
     }
 }
 
@@ -40,15 +74,32 @@ impl NativeMemoryBudget {
 pub(crate) struct Reservation {
     pub(crate) budget: NativeMemoryBudget,
     charge: counter::Charge,
+    category: MemoryCategory,
 }
 
 impl Reservation {
-    pub(crate) fn split(&mut self, bytes: usize) -> Self {
-        Self { budget: self.budget.clone(), charge: self.charge.split(bytes) }
+    /// Carve `bytes` out of this reservation and account them as `category`.
+    pub(crate) fn split_as(&mut self, bytes: usize, category: MemoryCategory) -> Self {
+        let charge = self.charge.split(bytes);
+        if category != self.category {
+            self.budget.tally(self.category).fetch_sub(bytes, Ordering::Relaxed);
+            self.budget.tally(category).fetch_add(bytes, Ordering::Relaxed);
+        }
+        Self { budget: self.budget.clone(), charge, category }
     }
 
     pub(crate) fn covers(&self, budget: &NativeMemoryBudget, bytes: usize) -> bool {
-        self.charge.covers(&budget.0, bytes)
+        self.charge.covers(&budget.counter, bytes)
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.charge.bytes()
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.budget.tally(self.category).fetch_sub(self.charge.bytes(), Ordering::Relaxed);
     }
 }
 

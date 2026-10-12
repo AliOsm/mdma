@@ -2,24 +2,21 @@ use super::*;
 use crate::backend::cpu::CpuBackend;
 use crate::gguf::tests::Fixture;
 use crate::grpc::MdmaService;
-use crate::registry::ModelsFile;
+use crate::registry::{Options, Source};
+
+fn models(file: &std::path::Path, names: &[&str]) -> Vec<(String, Source)> {
+    names.iter().map(|name| ((*name).to_owned(), Source::Gguf(file.into()))).collect()
+}
 
 pub(crate) fn native_service() -> MdmaService<CpuBackend> {
     let file = Fixture::new(1, 8).with_tokenizer().write();
-    let mut config = ModelsFile::single_gguf(file.path().to_str().unwrap());
-    config.models[0].name = "native".into();
-    config.models[0].n_ctx = Some(32);
-    let mut alias = config.models[0].clone();
-    alias.name = "alias".into();
-    alias.n_ctx = Some(8);
-    config.models.push(alias);
-    let mut registry =
-        Registry::load_available_frozen_with_budget(&CpuBackend, &config, 64, None, |_| {})
-            .unwrap();
-    assert_eq!(registry.capture_execution_profiles(&CpuBackend).unwrap(), 2);
+    let options = Options { frozen: true, ..Options::new(32) };
+    let mut registry = Registry::new(Arc::new(CpuBackend), models(file.path(), &["native", "alias"]), None, options).unwrap();
+    assert!(registry.preload().is_empty());
+    assert_eq!(registry.capture_execution_profiles().unwrap(), 2);
     // The published inventory must refer to already loaded bytes, never reopen
     // the source after the fixture is destroyed on return.
-    MdmaService::new(Arc::new(CpuBackend), registry, "not-a-profile-claim")
+    MdmaService::new(registry, "not-a-profile-claim")
 }
 
 fn exports() -> Vec<String> {
@@ -55,13 +52,8 @@ fn only_explicit_loaded_exact_identities_are_visible_with_alias_caps() {
             max_output_tokens: 32
         }
     );
-    assert_eq!(
-        alias.limits,
-        Limits::Synthesize {
-            n_ctx: 8,
-            max_output_tokens: 8
-        }
-    );
+    assert_eq!(alias.limits, native.limits, "aliases share the global context");
+    assert!(native.resident && alias.resident);
 }
 
 #[test]
@@ -91,13 +83,7 @@ fn power_changes_restrict_caps_critical_and_dead_watchers_withdraw_readiness() {
             max_output_tokens: 3
         }
     );
-    assert_eq!(
-        degraded.models[1].limits,
-        Limits::Synthesize {
-            n_ctx: 8,
-            max_output_tokens: 3
-        }
-    );
+    assert_eq!(degraded.models[1].limits, degraded.models[0].limits);
     for model in &degraded.models {
         assert!(model.ready);
     }
@@ -111,7 +97,9 @@ fn power_changes_restrict_caps_critical_and_dead_watchers_withdraw_readiness() {
     assert_eq!(critical.state, ServerState::Critical);
     assert!(critical.models.iter().all(|m| !m.ready));
     tx.send(PowerStatus::default()).unwrap();
-    assert_eq!(inventory.snapshot(&exports()), serving);
+    // Host figures are live; the offer is what must come back.
+    let restored = inventory.snapshot(&exports());
+    assert_eq!((restored.state, restored.models), (serving.state, serving.models));
     drop(tx);
     let closed = inventory.snapshot(&exports());
     assert_eq!(closed.state, ServerState::Critical);
@@ -140,42 +128,40 @@ async fn shutdown_overrides_power_and_marks_all_models_unready() {
 }
 
 #[test]
-fn ordinary_unavailable_or_unprofiled_native_loads_are_not_exportable() {
+fn unfrozen_unloaded_or_refused_models_are_not_exportable() {
     let file = Fixture::new(1, 8).with_tokenizer().write();
-    let mut config = ModelsFile::single_gguf(file.path().to_str().unwrap());
-    config.models[0].name = "native".into();
-    let registry = Registry::load(&CpuBackend, &config, 64, |_| {}).unwrap();
-    let service = MdmaService::new(Arc::new(CpuBackend), registry, "cpu");
-    assert!(
-        service
-            .federation_inventory()
-            .snapshot(&exports())
-            .models
-            .is_empty()
-    );
-    let registry =
-        Registry::load_available_frozen_with_budget(&CpuBackend, &config, 64, None, |_| {})
-            .unwrap();
-    let service = MdmaService::new(Arc::new(CpuBackend), registry, "cpu");
-    assert!(
-        service
-            .federation_inventory()
-            .snapshot(&exports())
-            .models
-            .is_empty()
-    );
+    let snapshot = |options: Options, preload: bool| {
+        let mut registry = Registry::new(Arc::new(CpuBackend), models(file.path(), &["native"]), None, options).unwrap();
+        registry.capture_execution_profiles().unwrap();
+        if preload {
+            registry.preload();
+        }
+        MdmaService::new(registry, "cpu").federation_inventory().snapshot(&exports())
+    };
+    assert!(snapshot(Options::new(64), true).models.is_empty(), "unfrozen loads have no identity");
+    assert!(snapshot(Options { frozen: true, ..Options::new(64) }, false).models.is_empty(), "nothing is known before the first load");
     let budget = crate::memory::NativeMemoryBudget::new(0);
-    let mut registry = Registry::load_available_frozen_with_budget(
-        &CpuBackend,
-        &config,
-        64,
-        Some(&budget),
-        |_| panic!("no upload"),
-    )
-    .unwrap();
-    assert_eq!(registry.capture_execution_profiles(&CpuBackend).unwrap(), 0);
-    let service = MdmaService::new(Arc::new(CpuBackend), registry, "cpu");
-    let snapshot = service.federation_inventory().snapshot(&exports());
-    assert_eq!(snapshot.state, ServerState::Degraded);
-    assert!(snapshot.models.is_empty());
+    let refused = snapshot(Options { frozen: true, budget: Some(budget), ..Options::new(64) }, true);
+    assert_eq!(refused.state, ServerState::Serving, "a memory refusal is not a degraded node");
+    assert!(refused.models.is_empty());
+}
+
+#[tokio::test]
+async fn hashed_models_are_advertised_unloaded_and_load_on_their_first_federated_use() {
+    let file = Fixture::new(1, 8).with_tokenizer().write();
+    let options = Options { frozen: true, ..Options::new(32) };
+    let mut registry = Registry::new(Arc::new(CpuBackend), models(file.path(), &["native", "alias"]), None, options).unwrap();
+    registry.capture_execution_profiles().unwrap();
+    registry.hash_artifacts(|| false);
+    let service = MdmaService::new(registry, "cpu");
+    let before = service.federation_inventory().snapshot(&exports());
+    assert_eq!(before.models.len(), 2, "a hashed model is exportable before it loads");
+    assert!(before.models.iter().all(|m| m.ready && !m.resident));
+    let executor = service.federation_executor();
+    executor.load("alias").await.unwrap();
+    let after = service.federation_inventory().snapshot(&exports());
+    assert!(after.models.iter().all(|m| m.resident), "aliases share the load");
+    for (before, after) in before.models.iter().zip(&after.models) {
+        assert!(before.same_selection(after), "loading keeps the advertised identity");
+    }
 }

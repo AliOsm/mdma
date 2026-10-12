@@ -31,6 +31,15 @@ struct Remote {
 
 impl Federation for Remote {
     type SynthesizeStream = crate::federation::execution::EventStream;
+    async fn acquire_lease(&self, request: grpc::Request<crate::federation::control::LeaseRequest>) -> Result<grpc::Response<crate::federation::control::LeaseGrant>, Status> {
+        self.service.acquire_lease(request).await
+    }
+    async fn renew_lease(&self, request: grpc::Request<crate::federation::control::LeaseRenewal>) -> Result<grpc::Response<crate::federation::control::LeaseGrant>, Status> {
+        self.service.renew_lease(request).await
+    }
+    async fn release_lease(&self, request: grpc::Request<crate::federation::control::LeaseRelease>) -> Result<grpc::Response<crate::federation::control::LeaseReleased>, Status> {
+        self.service.release_lease(request).await
+    }
     async fn decide(&self, request: grpc::Request<crate::federation::control::DecideRequest>)
         -> Result<grpc::Response<crate::federation::control::DecideResponse>, Status> {
         self.service.decide(request).await

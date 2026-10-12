@@ -19,11 +19,11 @@ fn smoke(backend: &str) {
     let certs = dir.path().join("certs");
     let generated = Command::new(env!("CARGO_BIN_EXE_mdma-certs")).arg(&certs).output().unwrap();
     assert!(generated.status.success(), "certificate generation failed");
-    let models = dir.path().join("models.toml");
-    std::fs::write(&models, format!(
-        "default = \"tiny\"\n[[models]]\nname = \"tiny\"\ngguf = {:?}\nn_ctx = 64\n\
-         [[models]]\nname = \"gemma\"\ngguf = {:?}\nn_ctx = 48\n", paths[0], paths[1],
-    )).unwrap();
+    let models = dir.path().join("models");
+    std::fs::create_dir(&models).unwrap();
+    for (name, path) in ["tiny.gguf", "gemma.gguf"].into_iter().zip(&paths) {
+        std::os::unix::fs::symlink(path, models.join(name)).unwrap();
+    }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
@@ -31,9 +31,9 @@ fn smoke(backend: &str) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mdma-serve"));
     for (key, _) in std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("MDMA_")) { command.env_remove(key); }
     let mut server = Server(command
-        .env("MDMA_MODELS", models).env("MDMA_BACKEND", backend)
+        .env("MDMA_MODELS_DIR", models).env("MDMA_DEFAULT_MODEL", "tiny").env("MDMA_BACKEND", backend)
         .env("MDMA_LISTEN", addr.to_string()).env("MDMA_POWER", "off")
-        .env("MDMA_N_CTX", "2048").env("MDMA_SHUTDOWN_TIMEOUT_SECS", "30")
+        .env("MDMA_N_CTX", "64").env("MDMA_SHUTDOWN_TIMEOUT_SECS", "30")
         .env("MDMA_TLS_CERT", certs.join("server.pem"))
         .env("MDMA_TLS_KEY", certs.join("server-key.pem"))
         .env("MDMA_TLS_CA", certs.join("ca.pem"))
@@ -60,7 +60,7 @@ fn smoke(backend: &str) {
     let startup = std::fs::read_to_string(&log).unwrap();
     assert!(startup.find("mdma warm-up complete").unwrap() < startup.find("mdma listening").unwrap());
     let health = String::from_utf8(health.stdout).unwrap();
-    for expected in ["ready=true", "default=tiny", "tiny", "gemma", "arch=llama", "arch=gemma4", "n_ctx=64", "n_ctx=48"] {
+    for expected in ["ready=true", "default=tiny", "tiny", "gemma", "arch=llama", "arch=gemma4", "n_ctx=64"] {
         assert!(health.contains(expected), "missing {expected}: {health}");
     }
     for model in ["", "tiny", "gemma"] {

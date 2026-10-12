@@ -8,6 +8,17 @@ pub(crate) enum FinishReason {
     ContextLimit,
 }
 
+impl FinishReason {
+    /// Wire name.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Eos => "eos",
+            Self::MaxTokens => "max_tokens",
+            Self::ContextLimit => "context_limit",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Completion {
     pub emitted: usize,

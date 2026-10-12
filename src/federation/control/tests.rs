@@ -1,6 +1,7 @@
 use super::super::config::{SigningKey, Window};
 use super::super::tls::tests::Fixture;
 use super::*;
+use std::assert_matches;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rama::http::grpc::Code;
 
@@ -144,6 +145,7 @@ async fn readiness_or_policy_change_during_signing_cannot_publish_a_stale_snapsh
                     ServerState::Critical
                 } else { ServerState::Serving },
                 models: vec![],
+                host: crate::grpc::Host::default(),
             }
         }
     }
@@ -468,15 +470,15 @@ async fn actual_mtls_synthesis_requires_deadline_grant_and_exact_selection_then_
         request.try_set_timeout(Duration::from_secs(2)).unwrap();
         request
     };
-    assert!(matches!(client.synthesize(message.clone()).await, Err(s) if s.code() == Code::InvalidArgument));
-    assert!(matches!(client.synthesize(deadline_request(message.clone())).await, Err(s) if s.code() == Code::PermissionDenied));
+    assert_matches!(client.synthesize(message.clone()).await, Err(s) if s.code() == Code::InvalidArgument);
+    assert_matches!(client.synthesize(deadline_request(message.clone())).await, Err(s) if s.code() == Code::PermissionDenied);
     let mut policy = f.store.snapshot().unwrap().peer("remote.mdma.test").unwrap().policy.clone();
     policy.execute_exports = vec![ExecuteExport { model: "native".into(), operation: Operation::Synthesize }];
     f.store.approve_policy(policy).unwrap();
     let mut wrong = message.clone();
     wrong.envelope.as_mut().unwrap().profile_id = format!("sha256:{}", "0".repeat(64));
     wrong.envelope.as_mut().unwrap().request_id = vec![43; 16];
-    assert!(matches!(client.synthesize(deadline_request(wrong)).await, Err(s) if s.code() == Code::FailedPrecondition));
+    assert_matches!(client.synthesize(deadline_request(wrong)).await, Err(s) if s.code() == Code::FailedPrecondition);
     let mut stream = client.synthesize(deadline_request(message.clone())).await.unwrap().into_inner();
     let Some(synthesize_event::Event::Accepted(accepted)) = stream.message().await.unwrap().unwrap().event else { panic!("first event"); };
     assert_eq!(accepted.request_id, vec![44; 16]);
@@ -491,7 +493,7 @@ async fn actual_mtls_synthesis_requires_deadline_grant_and_exact_selection_then_
         }
     }
     assert!(stream.message().await.unwrap().is_none(), "gRPC OK after completion");
-    assert!(matches!(client.synthesize(deadline_request(message)).await, Err(s) if s.code() == Code::AlreadyExists));
+    assert_matches!(client.synthesize(deadline_request(message)).await, Err(s) if s.code() == Code::AlreadyExists);
     task.abort();
     let _ = task.await;
 }

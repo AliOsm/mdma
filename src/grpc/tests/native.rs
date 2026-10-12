@@ -4,7 +4,7 @@ use super::transport::Fixture;
 use crate::backend::Backend;
 use crate::grpc::client::Client;
 use crate::memory::NativeMemoryBudget;
-use crate::registry::ModelsFile;
+use crate::registry::{Options, Source};
 use rama::graceful::Shutdown;
 use rama::http::grpc::Code;
 use std::time::Duration;
@@ -16,7 +16,7 @@ fn request(model: &str, prompt: &str, max_tokens: u32) -> proto::SynthesizeReque
         sampler: Some(proto::SamplerConfig {
             temperature: Some(0.0), repetition_penalty: Some(1.0),
             ..Default::default()
-        }),
+        }), emit_events: false, chat: false, system: String::new(),
     }
 }
 
@@ -30,18 +30,15 @@ async fn tokens(client: &Client, request: proto::SynthesizeRequest) -> Vec<u32> 
 async fn lifecycle<B>(backend: B, name: &'static str, paths: [&str; 2], real: bool)
 where B: Backend + Send + Sync + 'static, B::Buf: Send + Sync {
     let budget = NativeMemoryBudget::new(8 * 1024 * 1024 * 1024);
-    let config = ModelsFile::parse(&format!(
-        "default = \"tiny\"\n[[models]]\nname = \"tiny\"\ngguf = {:?}\nn_ctx = 64\n\
-        [[models]]\nname = \"gemma\"\ngguf = {:?}\nn_ctx = 48\n", paths[0], paths[1],
-    )).unwrap();
-    let backend = Arc::new(backend);
-    let registry = Registry::load_with_budget(&*backend, &config, 2048, Some(&budget), |_| {}).unwrap();
+    let models = vec![("tiny".into(), Source::Gguf(paths[0].into())), ("gemma".into(), Source::Gguf(paths[1].into()))];
+    let registry = Registry::new(Arc::new(backend), models, Some("tiny"), Options { budget: Some(budget.clone()), ..Options::new(64) }).unwrap();
+    assert!(registry.preload().is_empty());
     let weights = budget.used();
     assert!(weights > 0);
     let fixture = Fixture::new();
     let trigger = CancellationToken::new();
     let shutdown = Shutdown::new(trigger.clone().cancelled_owned());
-    let service = MdmaService::new(backend, registry, name).with_shutdown_guard(shutdown.guard_weak());
+    let service = MdmaService::new(registry, name).with_shutdown_guard(shutdown.guard_weak());
     let mut node = fixture.start_on(Executor::graceful(shutdown.guard()), |_| service).await;
     let client = fixture.client(&node.url);
     let health = client.introspect(proto::IntrospectRequest {}).await.unwrap().into_inner();
@@ -50,7 +47,7 @@ where B: Backend + Send + Sync + 'static, B::Buf: Send + Sync {
     assert_eq!(health.models.len(), 2);
     for (entry, model_name, architecture, context) in [
         (&health.models[0], "tiny", "llama", if real { 64 } else { 16 }),
-        (&health.models[1], "gemma", "gemma4", if real { 48 } else { 16 }),
+        (&health.models[1], "gemma", "gemma4", if real { 64 } else { 16 }),
     ] {
         assert!(entry.ready);
         assert_eq!((&*entry.name, &*entry.architecture, &*entry.backend, entry.n_ctx),
@@ -112,30 +109,26 @@ async fn two_architecture_compat_mtls_lifecycle() {
 }
 
 #[tokio::test]
-async fn unloaded_models_keep_the_mtls_listener_alive_and_drain_cleanly() {
+async fn models_that_do_not_fit_keep_the_mtls_listener_alive_and_drain_cleanly() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let model = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer().write();
-        let mut config = ModelsFile::single_gguf(model.path().to_str().unwrap());
-        config.models[0].name = "blocked".into();
         let budget = NativeMemoryBudget::new(0);
-        let backend = Arc::new(CpuBackend);
-        let mut registry = Registry::load_available_with_budget(&*backend, &config, 64, Some(&budget), |_| {}).unwrap();
-        assert!(registry.warmup_available(&*backend, 2, || false).unwrap());
+        let options = Options { budget: Some(budget.clone()), warmup_rounds: 2, ..Options::new(64) };
+        let registry = Registry::new(Arc::new(CpuBackend), vec![("blocked".into(), Source::Gguf(model.path().into()))], None, options).unwrap();
         let fixture = Fixture::new();
         let trigger = CancellationToken::new();
         let shutdown = Shutdown::new(trigger.clone().cancelled_owned());
-        let service = MdmaService::new(backend, registry, "cpu").with_shutdown_guard(shutdown.guard_weak());
+        let service = MdmaService::new(registry, "cpu").with_shutdown_guard(shutdown.guard_weak());
         let mut node = fixture.start_on(Executor::graceful(shutdown.guard()), |_| service).await;
         let client = fixture.client(&node.url);
         for _ in 0..2 {
-            let health = client.introspect(proto::IntrospectRequest {}).await.unwrap().into_inner();
-            assert!(!health.ready);
-            assert_eq!(health.server_state, "degraded");
-            assert_eq!(health.default_model, "blocked");
-            assert!(!health.models[0].ready);
             let error = client.synthesize(request("", "hello", 1)).await.unwrap_err();
             assert_eq!(error.code(), Code::ResourceExhausted);
-            assert!(error.message().contains("not loaded"));
+            assert!(error.message().contains("does not fit"), "{}", error.message());
+            let health = client.introspect(proto::IntrospectRequest {}).await.unwrap().into_inner();
+            assert!(health.ready, "a refusal does not take the node down");
+            assert_eq!((health.server_state.as_str(), health.default_model.as_str()), ("serving", "blocked"));
+            assert_eq!(health.models[0].residency, "available");
             assert!(!node.task.is_finished());
         }
         trigger.cancel();

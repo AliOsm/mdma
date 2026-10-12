@@ -4,6 +4,7 @@ mod validate;
 pub use selection::Route;
 pub(crate) use selection::Selection;
 mod controller;
+mod leases;
 pub(crate) use controller::Router;
 
 #[cfg(test)]

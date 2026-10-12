@@ -38,6 +38,12 @@ impl Stage {
         None
     }
 }
+/// Whether `error` is a failure to open the TCP connection: the peer is down,
+/// filtered, or the OS refused the dial.
+pub(crate) fn connect_failed(error: &BoxError) -> bool {
+    error.downcast_ref::<Stage>().is_some_and(|stage| stage.name == "tcp_connect")
+}
+
 fn stage(name: &'static str, error: impl Into<BoxError>) -> BoxError {
     Box::new(Stage { name, source: error.into() })
 }

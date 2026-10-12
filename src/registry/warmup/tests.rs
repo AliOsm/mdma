@@ -1,5 +1,7 @@
+#![expect(clippy::arc_with_non_send_sync, reason = "the loader fakes count with Cell; a registry owns its backend")]
 use super::*;
 use std::assert_matches;
+use crate::registry::{LoadError, Options, Phase, Registry, Source};
 use crate::backend::cpu::{CpuBackend, CpuBuf};
 use crate::backend::{AttnSpec, KvView, Pool, QWeight, RopeSpec};
 use crate::gguf::tests::Fixture;
@@ -7,6 +9,8 @@ use crate::memory::NativeMemoryBudget;
 use crate::model::{Model, Workspace};
 use crate::kv_cache::KvCache;
 use std::cell::{Cell, RefCell};
+use std::path::Path;
+use std::sync::Arc;
 
 #[derive(Default)]
 struct CountingBackend {
@@ -101,18 +105,29 @@ impl Backend for CountingBackend {
     }
 }
 
-fn registry(backend: &CountingBackend, n_ctx: usize, budget: Option<&NativeMemoryBudget>) -> Registry<CountingBackend> {
+fn model(backend: &CountingBackend, budget: Option<&NativeMemoryBudget>) -> Model<CountingBackend> {
     let file = Fixture::new(1, 8).with_tokenizer().write();
-    let mut config = super::super::ModelsFile::single_gguf(file.path().to_str().unwrap());
-    config.models[0].name = "fixture".into();
-    Registry::load_with_budget(backend, &config, n_ctx, budget, |_| {}).unwrap()
+    let mut gguf = crate::gguf::GgufModel::open(file.path()).unwrap();
+    let memory = budget.map(|budget| budget.reserve(crate::model::memory::weight_bytes(&gguf).unwrap(), crate::memory::MemoryCategory::Weights).unwrap());
+    Model::load_reserved(backend, &mut gguf, memory).unwrap()
+}
+
+/// `names` all point at `file`; warm-up runs as each loads.
+fn registry(backend: &Arc<CountingBackend>, files: &[(&str, &Path)], rounds: u32, budget: Option<&NativeMemoryBudget>, frozen: bool) -> Registry<CountingBackend> {
+    let models = files.iter().map(|(name, path)| ((*name).to_owned(), Source::Gguf(path.to_path_buf()))).collect();
+    let options = Options { n_ctx: 64, warmup_rounds: rounds, frozen, budget: budget.cloned() };
+    Registry::new(backend.clone(), models, None, options).unwrap()
+}
+
+fn weights(path: &Path) -> usize {
+    crate::model::memory::weight_bytes(&crate::gguf::GgufModel::open(path).unwrap()).unwrap()
 }
 
 #[test]
 fn bounded_rounds_join_prefill_and_use_the_request_decoder_factory() {
     let backend = CountingBackend::default();
-    let registry = registry(&backend, 4096, None);
-    assert!(registry.warmup(&backend, 2, || false).unwrap());
+    let model = model(&backend, None);
+    assert!(warm_decoder(&backend, &model, 4096, 2, &mut || false).unwrap());
     assert_eq!(*backend.batches.borrow(), [16, 1, 1, 1, 1, 16, 1, 1, 1, 1]);
     assert_eq!(*backend.factories.borrow(), [(20, 16), (20, 16)]);
     assert_eq!(*backend.positions.borrow(), [16, 17, 18, 19, 16, 17, 18, 19]);
@@ -123,8 +138,8 @@ fn bounded_rounds_join_prefill_and_use_the_request_decoder_factory() {
 fn small_contexts_keep_one_prefill_position_and_never_overrun() {
     for capacity in [1, 2, 5, 19, 20, 64] {
         let backend = CountingBackend::default();
-        let registry = registry(&backend, capacity, None);
-        assert!(registry.warmup(&backend, 1, || false).unwrap());
+        let model = model(&backend, None);
+        assert!(warm_decoder(&backend, &model, capacity, 1, &mut || false).unwrap());
         let cap = capacity.min(20);
         let steps = 4.min(cap - 1);
         assert_eq!(backend.batches.borrow()[0], cap - steps);
@@ -135,19 +150,11 @@ fn small_contexts_keep_one_prefill_position_and_never_overrun() {
 }
 
 #[test]
-fn aliases_warm_once_using_the_largest_context_policy() {
-    let backend = CountingBackend::default();
-    let mut registry = registry(&backend, 1, None);
-    let Entry::Decoder(first) = &registry.models[0].entry else { unreachable!() };
-    let alias = Decoder {
-        model: first.model.clone(), tokenizer: first.tokenizer.clone(),
-        architecture: first.architecture.clone(), n_ctx: 64,
-    };
-    registry.models.push(super::super::Loaded {
-        name: "alias".into(), kind: super::super::Kind::Gguf, weight_bytes: 0,
-        entry: Entry::Decoder(alias),
-    });
-    assert!(registry.warmup(&backend, 2, || false).unwrap());
+fn aliases_load_and_warm_once() {
+    let backend = Arc::new(CountingBackend::default());
+    let file = Fixture::new(1, 8).with_tokenizer().write();
+    let registry = registry(&backend, &[("fixture", file.path()), ("alias", file.path())], 2, None, false);
+    assert!(registry.preload().is_empty());
     assert_eq!(backend.downloads.get(), 10);
     assert_eq!(*backend.factories.borrow(), [(20, 16), (20, 16)]);
 }
@@ -155,23 +162,25 @@ fn aliases_warm_once_using_the_largest_context_policy() {
 #[test]
 fn disabled_and_precancelled_warmup_allocate_nothing() {
     let backend = CountingBackend::default();
-    let registry = registry(&backend, 64, None);
+    let model = model(&backend, None);
     let before = backend.allocations.get();
-    assert!(registry.warmup(&backend, 0, || false).unwrap());
-    assert!(!registry.warmup(&backend, 2, || true).unwrap());
-    assert!(!registry.warmup(&backend, 0, || true).unwrap());
-    assert!(registry.warmup(&backend, MAX_WARMUP_ROUNDS + 1, || false).is_err());
+    assert!(warm_decoder(&backend, &model, 64, 0, &mut || false).unwrap());
+    assert!(!warm_decoder(&backend, &model, 64, 2, &mut || true).unwrap());
+    assert!(!warm_decoder(&backend, &model, 64, 0, &mut || true).unwrap());
     assert_eq!(backend.allocations.get(), before);
     assert!(backend.batches.borrow().is_empty());
+    let file = Fixture::new(1, 8).with_tokenizer().write();
+    let options = Options { warmup_rounds: MAX_WARMUP_ROUNDS + 1, ..Options::new(64) };
+    assert!(Registry::new(Arc::new(CountingBackend::default()), vec![("m".into(), Source::Gguf(file.path().into()))], None, options).is_err());
 }
 
 #[test]
 fn cancellation_between_prefill_and_decode_does_not_construct_a_decoder() {
     let backend = CountingBackend::default();
     let budget = NativeMemoryBudget::new(1_000_000);
-    let registry = registry(&backend, 64, Some(&budget));
+    let model = model(&backend, Some(&budget));
     let weights = budget.used();
-    assert!(!registry.warmup(&backend, 2, || backend.downloads.get() > 0).unwrap());
+    assert!(!warm_decoder(&backend, &model, 64, 2, &mut || backend.downloads.get() > 0).unwrap());
     assert_eq!(backend.downloads.get(), 1);
     assert!(backend.factories.borrow().is_empty());
     assert_eq!(budget.used(), weights);
@@ -181,21 +190,21 @@ fn cancellation_between_prefill_and_decode_does_not_construct_a_decoder() {
 fn cancellation_during_decode_stops_before_the_next_step_and_refunds_buffers() {
     let backend = CountingBackend::default();
     let budget = NativeMemoryBudget::new(1_000_000);
-    let registry = registry(&backend, 64, Some(&budget));
+    let model = model(&backend, Some(&budget));
     let weights = budget.used();
-    assert!(!registry.warmup(&backend, 2, || !backend.positions.borrow().is_empty()).unwrap());
+    assert!(!warm_decoder(&backend, &model, 64, 2, &mut || !backend.positions.borrow().is_empty()).unwrap());
     assert_eq!(*backend.positions.borrow(), [16]);
     assert_eq!(backend.downloads.get(), 2);
     assert_eq!(budget.used(), weights);
 }
 
 #[test]
-fn failures_are_named_and_temporary_reservations_are_refunded() {
+fn warmup_failures_fail_the_load_and_refund_everything() {
     for failure in ["readback", "factory", "decode", "nonfinite_prefill", "nonfinite_decode"] {
-        let backend = CountingBackend::default();
+        let backend = Arc::new(CountingBackend::default());
         let budget = NativeMemoryBudget::new(1_000_000);
-        let registry = registry(&backend, 64, Some(&budget));
-        let weights = budget.used();
+        let file = Fixture::new(1, 8).with_tokenizer().write();
+        let registry = registry(&backend, &[("fixture", file.path())], 2, Some(&budget), false);
         match failure {
             "readback" => backend.fail_download_at.set(Some(1)),
             "factory" => backend.fail_factory.set(true),
@@ -204,114 +213,49 @@ fn failures_are_named_and_temporary_reservations_are_refunded() {
             "nonfinite_decode" => backend.nonfinite_at.set(Some(2)),
             _ => unreachable!(),
         }
-        let error = registry.warmup(&backend, 2, || false).unwrap_err().to_string();
-        assert!(error.contains("model fixture"), "{error}");
+        let Err(LoadError::Failed(error)) = registry.acquire_blocking("fixture") else { panic!("{failure} must fail the load") };
         assert!(error.contains("failure") || error.contains("nonfinite"), "{error}");
-        assert_eq!(budget.used(), weights, "{failure}");
+        assert_eq!(budget.used(), 0, "{failure}");
+        assert_eq!(registry.entries().next().unwrap().phase, Phase::Failed, "a broken model stays failed");
     }
 }
 
 #[test]
-fn allocation_failure_does_not_ignore_the_native_tensor_budget() {
-    let backend = CountingBackend::default();
+fn warmup_memory_refusal_releases_every_alias_and_can_retry() {
+    let backend = Arc::new(CountingBackend::default());
     let file = Fixture::new(1, 8).with_tokenizer().write();
-    let source = crate::gguf::GgufModel::open(file.path()).unwrap();
-    let weights = crate::model::memory::weight_bytes(&source).unwrap();
-    let budget = NativeMemoryBudget::new(weights + 1);
-    let registry = registry(&backend, 64, Some(&budget));
-    let error = registry.warmup(&backend, 2, || false).unwrap_err().to_string();
-    assert!(error.contains("model fixture") && error.contains("memory budget exhausted"), "{error}");
-    assert_eq!(budget.used(), weights);
-    assert_eq!(backend.downloads.get(), 0);
-}
-
-#[test]
-fn daemon_warmup_releases_all_aliases_on_memory_exhaustion() {
-    let backend = CountingBackend::default();
-    let file = Fixture::new(1, 8).with_tokenizer().write();
-    let source = crate::gguf::GgufModel::open(file.path()).unwrap();
-    let weights = crate::model::memory::weight_bytes(&source).unwrap();
-    let budget = NativeMemoryBudget::new(weights + 1);
-    let mut config = super::super::ModelsFile::single_gguf(file.path().to_str().unwrap());
-    config.models.push(config.models[0].clone());
-    config.models[1].name = "alias".into();
-    config.models[1].n_ctx = Some(4);
-    let mut registry = Registry::load_available_with_budget(&backend, &config, 64, Some(&budget), |_| {}).unwrap();
-    assert_eq!(budget.used(), weights);
-    assert!(registry.warmup_available(&backend, 2, || false).unwrap());
-    assert_eq!(budget.used(), 0, "no alias should keep rejected weights resident");
-    assert_eq!(backend.downloads.get(), 0);
-    for model in registry.iter() {
-        let Entry::Unavailable(status) = &model.entry else { panic!("model must be skipped"); };
-        assert!(status.reason.contains("warm-up: native tensor memory budget exhausted"));
+    let budget = NativeMemoryBudget::new(weights(file.path()) + 1);
+    let registry = registry(&backend, &[("fixture", file.path()), ("alias", file.path())], 2, Some(&budget), true);
+    let Err(LoadError::Memory(error)) = registry.acquire_blocking("alias") else { panic!("warm-up exceeds the budget") };
+    assert!(error.contains("memory budget exhausted"), "{error}");
+    assert_eq!((budget.used(), backend.downloads.get()), (0, 0), "no alias keeps rejected weights loaded");
+    for entry in registry.entries() {
+        assert_eq!(entry.phase, Phase::Available, "{}", entry.name);
+        assert!(entry.error.as_deref().is_some_and(|e| e.contains("memory budget exhausted")));
     }
-    let Entry::Unavailable(alias) = &registry.get("alias").unwrap().entry else { unreachable!() };
-    assert_eq!(alias.n_ctx, 4);
-    assert!(registry.warmup_available(&backend, 2, || false).unwrap(), "skipped entries allocate nothing");
-    assert_eq!(budget.used(), 0);
+    assert!(registry.artifact_id("fixture").is_none() && registry.artifact_id("alias").is_none(), "no identity without a loaded model");
+    assert_matches!(registry.acquire_blocking("fixture").map(|_| ()), Err(LoadError::Memory(_)), "a refusal is retried, not remembered");
 }
 
 #[test]
-fn warmup_withdraws_frozen_identity_for_every_unavailable_alias() {
-    let backend = CountingBackend::default();
-    let file = Fixture::new(1, 8).with_tokenizer().write();
-    let source = crate::gguf::GgufModel::open(file.path()).unwrap();
-    let weights = crate::model::memory::weight_bytes(&source).unwrap();
-    let budget = NativeMemoryBudget::new(weights + 1);
-    let mut config = super::super::ModelsFile::single_gguf(file.path().to_str().unwrap());
-    config.models.push(config.models[0].clone());
-    config.models[1].name = "alias".into();
-    let mut registry = Registry::load_available_frozen_with_budget(&backend, &config, 64, Some(&budget), |_| {}).unwrap();
-    assert!(registry.artifact_id("").is_some());
-    assert_eq!(registry.artifact_id(""), registry.artifact_id("alias"));
-    assert!(registry.warmup_available(&backend, 2, || false).unwrap());
-    assert!(registry.artifact_id("").is_none());
-    assert!(registry.artifact_id("alias").is_none());
-    assert_eq!(budget.used(), 0);
-}
-
-#[test]
-fn daemon_warmup_keeps_nonmemory_failures_and_cancellation_fatal_to_readiness() {
-    let backend = CountingBackend::default();
-    let mut registry = registry(&backend, 64, None);
-    assert!(!registry.warmup_available(&backend, 2, || true).unwrap());
-    backend.fail_factory.set(true);
-    let error = registry.warmup_available(&backend, 2, || false).unwrap_err();
-    assert!(error.to_string().contains("injected factory failure"));
-    assert_matches!(&registry.get("").unwrap().entry, Entry::Decoder(_));
-}
-
-#[test]
-fn daemon_warmup_continues_other_models_after_a_partial_allocation_oom() {
-    let backend = CountingBackend::default();
+fn a_refused_model_does_not_stop_the_others() {
+    let backend = Arc::new(CountingBackend::default());
     let a = Fixture::new(1, 8).with_tokenizer().write();
     let b = Fixture::new(1, 8).with_tokenizer().write();
-    let mut config = super::super::ModelsFile::single_gguf(a.path().to_str().unwrap());
-    config.models[0].name = "a".into();
-    config.models.push(config.models[0].clone());
-    config.models[1].name = "alias".into();
-    let mut second = config.models[0].clone();
-    second.name = "b".into();
-    second.gguf = Some(b.path().to_str().unwrap().into());
-    config.models.push(second);
     let budget = NativeMemoryBudget::new(1_000_000);
-    let mut registry = Registry::load_available_with_budget(&backend, &config, 64, Some(&budget), |_| {}).unwrap();
-    let weights = budget.used() / 2;
-    backend.fail_alloc_at.set(Some(backend.allocations.get() + 3));
-    assert!(registry.warmup_available(&backend, 2, || false).unwrap());
-    for name in ["a", "alias"] {
-        assert_matches!(&registry.get(name).unwrap().entry, Entry::Unavailable(_));
-    }
-    assert_matches!(&registry.get("b").unwrap().entry, Entry::Decoder(_));
-    assert_eq!(budget.used(), weights);
-    assert_eq!(backend.downloads.get(), 10, "remaining model still completes both rounds");
+    let registry = registry(&backend, &[("a", a.path()), ("alias", a.path()), ("b", b.path())], 2, Some(&budget), false);
+    backend.fail_alloc_at.set(Some(backend.allocations.get() + 15));
+    let failures = registry.preload();
+    assert_eq!(failures.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["a"]);
+    let phases: Vec<_> = registry.entries().map(|entry| entry.phase).collect();
+    assert_eq!(phases, [Phase::Available, Phase::Available, Phase::Resident]);
+    assert_eq!(budget.used(), weights(b.path()));
+    assert_eq!(backend.downloads.get(), 10, "the remaining model still completes both rounds");
     drop(registry);
     assert_eq!(budget.used(), 0);
 }
 
-fn continuation(backend: &CountingBackend, registry: &Registry<CountingBackend>) -> Vec<Vec<f32>> {
-    let Entry::Decoder(loaded) = &registry.models[0].entry else { unreachable!() };
-    let model = &loaded.model;
+fn continuation(backend: &CountingBackend, model: &Model<CountingBackend>) -> Vec<Vec<f32>> {
     let mut kv = model.new_kv_cache(backend, 16).unwrap();
     let mut prefill_ws = model.alloc_workspace(backend, 3).unwrap();
     let mut ws = model.alloc_workspace(backend, 1).unwrap();
@@ -328,12 +272,12 @@ fn continuation(backend: &CountingBackend, registry: &Registry<CountingBackend>)
 fn warmup_keeps_weights_resident_without_seeding_user_kv_or_changing_logits() {
     let backend = CountingBackend::default();
     let budget = NativeMemoryBudget::new(1_000_000);
-    let registry = registry(&backend, 64, Some(&budget));
+    let model = model(&backend, Some(&budget));
     let weights = budget.used();
-    let baseline = continuation(&backend, &registry);
-    assert!(registry.warmup(&backend, 2, || false).unwrap());
+    let baseline = continuation(&backend, &model);
+    assert!(warm_decoder(&backend, &model, 64, 2, &mut || false).unwrap());
     assert_eq!(budget.used(), weights);
-    assert_eq!(continuation(&backend, &registry), baseline);
+    assert_eq!(continuation(&backend, &model), baseline);
 }
 
 #[test]

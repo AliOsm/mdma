@@ -94,6 +94,10 @@ pub struct Snapshot {
 impl Snapshot {
     /// Current reviewed records, including suspended/revoked history. Reading
     /// these does not confer authorization.
+    pub fn disclosures(&self) -> &[Disclosure] {
+        &self.disclosures
+    }
+
     pub fn records(&self) -> impl Iterator<Item = &Record> {
         self.peers.values()
     }
@@ -286,6 +290,12 @@ impl Store {
 
     pub fn open(path: &Path, server_id: &str) -> Result<Self, Error> {
         let lock = lock(path)?;
+        Ok(Self::new(path, lock, Self::read(path, server_id)?))
+    }
+
+    /// The state as last written, without taking ownership; for display
+    /// while its owner runs. Writes replace the file whole.
+    pub fn read(path: &Path, server_id: &str) -> Result<Snapshot, Error> {
         let mut bytes = Vec::new();
         File::open(path)?
             .take(MAX_STATE_BYTES + 1)
@@ -295,7 +305,7 @@ impl Store {
         }
         let snapshot: Snapshot = serde_json::from_slice(&bytes)?;
         snapshot.validate(server_id)?;
-        Ok(Self::new(path, lock, snapshot))
+        Ok(snapshot)
     }
 
     fn new(path: &Path, lock: File, snapshot: Snapshot) -> Self {

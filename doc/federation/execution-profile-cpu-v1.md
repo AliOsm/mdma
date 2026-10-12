@@ -65,7 +65,7 @@ remain operation policy, not interchangeable-profile permission.
 
 ## Current boundary
 
-`mdma-serve` captures profiles after native calibration and warm-up, only when
+`mdma-serve` captures one profile per workload after warm-up, only when
 federation is explicitly configured. Failure leaves models non-exportable;
 ordinary local serving and authenticated empty-catalog control RPCs can continue.
 Use the current registry getter for model availability; `is_current()` on a

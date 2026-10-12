@@ -11,7 +11,6 @@ use crate::{
         inventory,
     },
     memory::NativeMemoryBudget,
-    registry::Entry,
     session::tracked::Boundary,
 };
 use rama::{
@@ -97,9 +96,9 @@ pub(super) fn prepare<B: Backend>(
     }
     let loaded = native
         .registry
-        .get(&descriptor.model)
-        .ok_or_else(|| Status::not_found("model_unavailable"))?;
-    let Entry::Laya(predictor) = &loaded.entry else {
+        .acquire_blocking(&descriptor.model)
+        .map_err(|_| Status::unavailable("model_unavailable"))?;
+    let Some(predictor) = loaded.laya() else {
         return Err(Status::failed_precondition("selection_changed"));
     };
     let state = serde_json::from_str(&request.state_json)
@@ -119,7 +118,7 @@ pub(super) fn prepare<B: Backend>(
     let bytes = predictor
         .prepared_workspace_bytes(&prepared)
         .map_err(laya_error)?;
-    let reservation = budget.reserve(bytes).map_err(|error| native_error(&error))?;
+    let reservation = budget.reserve(bytes, crate::memory::MemoryCategory::Workspace).map_err(|error| native_error(&error))?;
     let ids: Vec<_> = questions.into_iter().map(|(id, _)| id).collect();
     let predictor = predictor.clone();
     let guard = native.shutdown.clone().map(rama::graceful::WeakShutdownGuard::upgrade);
@@ -180,6 +179,7 @@ impl Service {
             .envelope
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("invalid_request"))?;
+        self.load(&request, envelope, Operation::Decide)?.await?;
         let gate = self.begin(&request, envelope, Operation::Decide)?;
         let cancel = CancellationToken::new();
         let _cancel_on_drop = CancelOnDrop(cancel.clone());

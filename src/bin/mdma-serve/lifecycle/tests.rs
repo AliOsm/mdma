@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 fn startup_config() -> crate::config::Config {
     crate::config::Config::load(|name| match name {
-        "MDMA_GGUF_PATH" | "MDMA_TLS_CERT" | "MDMA_TLS_KEY" | "MDMA_TLS_CA" => {
+        "MDMA_MODELS_DIR" | "MDMA_TLS_CERT" | "MDMA_TLS_KEY" | "MDMA_TLS_CA" => {
             Ok("/unused-startup-fixture".into())
         }
         "MDMA_LISTEN" => Ok("127.0.0.1:0".into()),

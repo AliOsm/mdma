@@ -24,6 +24,7 @@
 //! route aliases additionally require current imports and local caller consent.
 //! No configuration automatically enrolls a peer or approves either permission.
 
+pub mod admin;
 pub mod canonical_json;
 pub mod catalog;
 pub mod catalog_cache;
@@ -38,6 +39,7 @@ pub mod signing;
 pub mod tls;
 pub mod trust;
 pub(crate) mod routing;
+pub(crate) mod topology;
 
 #[cfg(test)]
 mod tests;

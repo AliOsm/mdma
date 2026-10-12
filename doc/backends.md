@@ -49,9 +49,9 @@ On CUDA, `MDMA_CUDA_INT8` picks the K-quant int8 paths: `prefill`
 dp4a decode matvec) or `off` (f32 activations only). CUDA decode replays
 a captured graph per token; `MDMA_CUDA_GRAPHS=0` uses the eager path.
 
-For Vulkan, `MDMA_VK_F16_WEIGHTS=auto` (the default) selects f16 weight
-staging by measuring speed and logit drift at model load; `1` requests f16
-staging without calibration and `0` keeps f32. FP16 arithmetic and its staging
+For Vulkan, `MDMA_VK_F16_WEIGHTS=1` stages prefill weights as f16; anything
+else keeps f32. `VulkanBackend::calibrate_f16` measures speed and logit drift
+for a model when you want to decide. FP16 arithmetic and its staging
 pipeline are optional: unsupported devices retain f32 staging, even with `1`.
 Packed f16 model weights remain supported without FP16 arithmetic.
 `MDMA_VK_PROFILE=1` flushes each operation

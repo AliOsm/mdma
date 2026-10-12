@@ -17,7 +17,7 @@ use crate::{
     },
     session::{
         tracked::Tokens,
-        worker::{FinishReason, WorkerEnd},
+        worker::WorkerEnd,
     },
 };
 use rama::http::grpc::Status;
@@ -279,12 +279,7 @@ impl Stream for Synthesis {
                         Event::Completed(Completed {
                             request_id: this.supervisor.envelope.request_id.clone(),
                             emitted_tokens: this.emitted,
-                            finish_reason: match completion.reason {
-                                FinishReason::Eos => "eos",
-                                FinishReason::MaxTokens => "max_tokens",
-                                FinishReason::ContextLimit => "context_limit",
-                            }
-                            .into(),
+                            finish_reason: completion.reason.as_str().into(),
                         })
                     }
                 },

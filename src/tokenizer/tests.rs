@@ -27,7 +27,7 @@ pub(crate) fn tiny_tokenizer_with_eos(eos_id: Option<u32>) -> Tokenizer {
         pieces, piece_to_id, scores: vec![0.0; 128],
         bos_id: None, eos_id, unk_id: None,
         add_bos: false, add_space_prefix: false,
-        merge_ranks: None, specials: Vec::new(), stop_ids: Vec::new(), byte_bpe: None,
+        merge_ranks: None, specials: Vec::new(), stop_ids: Vec::new(), byte_bpe: None, chat: None,
     }
 }
 

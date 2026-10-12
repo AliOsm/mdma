@@ -20,8 +20,7 @@ eligibility must remain valid at dispatch. A pooled connection or earlier
 `Identify` is not authorization under the current trust policy.
 
 The executor MUST resolve the selected model to a local GGUF or Laya entry.
-It MUST NOT execute an upstream entry, call another MDMA node or return a
-redirect. V1 does not accept a hop count permitting onward forwarding.
+It MUST NOT call another MDMA node or return a redirect. V1 does not accept a hop count permitting onward forwarding.
 This prevents loops by construction.
 
 An authenticated peer represents itself, not its individual end users.
@@ -188,6 +187,28 @@ is reached first. Slow receivers apply backpressure at safe boundaries.
 Deadline/cancellation checks remain active while writes are blocked.
 Do not spool prompts/results to disk to accommodate slow clients.
 
+### Leases
+
+An origin keeps a routed model loaded on its executor with
+`AcquireLease{origin, destination, model, artifact_id, profile_id, ttl_ms}`,
+`RenewLease{lease_id, ttl_ms}` and `ReleaseLease{lease_id}`. Acquire and Renew
+need the same Execute grant as the model's operation and count against the
+peer's control budget; Release needs only an authenticated binding. A changed
+artifact or profile is `FAILED_PRECONDITION / selection_changed`, and an
+ungranted model is `PERMISSION_DENIED` whether or not it exists.
+
+The executor starts the load in the background and answers at once with
+`resident`; its catalog reports when the model is loaded. A peer holds at most
+4 leases. A lease ends after `ttl_ms` (5 s to 10 min, 60 s by default) unless
+renewed, so a vanished origin, or one whose grant was removed (it can no
+longer renew), lets the model go within one TTL. Leases are not shared between
+peers or with local clients, and ids are only valid for the peer that took
+them.
+
+The origin holds one executor lease per routed alias while any local lease on
+that alias is live, renews it every 20 s with a 60 s TTL, retakes it if the
+executor forgot it, and releases it with the last local lease.
+
 ## 6. Errors, bounds and observability
 
 Use ordinary gRPC status codes, with sanitized machine-readable reasons:
@@ -230,7 +251,7 @@ headers are untrusted; bound cardinality and allowlist propagated metadata.
 Future implementation tests MUST cover:
 
 - No permissions by default; catalog visibility without execution permission.
-- Local caller disclosure restrictions and no onward/upstream execution.
+- Local caller disclosure restrictions and no onward execution.
 - Artifact/profile changes between advertisement and admission.
 - Presence-preserving sampler forwarding and receiver-resolved limits.
 - Concurrent duplicate IDs, full ledgers and documented restart behavior.

@@ -1,0 +1,7 @@
+# mdma-serve holds a machine-wide lock: tests that start it run one at a time.
+[test-groups]
+mdma-serve = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(web_cli) | binary(fed_cli) | binary(checkpoint_cli)'
+test-group = 'mdma-serve'

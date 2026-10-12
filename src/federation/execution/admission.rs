@@ -13,18 +13,18 @@ use crate::{
     federation::{
         catalog::{Limits, ModelDescriptor},
         config::{self, Operation, TlsRole},
-        control::{DecideRequest, ExecutionEnvelope, SamplerConfig, SynthesizeRequest},
+        control::{DecideRequest, ExecutionEnvelope, LeaseGrant, SamplerConfig, SynthesizeRequest},
         inventory::{self, Inventory},
         tls::{Binding, utc_ms},
         trust::{Action, Store},
     },
-    registry::Entry,
     session::{Session, tracked::Tokens, worker::Admission},
 };
 use rama::{
     extensions::{Extensions, ExtensionsRef, Ingress},
     http::grpc::{Request, Status},
 };
+use crate::registry::{Holder, Lease, LeaseError};
 use std::{sync::Arc, time::Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -39,6 +39,9 @@ pub(super) type Launch = Box<
         + Send,
 >;
 
+/// A model load in progress.
+pub(crate) type Loading<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Status>> + Send + 'a>>;
+
 pub(crate) struct Prepared {
     pub(super) admission: Admission,
     pub(super) launch: Launch,
@@ -46,6 +49,24 @@ pub(crate) struct Prepared {
 
 pub(crate) trait Executor: Send + Sync {
     fn descriptor(&self, model: &str) -> Result<ModelDescriptor, Status>;
+    /// A lease keeping `model` loaded for `peer`; the load starts in the background.
+    fn lease(&self, _peer: &str, _model: &str, _ttl: Option<std::time::Duration>) -> Result<LeaseGrant, Status> {
+        Err(Status::unimplemented("execution_disabled"))
+    }
+    /// The model a peer's lease is on.
+    fn lease_model(&self, _peer: &str, _id: &str) -> Result<String, Status> {
+        Err(Status::not_found("lease_unknown"))
+    }
+    fn renew_lease(&self, _peer: &str, _id: &str, _ttl: Option<std::time::Duration>) -> Result<LeaseGrant, Status> {
+        Err(Status::not_found("lease_unknown"))
+    }
+    fn release_lease(&self, _peer: &str, _id: &str) -> Result<(), Status> {
+        Err(Status::not_found("lease_unknown"))
+    }
+    /// Loads `model` if it is not loaded, off the async runtime.
+    fn load<'a>(&'a self, _model: &'a str) -> Loading<'a> {
+        Box::pin(std::future::ready(Ok(())))
+    }
     fn prepare(
         &self,
         request: &SynthesizeRequest,
@@ -65,6 +86,36 @@ pub(crate) struct Native<B: Backend> {
     pub backend: Arc<B>,
     pub inventory: inventory::Native<B>,
     pub decision_budget: crate::memory::NativeMemoryBudget,
+}
+
+impl<B> Native<B>
+where
+    B: Backend + Send + Sync + 'static,
+    B::Buf: Send + Sync,
+{
+    /// The lease's answer, starting the load if the model is on disk.
+    fn grant(&self, lease: &Lease) -> LeaseGrant {
+        let resident = self.inventory.registry.resident(&lease.model).is_some();
+        if !resident {
+            let (registry, model) = (self.inventory.registry.clone(), lease.model.clone());
+            // The outcome is recorded on the model and published in the catalog.
+            drop(tokio::task::spawn_blocking(move || registry.acquire_blocking(&model).map(drop)));
+        }
+        LeaseGrant {
+            lease_id: lease.id.clone(),
+            model: lease.model.clone(),
+            ttl_ms: lease.ttl_ms(),
+            resident,
+        }
+    }
+}
+
+#[expect(clippy::needless_pass_by_value, reason = "map_err adapter")]
+fn lease_error(error: LeaseError) -> Status {
+    match error {
+        LeaseError::Missing(_) | LeaseError::Unknown => Status::not_found("lease_unknown"),
+        LeaseError::Limit(..) | LeaseError::Full(_) => Status::resource_exhausted("limit_exceeded"),
+    }
 }
 
 pub(super) fn native_error(error: &crate::backend::Error) -> Status {
@@ -114,9 +165,43 @@ where
             boundary,
         )
     }
+    fn load<'a>(&'a self, model: &'a str) -> Loading<'a> {
+        Box::pin(async move {
+            if self.inventory.registry.resident(model).is_some() {
+                return Ok(());
+            }
+            let (registry, model) = (self.inventory.registry.clone(), model.to_owned());
+            tokio::task::spawn_blocking(move || registry.acquire_blocking(&model).map(drop))
+                .await
+                .map_err(|_| Status::internal("execution_failed"))?
+                .map_err(|error| match error {
+                    crate::registry::LoadError::Memory(_) => Status::resource_exhausted("limit_exceeded"),
+                    crate::registry::LoadError::Failed(_) => Status::unavailable("model_unavailable"),
+                })
+        })
+    }
+
+    fn lease(&self, peer: &str, model: &str, ttl: Option<std::time::Duration>) -> Result<LeaseGrant, Status> {
+        let lease = self.inventory.registry.lease(Holder::Peer(peer.to_owned()), model, ttl).map_err(lease_error)?;
+        Ok(self.grant(&lease))
+    }
+
+    fn lease_model(&self, peer: &str, id: &str) -> Result<String, Status> {
+        self.inventory.registry.lease_model(&Holder::Peer(peer.to_owned()), id).map_err(lease_error)
+    }
+
+    fn renew_lease(&self, peer: &str, id: &str, ttl: Option<std::time::Duration>) -> Result<LeaseGrant, Status> {
+        let lease = self.inventory.registry.renew(&Holder::Peer(peer.to_owned()), id, ttl).map_err(lease_error)?;
+        Ok(self.grant(&lease))
+    }
+
+    fn release_lease(&self, peer: &str, id: &str) -> Result<(), Status> {
+        self.inventory.registry.release(&Holder::Peer(peer.to_owned()), id).map_err(lease_error)
+    }
+
     fn descriptor(&self, model: &str) -> Result<ModelDescriptor, Status> {
         // Permission is checked before calling this method.
-        if self.inventory.registry.get(model).is_none() {
+        if self.inventory.registry.info(model).is_none() {
             return Err(Status::not_found("model_unavailable"));
         }
         let snapshot = self.inventory.snapshot(&[model.into()]);
@@ -148,9 +233,9 @@ where
         let loaded = self
             .inventory
             .registry
-            .get(&descriptor.model)
-            .ok_or_else(|| Status::not_found("model_unavailable"))?;
-        let Entry::Decoder(decoder) = &loaded.entry else {
+            .acquire_blocking(&descriptor.model)
+            .map_err(|_| Status::unavailable("model_unavailable"))?;
+        let Some(decoder) = loaded.decoder() else {
             return Err(Status::failed_precondition("selection_changed"));
         };
         let session = Session::new(
@@ -291,6 +376,27 @@ impl Service {
         ))
     }
 
+    pub(crate) fn executor(&self) -> &Arc<dyn Executor> {
+        &self.executor
+    }
+
+    /// Load the model a permitted caller asked for before admission, so the
+    /// first request to an on-disk model does not block the runtime.
+    pub(crate) fn load<'a, T>(
+        &'a self, request: &Request<T>, envelope: &'a ExecutionEnvelope, operation: Operation,
+    ) -> Result<Loading<'a>, Status> {
+        let binding = request
+            .extensions()
+            .get_ref::<Ingress<Extensions>>()
+            .and_then(|ingress| ingress.0.get_ref::<Binding>())
+            .ok_or_else(|| Status::unauthenticated("identity_mismatch"))?;
+        if binding.role() != TlsRole::ClientAuth || binding.server_id() != envelope.origin {
+            return Err(Status::unauthenticated("identity_mismatch"));
+        }
+        self.authorize_operation(binding, envelope, operation)?;
+        Ok(self.executor.load(&envelope.model))
+    }
+
     pub(super) fn begin<T>(
         &self,
         request: &Request<T>,
@@ -385,7 +491,7 @@ impl Service {
         if self.authorize_operation(binding, envelope, operation)? != generation {
             return Err(Status::aborted("authorization_changed"));
         }
-        if &self.selection(envelope)? != descriptor {
+        if !self.selection(envelope)?.same_selection(descriptor) {
             return Err(Status::aborted("selection_changed"));
         }
         Ok(())

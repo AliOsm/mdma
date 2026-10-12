@@ -4,7 +4,7 @@ use crate::backend::cpu::{CpuBackend, CpuBuf};
 use crate::backend::{AttnSpec, Error, KvView, Pool, QWeight, RopeSpec};
 use crate::model::Model;
 use crate::model::arch::llama::ARCH;
-use crate::registry::{ModelSpec, ModelsFile, Registry};
+use crate::registry::{Options, Registry, Source};
 use crate::gguf::tests::{Fixture, weight};
 use crate::gguf::{GgmlDType, TensorDesc};
 use candle_core::quantized::gguf_file::Value;
@@ -308,18 +308,18 @@ fn rejects_truncated_last_payload_before_any_upload() {
 }
 
 #[test]
+#[expect(clippy::arc_with_non_send_sync, reason = "the counting fake uses Cell; a registry owns its backend")]
 fn registry_preflights_later_models_before_loading_the_first() {
-    let first = Fixture::new(2, 8).write();
+    let first = Fixture::new(2, 8).with_tokenizer().write();
     let mut invalid = Fixture::new(2, 8);
     invalid.metadata.insert("general.architecture".into(), Value::String("qwen35".into()));
     let second = invalid.write();
-    let models = [("first", &first), ("second", &second)].into_iter().map(|(name, file)| ModelSpec {
-        name: name.into(), gguf: Some(file.path().to_str().unwrap().into()), laya: None, upstream: None, n_ctx: None,
-    }).collect();
-    let file = ModelsFile { default: None, models };
-    let backend = CountingBackend::default();
-    let error = Registry::load(&backend, &file, 64, |_| panic!("decoder callback before preflight")).err().unwrap();
+    let models = [("first", &first), ("second", &second)].into_iter()
+        .map(|(name, file)| (name.to_owned(), Source::Gguf(file.path().into()))).collect();
+    let backend = std::sync::Arc::new(CountingBackend::default());
+    let error = Registry::new(backend.clone(), models, None, Options::new(64)).err().unwrap();
     assert!(error.to_string().contains("model second: unsupported model: architecture \"qwen35\""), "{error}");
+    backend.assert_unused();
     backend.assert_unused();
 }
 

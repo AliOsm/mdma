@@ -359,6 +359,15 @@ impl Backend for MetalBackend {
     fn device_label(&self) -> Option<String> { Some(self.device_name()) }
     fn unified_memory(&self) -> bool { self.device.hasUnifiedMemory() }
 
+    /// What this device can use with good performance, less what it holds now.
+    fn available_device_bytes(&self) -> Result<Option<usize>> {
+        Ok(self.total_device_bytes().map(|total| total.saturating_sub(self.device.currentAllocatedSize())))
+    }
+
+    fn total_device_bytes(&self) -> Option<usize> {
+        usize::try_from(self.device.recommendedMaxWorkingSetSize()).ok()
+    }
+
     fn decoder<'a>(
         &'a self,
         model: &'a crate::model::Model<Self>,

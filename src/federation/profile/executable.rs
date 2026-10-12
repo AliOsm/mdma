@@ -1,10 +1,14 @@
 //! Kernel-backed executable identity. No current_exe/path-only fallback.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "freebsd")))]
 use std::{fs::File, io};
 
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)] // dyld/libproc FFI
 mod macos;
+
+#[cfg(target_os = "freebsd")]
+#[allow(unsafe_code)] // sysctl FFI
+mod freebsd;
 
 #[cfg(target_os = "linux")]
 pub(super) fn open() -> io::Result<File> {
@@ -27,7 +31,10 @@ pub(super) fn validate(file: &File) -> io::Result<()> {
 #[cfg(target_os = "macos")]
 pub(super) use macos::{open, validate};
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "freebsd")]
+pub(super) use freebsd::{open, validate};
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
 pub(super) fn open() -> io::Result<File> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -35,7 +42,7 @@ pub(super) fn open() -> io::Result<File> {
     ))
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
 pub(super) fn validate(_: &File) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

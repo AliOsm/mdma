@@ -1,9 +1,10 @@
 use super::super::{deadline, ingress::Receipt};
 use super::*;
+use std::assert_matches;
 use crate::{
     backend::cpu::CpuBackend,
     federation::{config::ExecuteExport, control::ExecutionEnvelope, tls::tests::Fixture},
-    registry::{ModelSpec, ModelsFile, Registry},
+    registry::{Options, Registry, Source},
 };
 use rama::{
     extensions::{Extensions, ExtensionsRef, Ingress},
@@ -30,20 +31,10 @@ fn setup_with_budget(
     let f = Fixture::new();
     let (binding, _) = f.bindings();
     let dir = crate::laya::compat_tests::checkpoint();
-    let models = ModelsFile {
-        default: None,
-        models: vec![ModelSpec {
-            name: "laya".into(),
-            laya: Some(dir.path().to_str().unwrap().into()),
-            gguf: None,
-            upstream: None,
-            n_ctx: None,
-        }],
-    };
-    let mut registry =
-        Registry::load_available_frozen_with_budget(&CpuBackend, &models, 32, None, |_| {})
-            .unwrap();
-    registry.capture_execution_profiles(&CpuBackend).unwrap();
+    let options = Options { frozen: true, ..Options::new(32) };
+    let mut registry = Registry::new(Arc::new(CpuBackend), vec![("laya".into(), Source::Laya(dir.path().into()))], None, options).unwrap();
+    assert!(registry.preload().is_empty());
+    registry.capture_execution_profiles().unwrap();
     let executor: Arc<dyn super::super::admission::Executor> =
         Arc::new(super::super::admission::Native {
             backend: Arc::new(CpuBackend),
@@ -51,6 +42,7 @@ fn setup_with_budget(
                 registry: Arc::new(registry),
                 shutdown: None,
                 power: None,
+                host: Arc::default(),
             },
             decision_budget: budget,
         });
@@ -249,7 +241,7 @@ async fn request_ids_are_shared_across_decide_and_synthesize() {
             .insert(Receipt(Ok(deadline::Ingress::capture(&headers).unwrap())));
         req
     };
-    assert!(matches!(service.synthesize(request), Err(s) if s.code() == Code::AlreadyExists));
+    assert_matches!(service.synthesize(request).map(|_| ()), Err(s) if s.code() == Code::AlreadyExists);
 }
 
 #[test]

@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Per-user LaunchAgent: install to ~/Library/LaunchAgents and replace YOUR_USER.
+     The capability URL is printed to the log: grep 'listening on' ~/Library/Logs/mdma-web.log -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.seuros.mdma-web</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/mdma-web</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MDMA_WEB_LISTEN</key>
+        <string>127.0.0.1:6364</string>
+        <key>MDMA_ADDR</key>
+        <string>localhost:6362</string>
+        <key>MDMA_TLS_CERT</key>
+        <string>/Users/YOUR_USER/.config/mdma/tls/client/client.pem</string>
+        <key>MDMA_TLS_KEY</key>
+        <string>/Users/YOUR_USER/.config/mdma/tls/client/client-key.pem</string>
+        <key>MDMA_TLS_CA</key>
+        <string>/Users/YOUR_USER/.config/mdma/tls/client/ca.pem</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>ExitTimeOut</key>
+    <integer>15</integer>
+    <key>Umask</key>
+    <integer>63</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USER/Library/Logs/mdma-web.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USER/Library/Logs/mdma-web.log</string>
+</dict>
+</plist>

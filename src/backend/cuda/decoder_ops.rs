@@ -7,12 +7,13 @@ pub(super) const WINDOWED_MAX_HEAD_DIM: usize = 512;
 
 impl CudaBackend {
     /// op 0 scales, op 1 softcaps (unary_f32).
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes x on the device")]
     pub(super) fn unary(&self, x: &mut CudaBuf, value: f32, op: i32) -> Result<()> {
         let n = shape::elems("unary", x.len)?;
         if n == 0 {
             return Ok(());
         }
-        let (mut x_ptr, mut n_i, mut value, mut op) = (x.ptr, n as i32, value, op);
+        let (mut x_ptr, mut n_i, mut value, mut op) = (x.ptr, int(n)?, value, op);
         self.launch(
             "unary_f32",
             [(n as u32).div_ceil(256), 1, 1],
@@ -21,13 +22,14 @@ impl CudaBackend {
         )
     }
 
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes y on the device")]
     pub(super) fn gelu(&self, a: &CudaBuf, b: &CudaBuf, y: &mut CudaBuf) -> Result<()> {
         let n = shape::elementwise("gelu_tanh_mul", &[shape::elems("gelu", a.len)?,
             shape::elems("gelu", b.len)?], &[shape::elems("gelu", y.len)?])?;
         if n == 0 {
             return Ok(());
         }
-        let (mut a_ptr, mut b_ptr, mut y_ptr, mut n_i) = (a.ptr, b.ptr, y.ptr, n as i32);
+        let (mut a_ptr, mut b_ptr, mut y_ptr, mut n_i) = (a.ptr, b.ptr, y.ptr, int(n)?);
         self.launch(
             "gelu_tanh_mul_f32",
             [(n as u32).div_ceil(256), 1, 1],
@@ -36,13 +38,14 @@ impl CudaBackend {
         )
     }
 
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes x on the device")]
     pub(super) fn split_rope(&self, x: &mut CudaBuf, pos: u32, spec: &RopeSpec, factors: &CudaBuf) -> Result<()> {
         self.eager_only("rope_split_half")?;
         let n = shape::elems("rope_split_half", x.len)?;
         shape::rope_split_half(n, shape::elems("rope_split_half", factors.len)?, spec)?;
         let mut fr = rope_freqs("rope_split_half", spec)?;
         let (mut x_ptr, mut f_ptr) = (x.ptr, factors.ptr);
-        let (mut n_i, mut hd, mut pos) = (n as i32, spec.head_dim as i32, pos);
+        let (mut n_i, mut hd, mut pos) = (int(n)?, int(spec.head_dim)?, pos);
         self.launch(
             "rope_split_half_f32",
             [(n as u32 / 2).div_ceil(256), 1, 1],
@@ -51,6 +54,7 @@ impl CudaBackend {
         )
     }
 
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes o on the device")]
     pub(super) fn attention_windowed(&self, q: &CudaBuf, kv: &KvView<CudaBuf>, spec: &AttnSpec,
         scale: f32, window: usize, o: &mut CudaBuf) -> Result<()> {
         self.eager_only("attn_windowed")?;
@@ -67,9 +71,9 @@ impl CudaBackend {
             )));
         }
         let (mut q_ptr, mut k_ptr, mut v_ptr, mut o_ptr) = (q.ptr, kv.k.ptr, kv.v.ptr, o.ptr);
-        let (mut hd, mut qh, mut kh) = (spec.head_dim as i32, spec.n_q_heads as i32, spec.n_kv_heads as i32);
-        let (mut prefix, mut scale) = (prefix as i32, scale);
-        let mut window = window.min(kv.len) as i32;
+        let (mut hd, mut qh, mut kh) = (int(spec.head_dim)?, int(spec.n_q_heads)?, int(spec.n_kv_heads)?);
+        let (mut prefix, mut scale) = (int(prefix)?, scale);
+        let mut window = int(window.min(kv.len))?;
         self.launch(
             "attn_windowed_f16kv",
             [spec.n_q_heads as u32, n_q as u32, 1],
@@ -80,11 +84,12 @@ impl CudaBackend {
 
     /// Q5_K matvec (gemv_q5k): never the int8 or gemv_q paths, which only
     /// know Q4_K and Q6_K.
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes y on the device")]
     pub(super) fn qmatmul_q5k(&self, w: &QWeight<CudaBuf>, x: &CudaBuf, y: &mut CudaBuf,
         n_out: usize, n_in: usize, n_tokens: usize) -> Result<()> {
         shape::kquant_aligned("qmatmul", w.dtype, n_in)?;
         let (mut w_ptr, mut x_ptr, mut y_ptr) = (w.buf.ptr, x.ptr, y.ptr);
-        let (mut n_out_i, mut n_in_i) = (n_out as i32, n_in as i32);
+        let (mut n_out_i, mut n_in_i) = (int(n_out)?, int(n_in)?);
         self.launch(
             "gemv_q5k",
             [(n_out as u32).div_ceil(WARPS), n_tokens as u32, 1],

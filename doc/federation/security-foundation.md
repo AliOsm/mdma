@@ -93,8 +93,8 @@ enrollment or confer subsequent permissions.
 Without a native service the catalog is empty. With normal client serving,
 explicit per-recipient `catalog_exports` can disclose frozen native CPU GGUF
 and CPU Laya entries with current exact artifact/executable-profile identities.
-Absent grants disclose nothing; unknown, unavailable, ordinary/unfrozen,
-upstream and unsupported-profile entries are omitted. It signs with
+Absent grants disclose nothing; unknown, unavailable, ordinary/unfrozen
+and unsupported-profile entries are omitted. It signs with
 one explicitly selected, locally approved key ID/private key. Approval, immutable
 ID history, retirement and material denials apply to local signers too; there is
 no automatic fallback.
@@ -155,11 +155,11 @@ independent explicit workload switches and native-service integration.
 Catalog visibility alone never enables delegated inference.
 
 For initial activation without models, set `MDMA_FEDERATION_CONTROL_ONLY=1`.
-This requires the runtime config and CPU backend, rejects `MDMA_MODELS` and
-`MDMA_GGUF_PATH`, and initializes no compute backend or model registry.
+This requires the runtime config and CPU backend, rejects `MDMA_MODELS_DIR`,
+and initializes no compute backend or model registry.
 It opens only the federation listener. Normal client-domain TLS certificate/
-CA inputs and `MDMA_LISTEN` remain required for isolation checks; that client
-address is not bound in bootstrap mode. Normal machine-lock and signal/drain
+CA inputs remain required, and `MDMA_LISTEN` (default `127.0.0.1:6362`) is
+still checked for isolation; that client address is not bound in bootstrap mode. Normal machine-lock and signal/drain
 supervision still apply; this is not a second-daemon bypass.
 
 Set `poll_catalogs = true` only to enable outbound control polling of already
@@ -207,7 +207,7 @@ Logical relative paths, not checkpoint location or symlink targets, are hashed;
 unconsumed files are excluded.
 
 `Registry::artifact_id` is read-only load provenance, not an export decision.
-Ordinary/library-constructed decoders, upstreams and unavailable native entries
+Ordinary/library-constructed decoders and unavailable native entries
 have no publishable identity. Warm-up failure withdraws all affected aliases.
 These snapshots protect against accidental concurrent writers/path changes;
 they are not OS sealing or attestation against the operator/root.
@@ -226,7 +226,7 @@ use separate [GPU profiles](execution-profile-gpu-v1.md), never a manual CPU lab
 
 The federation listener reads the **same immutable loaded registry**, power
 receiver and shutdown guard as the native client service. It never calls
-upstreams, transfers models, reopens model paths or invents descriptors from
+other nodes, transfers models, reopens model paths or invents descriptors from
 grants. CPU Laya remains CPU even in a GPU daemon. Concrete Metal, ROCm and
 Vulkan decoders can export current loader-created GPU profiles; unsupported
 backends cannot invent descriptors from grants.
@@ -377,8 +377,8 @@ The wire schema and private native controller now also implement unary `Decide`,
 sharing the same authenticated envelope, exact selection, rate/ID ledger,
 native-thread admission and node response quota with synthesis. A synthesis or
 catalog grant does not authorize a decision. The native lookup can only select
-a frozen, currently profiled local CPU Laya checkpoint; no upstream/default
-fallback or peer forwarding occurs.
+a frozen, currently profiled local CPU Laya checkpoint; no default fallback
+or peer forwarding occurs.
 
 Combined input JSON is capped at 65,536 UTF-8 bytes and questions at 128.
 Validation/preparation uses the same actual Predictor algorithm as ordinary

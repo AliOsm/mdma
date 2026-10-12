@@ -54,6 +54,25 @@ pub(crate) struct Running {
     pub worker: JoinHandle<BResult<WorkerEnd>>,
 }
 
+impl<B> Session<B>
+where
+    B: Backend + Send + Sync + 'static,
+    B::Buf: Send + Sync,
+{
+    /// `generate_guarded`, also returning the admission and the worker handle.
+    pub(crate) fn start_tracked(
+        &self,
+        prompt: &str,
+        max_tokens: usize,
+        cancel: CancellationToken,
+        guard: Option<ShutdownGuard>,
+    ) -> BResult<(worker::Admission, Running)> {
+        let prepared = self.prepare(prompt, max_tokens, !cancel.is_cancelled(), self.prefix.clone())?;
+        let admission = prepared.admission().clone();
+        Ok((admission, prepared.start(cancel, guard)))
+    }
+}
+
 impl<B> Prepared<B>
 where
     B: Backend + Send + Sync + 'static,

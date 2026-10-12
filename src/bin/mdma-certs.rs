@@ -3,6 +3,7 @@
 // is not persisted, so this helper cannot issue additional clients for it.
 //
 // Usage: mdma-certs [output-dir]  (defaults to ./certs)
+//        mdma-certs --spki <cert.pem>  prints the certificate's pin for MDMA_OPERATOR_SPKI
 //
 // Writes: ca.pem, server.pem, server-key.pem, client.pem, client-key.pem
 //
@@ -47,6 +48,11 @@ fn leaf_params(common_name: &str, san: Vec<String>, client_auth: bool) -> Result
 }
 
 fn main() -> Result<(), BoxError> {
+    if std::env::args().nth(1).as_deref() == Some("--spki") {
+        let path = std::env::args().nth(2).ok_or("usage: mdma-certs --spki <cert.pem>")?;
+        println!("{}", mdma::grpc::client::spki_pin(path.as_ref()).map_err(|e| format!("{path}: {e}"))?);
+        return Ok(());
+    }
     let out_dir: PathBuf = std::env::args().nth(1).map_or_else(|| PathBuf::from("certs"), PathBuf::from);
     fs::create_dir_all(&out_dir)?;
 

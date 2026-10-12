@@ -7,8 +7,8 @@ refuses to start without mTLS material.
 # one-time: self-signed CA + server cert + one client cert into ./certs
 cargo run --release --bin mdma-certs
 
-MDMA_GGUF_PATH=/models/model-Q4_K_M.gguf \
-MDMA_LISTEN=0.0.0.0:50051 \
+MDMA_MODELS_DIR=/models \
+MDMA_LISTEN=0.0.0.0:6362 \
 MDMA_TLS_CERT=certs/server.pem \
 MDMA_TLS_KEY=certs/server-key.pem \
 MDMA_TLS_CA=certs/ca.pem \
@@ -16,6 +16,10 @@ MDMA_BACKEND=rocm \
 MDMA_N_CTX=4096 \
 cargo run --release --features rocm --bin mdma-serve
 ```
+
+`MDMA_LISTEN` defaults to `127.0.0.1:6362` ("mdma" on a phone keypad), so a
+bare server is reachable only from its own machine; set it to serve others.
+Clients default to `MDMA_ADDR=localhost:6362`.
 
 `MDMA_BACKEND` accepts `cpu` (default), `rocm`, `level0`, `vulkan`, `cuda`,
 or `metal`, with the corresponding build feature and supported hardware.
@@ -25,13 +29,14 @@ remaining space; prompts that leave no room for requested output are
 rejected. Explicit invalid configuration values fail startup.
 Context rejection is reported as gRPC `RESOURCE_EXHAUSTED`, before tensor allocation.
 
-`mdma-serve` keeps native weights resident and finishes inference warm-up before
-opening its listener. `MDMA_WARMUP_ROUNDS` defaults to **2** (integer **0..8**;
-**0** explicitly disables it). Each unique GGUF runs up to 16 synthetic prefill
-tokens and four decode steps per round, reduced for small contexts. Failures
-caused by memory exhaustion unload the affected model and continue startup;
-other failures abort startup. Temporary KV/workspace/graphs do not seed user requests.
-Wait for the mTLS `Introspect.ready` response, not just a running service process.
+`mdma-serve` opens its listener once the models folder is read; it loads no
+weights at startup. A model loads on its first use (one load at a time per
+file, shared by every request waiting for it), warms up, and stays resident.
+`MDMA_WARMUP_ROUNDS` defaults to **1** (integer **0..8**; **0** disables it):
+each load runs up to 16 synthetic prefill tokens and four decode steps per
+round, reduced for small contexts. A load that runs out of memory leaves the
+model `available` and is retried on its next use; any other load failure marks
+it `failed`. Temporary KV/workspace/graphs do not seed user requests.
 See [service startup and readiness](services.md#startup-warm-up).
 
 Fresh request KV caches are sized to the prompt plus the output tokens
@@ -57,70 +62,69 @@ tensor admission and can fail during execution. Driver internals and ordinary
 host allocations still need headroom.
 
 
-## Several models on one port
+## The models folder
 
-`MDMA_MODELS` replaces `MDMA_GGUF_PATH` with a registry file, so one
-process serves native GGUF decoders on `MDMA_BACKEND`, Laya checkpoints
-on the CPU, and models on other MDMA nodes over mTLS gRPC.
-Requests name the model; an empty name means `default`.
+`MDMA_MODELS_DIR` is the one folder a server serves from:
 
-```toml
-default = "minicheck"
-
-[[models]]
-name = "minicheck"
-gguf = "/models/Bespoke-MiniCheck-7B-Q4_K_M.gguf"
-n_ctx = 4096                       # optional; MDMA_N_CTX otherwise
-
-[[models]]
-name = "laya"
-laya = "/models/laya"              # a Laya checkpoint directory; Decide, not Synthesize
-
-[[models]]
-name = "qwen"
-[models.upstream]
-url = "https://worker.example:50051"
-model = "qwen"                    # optional; the remote default otherwise
-tls_cert = "/certs/client.pem"
-tls_key = "/certs/client-key.pem"
-tls_ca = "/certs/ca.pem"
+```text
+/models/
+  minicheck.gguf          -> served as "minicheck" (Synthesize)
+  qwen3-8b.gguf           -> "qwen3-8b"
+  tiny.gguf -> minicheck.gguf   a symlink: an alias sharing one upload
+  laya/                   -> "laya": a Laya checkpoint folder (Decide)
 ```
 
-Startup fails with the entry's name if a local model or upstream
-credentials cannot be loaded. Upstreams connect on demand and require an HTTPS origin.
-Certificate paths are relative to the server's working directory unless
-absolute. The remote node must trust the client certificate's CA, and
-`tls_ca` must trust the remote server certificate.
+Every `*.gguf` is a GGUF decoder named after its file stem, and every
+subfolder holding `model.safetensors`, `rl_agent_config.json`,
+`encoder/config.json` and `tokenizer/tokenizer{,_config}.json` is a Laya
+checkpoint named after the folder. Names must match `[A-Za-z0-9._-]{1,128}`.
+Dotfiles, other files and GGUFs that fail preflight (unsupported
+architecture, missing tokenizer) are skipped with a log line. Symlinks are
+followed, so a model can live on another disk. Requests name the model; an
+empty name means `MDMA_DEFAULT_MODEL`, else the first name alphabetically.
+Models on other MDMA nodes are reached through [federation](federation.md)
+routes.
 
-`Synthesize` and `Decide` forward to the configured remote model, preserving
-token IDs, text, sampler fields, and gRPC errors. Local admission rules
-still apply; the remote node enforces its own context and power limits.
-Forwarding is limited to eight hops to bound configuration loops.
+### Memory, eviction and leases
 
-`Introspect` lists each model's backend, architecture, context, and local
-on-disk weight size (zero for upstreams). A remote model is ready only
-when both nodes and that model are ready; a failed or timed-out remote
-health check marks the entry unready. Each remote check has a two-second
-timeout. Top-level readiness describes the local node.
-Native entries pointing to the **same GGUF file** share one weight upload
-and tokenizer, including symlink/hardlink aliases. Names and `n_ctx` caps
-remain independent; request KV is not shared. Separate files are not
-deduplicated. Introspect's on-disk size is repeated per alias, not additive
-resident memory.
+When a load does not fit, the server unloads the least recently used models
+that nobody holds a lease on and no request is using, until it fits. If it
+still does not fit, the request fails with `RESOURCE_EXHAUSTED` naming what
+holds the memory. CUDA, ROCm, Vulkan and Metal check free device memory before
+each load; the CPU backend budgets 75% of RAM unless
+`MDMA_NATIVE_TENSOR_BYTES` says otherwise. `MDMA_IDLE_UNLOAD_SECS` (default 0,
+never) also unloads models unused that long.
 
-Vulkan's automatic f16 prefill setting is shared across native decoders:
-every unique loaded decoder must pass calibration to enable it. Aliases
-do not recalibrate the same weights. Any rejection
-or calibration error keeps the registry on f32; explicit
-`MDMA_VK_F16_WEIGHTS=0` or `1` still overrides automatic calibration, but cannot
-enable a staging pipeline unavailable on the device.
+A lease keeps a model loaded: `Acquire{model, ttl_ms, wait}` returns a lease
+id (with `wait`, once the model is loaded; otherwise the load starts in the
+background), `Renew` extends it and `Release` ends it. A lease lasts `ttl_ms`
+(5 s to 10 min, 60 s by default) unless renewed, so a client that disappears
+lets its models go. Anyone may use a loaded model; a client certificate may
+hold 8 leases, 256 in all.
+
+A lease on a federated alias is held by this node, which keeps one lease on
+the executor while any local lease on the alias lasts. `Acquire` returns at
+once there (`wait` is ignored); `residency` follows the executor's last
+catalog.
+
+`Introspect` lists each model's backend, architecture, context, on-disk size,
+`leases` and `residency`: `available` (on disk), `loading`, `resident` or `failed`. A
+model that does not fit in memory stays `available` with its `error` and is
+retried on the next use; a corrupt file or one changed on disk is `failed`
+until restart and marks the server `degraded`. Names for the **same file**
+(symlinks, hardlinks) share one weight upload and tokenizer; request KV is not
+shared. Every model uses `MDMA_N_CTX`, capped by its trained context.
+
+Vulkan's f16 prefill staging is fixed at startup by `MDMA_VK_F16_WEIGHTS=1`
+(f32 otherwise) and shared by every decoder; it cannot enable a staging
+pipeline unavailable on the device.
 
 `mdma-client` is a minimal mTLS client (Introspect with no prompt, else a
 streamed completion; `MDMA_MODEL` picks a registry entry, `--decide
 request.json` sends typed-decision questions to a Laya model):
 
 ```sh
-MDMA_ADDR=localhost:50051 MDMA_TLS_CERT=certs/client.pem MDMA_TLS_KEY=certs/client-key.pem \
+MDMA_ADDR=localhost:6362 MDMA_TLS_CERT=certs/client.pem MDMA_TLS_KEY=certs/client-key.pem \
 MDMA_TLS_CA=certs/ca.pem cargo run --release --bin mdma-client -- The capital of France is
 ```
 
@@ -174,9 +178,42 @@ service Mdma {
   rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeResponse);  // token stream; `model` names a registry entry
   rpc Decide(DecideRequest)         returns (DecideResponse);             // Laya typed decisions, JSON in and out
   rpc Introspect(IntrospectRequest) returns (IntrospectResponse);         // server state, power, and one ModelStatus per model
+  rpc Watch(WatchRequest)           returns (stream ServerSnapshot);      // status, memory and (operators) federation, on change
 }
 ```
 
 `SynthesizeRequest` carries the prompt, `max_tokens`, and an optional
 `SamplerConfig` (temperature, top-p, min-p, repetition penalty and
 window). Responses stream one token at a time with its decoded text.
+`SynthesizeRequest` options:
+
+- `emit_events`: an `accepted` message before the tokens (prompt tokens, output
+  cap, `n_ctx`) and a `completed` one after them (emitted tokens, finish
+  reason, prefill and decode milliseconds).
+- `chat`: the prompt is sent as a user turn in the model's chat format
+  (`ModelStatus.chat_format`: `chatml`, `llama3`, `zephyr`, `gemma`, `gemma4`
+  or `inst`). `system` adds a system message. `mdma-client` sets them with
+  `MDMA_CHAT=1` and `MDMA_SYSTEM`.
+
+`ModelStatus.geometry` gives a native decoder's layers, widths, heads and KV
+bytes per position.
+
+`ModelStatus.class` says what a model is for: `generative`, `decision`,
+`embedding` or `reranker`. Laya checkpoints are `decision`; a GGUF is
+classified by its `general.tags` (`text-classification` makes MiniCheck a
+`decision` model).
+`ModelStatus.capabilities` lists `reasoning` for models whose chat template
+thinks before answering (`<think>`).
+
+`Watch` streams a `ServerSnapshot` on every change: the Introspect answer,
+memory (native budget by weights, KV cache and workspace; buffer quotas;
+device and free memory; weights per upload; requests in flight) and the
+federation topology (peers, trust state, grants, catalogs, routes). The
+topology goes to operators only: list their client certificate pins in
+`MDMA_OPERATOR_SPKI` (comma-separated; `mdma-certs --spki client.pem` prints
+one). Each server reports its `Host`: name (`MDMA_NODE_NAME` or the host
+name), OS (`FreeBSD 16.0-CURRENT`, `macOS 15.6`), architecture, CPU and
+accelerator, with live figures: RAM free of total, the accelerator's memory
+free of total, and the free space of the disk holding the models folder (after
+following symlinks, so a folder on another disk reports that disk). Upstream and federated models carry the host they run on. [mdma-web](web.md) is a browser UI
+built on these.

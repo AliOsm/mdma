@@ -24,6 +24,7 @@ pub(crate) use proto::federation_server::Federation;
 pub use proto::federation_server::FederationServer;
 pub use proto::{IdentifyRequest, IdentifyResponse, ScanCapabilitiesRequest, SignedCatalog};
 pub use proto::{DecideRequest, DecideResponse};
+pub use proto::{LeaseGrant, LeaseRelease, LeaseReleased, LeaseRenewal, LeaseRequest};
 pub use proto::{
     ExecutionEnvelope, SynthesizeRequest, SynthesizeEvent, Accepted, Token, Completed,
     SamplerConfig, synthesize_event,
@@ -68,6 +69,13 @@ pub struct ControlService {
     inventory: Arc<dyn Inventory>,
     shutdown: Option<WeakShutdownGuard>,
     execution: Option<super::execution::Service>,
+}
+
+const fn operation(kind: catalog::Kind) -> super::config::Operation {
+    match kind {
+        catalog::Kind::Gguf => super::config::Operation::Synthesize,
+        catalog::Kind::Laya => super::config::Operation::Decide,
+    }
 }
 
 fn clock() -> Result<(u64, Instant), Status> {
@@ -174,6 +182,25 @@ impl ControlService {
         Ok((binding, snapshot.generation))
     }
 
+    /// The model's descriptor, once the peer may execute it. A model the
+    /// peer may not execute is denied whether or not it exists.
+    fn executable(
+        &self,
+        execution: &super::execution::Service,
+        binding: &Binding,
+        generation: u64,
+        model: &str,
+    ) -> Result<catalog::ModelDescriptor, Status> {
+        let descriptor = execution.executor().descriptor(model);
+        let operation = descriptor.as_ref().map_or(super::config::Operation::Synthesize, |d| operation(d.kind));
+        self.final_check(binding, Action::Execute { model, operation }, generation)?;
+        descriptor
+    }
+
+    fn execution(&self) -> Result<&super::execution::Service, Status> {
+        self.execution.as_ref().ok_or_else(|| Status::unimplemented("execution_disabled"))
+    }
+
     fn final_check(
         &self,
         binding: &Binding,
@@ -194,11 +221,43 @@ impl ControlService {
 impl Federation for ControlService {
     type SynthesizeStream = super::execution::EventStream;
 
+    async fn acquire_lease(&self, request: Request<LeaseRequest>) -> Result<Response<LeaseGrant>, Status> {
+        let execution = self.execution()?;
+        let message = request.get_ref();
+        let (wall, mono) = clock()?;
+        let (binding, generation) = self.binding(&request, &message.origin, &message.destination, Action::Authenticate, wall, mono)?;
+        let descriptor = self.executable(execution, &binding, generation, &message.model)?;
+        if descriptor.artifact_id != message.artifact_id || descriptor.profile_id != message.profile_id {
+            return Err(Status::failed_precondition("selection_changed"));
+        }
+        execution.executor().lease(&message.origin, &message.model, crate::registry::requested_ttl(message.ttl_ms)).map(Response::new)
+    }
+
+    async fn renew_lease(&self, request: Request<LeaseRenewal>) -> Result<Response<LeaseGrant>, Status> {
+        let execution = self.execution()?;
+        let message = request.get_ref();
+        let (wall, mono) = clock()?;
+        let (binding, generation) = self.binding(&request, &message.origin, &message.destination, Action::Authenticate, wall, mono)?;
+        let model = execution.executor().lease_model(&message.origin, &message.lease_id)?;
+        // A peer that lost the grant cannot renew; its lease runs out.
+        self.executable(execution, &binding, generation, &model)?;
+        execution.executor().renew_lease(&message.origin, &message.lease_id, crate::registry::requested_ttl(message.ttl_ms)).map(Response::new)
+    }
+
+    async fn release_lease(&self, request: Request<LeaseRelease>) -> Result<Response<LeaseReleased>, Status> {
+        let execution = self.execution()?;
+        let message = request.get_ref();
+        let (wall, mono) = clock()?;
+        // Giving a lease up needs no grant, only the peer's own connection.
+        self.binding(&request, &message.origin, &message.destination, Action::Authenticate, wall, mono)?;
+        execution.executor().release_lease(&message.origin, &message.lease_id)?;
+        Ok(Response::new(LeaseReleased {}))
+    }
+
     async fn decide(
         &self, request: Request<DecideRequest>,
     ) -> Result<Response<DecideResponse>, Status> {
-        let execution = self.execution.as_ref()
-            .ok_or_else(|| Status::unimplemented("execution_disabled"))?;
+        let execution = self.execution()?;
         execution.decide(request).await.map(|done| {
             let response = Response::new(done.response);
             response.extensions().insert(done.lease);
@@ -210,8 +269,10 @@ impl Federation for ControlService {
         &self,
         request: Request<SynthesizeRequest>,
     ) -> Result<Response<Self::SynthesizeStream>, Status> {
-        let execution = self.execution.as_ref()
-            .ok_or_else(|| Status::unimplemented("execution_disabled"))?;
+        let execution = self.execution()?;
+        if let Some(envelope) = &request.get_ref().envelope {
+            execution.load(&request, envelope, super::config::Operation::Synthesize)?.await?;
+        }
         execution.synthesize(request).map(Response::new)
     }
 
@@ -298,6 +359,7 @@ impl Federation for ControlService {
                 .min(key.window.valid_until_ms),
             server_state: inventory.state,
             models: inventory.models.clone(),
+            host: inventory.host.clone(),
         };
         let signed =
             catalog::sign_catalog(&body, &self.signer.key_id, &self.signer.key).map_err(|_| {
@@ -306,7 +368,7 @@ impl Federation for ControlService {
         self.store
             .local_signer(&self.signer.key_id, clock()?.0)
             .map_err(|_| Status::unavailable("local signer authorization changed"))?;
-        if self.inventory(&peer.policy.catalog_exports) != inventory {
+        if !self.inventory(&peer.policy.catalog_exports).same_offer(&inventory) {
             return Err(Status::aborted("native inventory/readiness changed while signing"));
         }
         self.final_check(&binding, Action::ScanCapabilities, generation)?;

@@ -57,6 +57,10 @@ impl Charge {
         }
     }
 
+    pub(super) const fn bytes(&self) -> usize {
+        self.bytes
+    }
+
     pub(super) fn covers(&self, counter: &Counter, bytes: usize) -> bool {
         Arc::ptr_eq(&self.counter.0, &counter.0) && self.bytes >= bytes
     }

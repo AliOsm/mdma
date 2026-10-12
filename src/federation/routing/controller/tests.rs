@@ -13,7 +13,7 @@ use crate::{
         tls::{self, tests::Fixture},
         trust::Disclosure,
     },
-    registry::{ModelSpec, ModelsFile, Registry},
+    registry::{Holder, LeaseError, Options, Phase, Registry, Source},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rama::{
@@ -57,6 +57,15 @@ impl Remote {
 }
 impl Federation for Remote {
     type SynthesizeStream = execution::EventStream;
+    async fn acquire_lease(&self, request: Request<crate::federation::control::LeaseRequest>) -> Result<Response<crate::federation::control::LeaseGrant>, Status> {
+        self.service.acquire_lease(request).await
+    }
+    async fn renew_lease(&self, request: Request<crate::federation::control::LeaseRenewal>) -> Result<Response<crate::federation::control::LeaseGrant>, Status> {
+        self.service.renew_lease(request).await
+    }
+    async fn release_lease(&self, request: Request<crate::federation::control::LeaseRelease>) -> Result<Response<crate::federation::control::LeaseReleased>, Status> {
+        self.service.release_lease(request).await
+    }
     async fn identify(
         &self,
         request: Request<IdentifyRequest>,
@@ -144,6 +153,9 @@ impl Federation for Remote {
     }
 }
 
+/// A model's phase and lease count on the executor.
+type OnExecutor = Box<dyn Fn(&str) -> (Phase, u32) + Send + Sync>;
+
 struct Live {
     fixture: Fixture,
     router: Router,
@@ -154,6 +166,9 @@ struct Live {
     stop: Option<oneshot::Sender<()>>,
     shutdown: Option<Shutdown>,
     task: tokio::task::JoinHandle<()>,
+    on_executor: OnExecutor,
+    /// The executor loads from these on first use.
+    _models: (tempfile::NamedTempFile, tempfile::TempDir),
 }
 impl Live {
     async fn new() -> Self {
@@ -166,30 +181,21 @@ impl Live {
             .with_tokenizer()
             .write();
         let laya = crate::laya::compat_tests::checkpoint();
-        let models = ModelsFile {
-            default: Some("native".into()),
-            models: vec![
-                ModelSpec {
-                    name: "native".into(),
-                    gguf: Some(gguf.path().to_str().unwrap().into()),
-                    laya: None,
-                    upstream: None,
-                    n_ctx: Some(32),
-                },
-                ModelSpec {
-                    name: "laya".into(),
-                    laya: Some(laya.path().to_str().unwrap().into()),
-                    gguf: None,
-                    upstream: None,
-                    n_ctx: None,
-                },
-            ],
-        };
-        let mut registry =
-            Registry::load_available_frozen_with_budget(&*backend, &models, 32, None, |_| {})
-                .unwrap();
-        assert_eq!(registry.capture_execution_profiles(&*backend).unwrap(), 2);
-        let native = grpc::MdmaService::new(backend, registry, name);
+        let models = vec![
+            ("native".into(), Source::Gguf(gguf.path().into())),
+            ("laya".into(), Source::Laya(laya.path().into())),
+        ];
+        let options = Options { frozen: true, ..Options::new(32) };
+        let mut registry = Registry::new(backend, models, Some("native"), options).unwrap();
+        // Nothing is loaded: the first federated request loads each model.
+        registry.hash_artifacts(|| false);
+        assert_eq!(registry.capture_execution_profiles().unwrap(), 2);
+        let native = grpc::MdmaService::new(registry, name);
+        let registry = native.registry().clone();
+        let on_executor = Box::new(move |model: &str| {
+            let entry = registry.entries().find(|entry| entry.name == model).unwrap();
+            (entry.phase, entry.leases)
+        });
         let inventory = native.federation_inventory();
         let descriptors = inventory.snapshot(&["native".into(), "laya".into()]).models;
         let executor = native.federation_executor();
@@ -347,6 +353,8 @@ impl Live {
             stop: Some(stop),
             shutdown: Some(shutdown),
             task,
+            on_executor,
+            _models: (gguf, laya),
         }
     }
     fn request<T>(&self, message: T, timeout: &str) -> Request<T> {
@@ -371,7 +379,7 @@ impl Live {
                     sampler: Some(grpc::SynthesizeSamplerConfig {
                         temperature: Some(0.),
                         ..Default::default()
-                    }),
+                    }), emit_events: false, chat: false, system: String::new(),
                 },
                 timeout,
             ))
@@ -427,6 +435,17 @@ impl Drop for Live {
         self.task.abort();
     }
 }
+/// Polls until the executor reports `expected` for `model`.
+async fn executor_reaches(live: &Live, model: &str, expected: (Phase, u32)) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while (live.on_executor)(model) != expected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{model} stayed {:?}, expected {expected:?}", (live.on_executor)(model)));
+}
+
 fn questions() -> String {
     r#"{"q":{"type":"choice","instructions":"hello","criteria":["world","hello"]}}"#.into()
 }
@@ -463,6 +482,56 @@ async fn actual_single_hop_native_synthesis_decision_and_response_quota() {
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[0].len(), 16);
     assert_ne!(ids[0], ids[1]);
+    live.close().await;
+}
+
+#[tokio::test]
+async fn a_local_lease_on_a_route_keeps_the_model_loaded_on_its_executor() {
+    let live = Live::new().await;
+    let (first, second) = (Holder::Client("first".into()), Holder::Client("second".into()));
+    assert_eq!((live.on_executor)("native"), (Phase::Available, 0));
+    assert_eq!(live.router.lease(first.clone(), "native", None), Err(LeaseError::Missing("native".into())));
+
+    let a = live.router.lease(first.clone(), "remote-native", None).unwrap();
+    executor_reaches(&live, "native", (Phase::Resident, 1)).await;
+    let b = live.router.lease(second.clone(), "remote-native", None).unwrap();
+    assert_eq!(live.router.release_lease(&second, &a.id), Err(LeaseError::Unknown));
+    assert_eq!(live.router.renew_lease(&first, &a.id, None).unwrap().model, "remote-native");
+
+    // The keeper renews its one executor lease while a local lease is left.
+    live.router.release_lease(&first, &a.id).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!((live.on_executor)("native"), (Phase::Resident, 1));
+    live.router.release_lease(&second, &b.id).unwrap();
+    // Released, not unloaded: the executor keeps idle models until evicted.
+    executor_reaches(&live, "native", (Phase::Resident, 0)).await;
+    assert_eq!((live.on_executor)("laya"), (Phase::Available, 0));
+    live.close().await;
+}
+
+#[tokio::test]
+async fn executors_refuse_leases_on_a_changed_selection_or_without_a_grant() {
+    let live = Live::new().await;
+    let route = live.router.routes["remote-laya"].clone();
+    let acquire = |model: &str, artifact_id: &str| control::LeaseRequest {
+        origin: live.router.origin().unwrap(),
+        destination: route.peer_id.clone(),
+        model: model.into(),
+        artifact_id: artifact_id.into(),
+        profile_id: route.profile_id.clone(),
+        ttl_ms: 0,
+    };
+    let refused = async |request: control::LeaseRequest| {
+        live.router.remote(&route, |client| async move { client.acquire_lease(request).await }).await.unwrap_err().code()
+    };
+    assert_eq!(refused(acquire("laya", "sha256:stale")).await, Code::FailedPrecondition);
+    // Missing and ungranted models look alike.
+    assert_eq!(refused(acquire("absent", &route.artifact_id)).await, Code::PermissionDenied);
+    let mut policy = live.fixture.store.snapshot().unwrap().peer("remote.mdma.test").unwrap().policy.clone();
+    policy.execute_exports.retain(|export| export.model != "laya");
+    live.fixture.store.approve_policy(policy).unwrap();
+    assert_eq!(refused(acquire("laya", &route.artifact_id)).await, Code::PermissionDenied);
+    assert_eq!((live.on_executor)("laya"), (Phase::Available, 0));
     live.close().await;
 }
 
@@ -633,7 +702,7 @@ async fn alias_collisions_wrong_operation_missing_principal_and_invalid_input_do
             sampler: Some(grpc::SynthesizeSamplerConfig {
                 top_p: Some(0.),
                 ..Default::default()
-            }),
+            }), emit_events: false, chat: false, system: String::new(),
         },
         "3000m",
     );
@@ -669,7 +738,7 @@ async fn origin_declares_effective_defaults_and_preserves_explicit_zero_on_the_w
                 model: "remote-native".into(),
                 prompt: "abc".into(),
                 max_tokens: 2,
-                sampler,
+                sampler, emit_events: false, chat: false, system: String::new(),
             },
             "3000m",
         );
@@ -781,7 +850,7 @@ async fn check_normal_client(live: Live) {
         sampler: Some(grpc::SynthesizeSamplerConfig {
             temperature: Some(0.),
             ..Default::default()
-        }),
+        }), emit_events: false, chat: false, system: String::new(),
     };
     let health = client
         .introspect(grpc::IntrospectRequest {})
@@ -792,7 +861,6 @@ async fn check_normal_client(live: Live) {
         let status = health.models.iter().find(|m| m.name == alias).unwrap();
         assert!(status.ready);
         assert!(status.backend.starts_with("federated/"));
-        assert!(status.upstream.is_empty());
     }
     live.fixture
         .remote_store
@@ -869,6 +937,24 @@ async fn check_normal_client(live: Live) {
         token.unwrap();
     }
     assert_eq!(live.remote.calls.load(Ordering::SeqCst), 2);
+    // Leases on a routed alias are held on the executor.
+    let lease = client
+        .acquire(grpc::AcquireRequest { model: "remote-laya".into(), ttl_ms: 0, wait: false })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((lease.model.as_str(), lease.ttl_ms), ("remote-laya", 60_000));
+    executor_reaches(&live, "laya", (Phase::Resident, 1)).await;
+    let health = client.introspect(grpc::IntrospectRequest {}).await.unwrap().into_inner();
+    assert_eq!(health.models.iter().find(|m| m.name == "remote-laya").unwrap().leases, 1);
+    let renewed = client
+        .renew(grpc::RenewRequest { lease_id: lease.lease_id.clone(), ttl_ms: 0 })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(renewed.lease_id, lease.lease_id);
+    client.release(grpc::ReleaseRequest { lease_id: lease.lease_id }).await.unwrap();
+    executor_reaches(&live, "laya", (Phase::Resident, 0)).await;
     live.remote.mode.store(6, Ordering::SeqCst);
     let mut request = Request::new(grpc::DecideRequest {
         model: "remote-laya".into(),
@@ -914,5 +1000,13 @@ async fn actual_normal_client_two_leg_mtls_executes_vulkan_and_keeps_cpu_decisio
 async fn actual_normal_client_two_leg_mtls_executes_rocm_and_keeps_cpu_decisions() {
     check_normal_client(Live::with_backend(
         Arc::new(crate::backend::rocm::HipBackend::new_f32().unwrap()), "rocm",
+    ).await).await;
+}
+
+#[cfg(feature = "cuda")]
+#[tokio::test]
+async fn actual_normal_client_two_leg_mtls_executes_cuda_and_keeps_cpu_decisions() {
+    check_normal_client(Live::with_backend(
+        Arc::new(crate::backend::cuda::CudaBackend::new().unwrap()), "cuda",
     ).await).await;
 }

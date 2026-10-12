@@ -22,6 +22,11 @@ impl std::fmt::Debug for Caller {
 }
 impl Extension for Caller {}
 
+/// The client certificate's SPKI pin (`sha256:<hex>`).
+#[derive(Clone, Debug)]
+pub(crate) struct ClientSpki(pub(crate) String);
+impl Extension for ClientSpki {}
+
 impl Caller {
     fn from_inbound(
         connection: &rustls::ServerConnection,
@@ -109,8 +114,13 @@ where
         let stream: rustls::server::TlsStream<IO> = stream.into();
         let (io, connection) = stream.get_ref();
         // Extensions can never be inherited from another TLS connection.
-        if io.extensions().contains::<Caller>() {
+        if io.extensions().contains::<Caller>() || io.extensions().contains::<ClientSpki>() {
             return Err("preexisting local routing principal".into());
+        }
+        if let Some(spki) = connection.peer_certificates().and_then(<[_]>::first)
+            .and_then(|leaf| certificate_spki_sha256(leaf).ok())
+        {
+            io.extensions().insert(ClientSpki(spki));
         }
         if let Ok(caller) = utc_ms().and_then(|now_ms| {
             Caller::from_inbound(connection, self.expires_ms, now_ms, Instant::now())

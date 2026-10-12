@@ -127,6 +127,13 @@ The signed body has these required fields:
 | `expires_at_ms` | Exclusive expiry timestamp |
 | `server_state` | `serving`, `degraded`, `critical` or `draining` |
 | `models` | Complete visible local export set for this recipient |
+| `host` | The issuer's machine, described below |
+
+`host` holds `name`, `os` (`linux`, `macos`, `freebsd`, ...), `os_name`
+(`FreeBSD 16.0-CURRENT`), `arch`, `cpu`, `device`, `memory_bytes`, and the
+live `memory_available_bytes`, `device_memory_bytes`, `device_available_bytes`,
+`disk_bytes` and `disk_available_bytes` (the models folder's filesystem). Its strings
+are printable ASCII of at most 128 bytes; no other keys are allowed.
 
 Metadata MUST use Matrix v1.19's
 [canonical JSON definition](matrix-reference.md), not a similarly named
@@ -181,7 +188,7 @@ Each descriptor contains:
 | Field | Meaning |
 |---|---|
 | `model` | Nonempty exported name, 1..128 bytes of `[A-Za-z0-9._-]` |
-| `kind` | `gguf` or `laya`; never `upstream` |
+| `kind` | `gguf` or `laya` |
 | `artifact_id` | `sha256:` plus 64 lowercase hexadecimal digits |
 | `profile_id` | Same digest format, for the execution profile |
 | `architecture` | Architecture identifier |
@@ -190,6 +197,9 @@ Each descriptor contains:
 | `ready` | Current eligibility, not a capacity reservation |
 | `max_input_bytes` | Positive byte limit, no more than 65536 |
 | `limits` | Operation-specific limits described below |
+| `class` | `generative`, `decision`, `embedding` or `reranker` |
+| `capabilities` | Unique subset of `reasoning`, `tools`, `vision`, `audio`, in that order |
+| `resident` | Weights are loaded now; otherwise the first request loads them. Not part of the selection: routes and admission ignore it |
 
 `synthesize` limits contain positive `n_ctx` and `max_output_tokens`, with
 `max_output_tokens <= n_ctx`. `decide` limits contain positive
@@ -255,7 +265,7 @@ Future implementation tests MUST cover:
 - Duplicate JSON keys, invalid Unicode, noncanonical bytes and number bounds.
 - Nonce replay, concurrent/stale polls, clock changes and catalog expiry.
 - Recipient filtering, empty snapshots, removal and invalid partial updates.
-- Artifact replacement, alias separation, profile changes and upstream export.
+- Artifact replacement, alias separation and profile changes.
 - Signing-window expiry, revoked-material relabeling and stale trust generations.
 
 The lifecycle document adds enrollment, connection expiry, rotation and

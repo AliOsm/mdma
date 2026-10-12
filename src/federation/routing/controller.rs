@@ -1,3 +1,4 @@
+use super::leases::{REMOTE_TTL_MS, RENEW_EVERY, RemoteLeases};
 use super::{Route, Selection, validate};
 use crate::{
     federation::{
@@ -5,6 +6,7 @@ use crate::{
         runtime::outbound::Credentials, tls::Binding,
     },
     grpc::{self, TokenStream},
+    registry::{Holder, Lease, LeaseError},
 };
 use rama::{
     error::BoxError,
@@ -31,6 +33,7 @@ pub(crate) struct Router {
     cache: Cache,
     executor: Executor,
     slots: Arc<Semaphore>,
+    leases: Arc<RemoteLeases>,
 }
 impl Router {
     pub(crate) fn new(
@@ -60,7 +63,102 @@ impl Router {
             cache,
             executor,
             slots: Arc::new(Semaphore::new(1)),
+            leases: Arc::default(),
         })
+    }
+
+    /// A lease keeping `alias` loaded on its executor while it lasts.
+    pub(crate) fn lease(&self, holder: Holder, alias: &str, ttl: Option<Duration>) -> Result<Lease, LeaseError> {
+        if !self.routes.contains_key(alias) {
+            return Err(LeaseError::Missing(alias.to_owned()));
+        }
+        let (lease, start) = self.leases.take(holder, alias, ttl)?;
+        if start {
+            tokio::spawn(self.clone().keep(alias.to_owned()));
+        }
+        Ok(lease)
+    }
+
+    pub(crate) fn renew_lease(&self, holder: &Holder, id: &str, ttl: Option<Duration>) -> Result<Lease, LeaseError> {
+        self.leases.renew(holder, id, ttl)
+    }
+
+    pub(crate) fn release_lease(&self, holder: &Holder, id: &str) -> Result<(), LeaseError> {
+        self.leases.release(holder, id)
+    }
+
+    /// Whether the executor's catalog says `alias` is loaded.
+    pub(crate) fn resident(&self, alias: &str) -> bool {
+        let Some(route) = self.routes.get(alias) else { return false };
+        let now_ms = crate::federation::tls::utc_ms().unwrap_or(0);
+        self.cache.snapshot(&self.credentials.store, &route.peer_id, now_ms, std::time::Instant::now()).ok().flatten()
+            .is_some_and(|catalog| catalog.models.iter().any(|d| d.model == route.model && d.resident))
+    }
+
+    /// Holds a lease on the executor while any local lease on `alias` is
+    /// live, renewing it and taking a new one if the executor forgot it. A
+    /// lost connection is retried on the next round; the executor's own
+    /// expiry covers an origin that disappears.
+    async fn keep(self, alias: String) {
+        let route = self.routes.get(&alias).expect("keepers start for routed aliases").clone();
+        let mut remote: Option<String> = None;
+        loop {
+            if !self.leases.keep(&alias, std::time::Instant::now()) {
+                if let Some(id) = remote {
+                    // Best effort: the executor lets the lease expire otherwise.
+                    let _released = self.release_remote(&route, id).await;
+                }
+                return;
+            }
+            remote = match remote {
+                None => self.acquire_remote(&route).await.ok(),
+                Some(id) => match self.renew_remote(&route, id.clone()).await {
+                    Err(status) if status.code() == rama::http::grpc::Code::NotFound => self.acquire_remote(&route).await.ok(),
+                    _ => Some(id),
+                },
+            };
+            tokio::select! {
+                () = tokio::time::sleep(RENEW_EVERY) => {}
+                () = self.leases.released.notified() => {}
+            }
+        }
+    }
+
+    async fn acquire_remote(&self, route: &Route) -> Result<String, Status> {
+        let origin = self.origin()?;
+        let message = control::LeaseRequest {
+            origin, destination: route.peer_id.clone(), model: route.model.clone(),
+            artifact_id: route.artifact_id.clone(), profile_id: route.profile_id.clone(), ttl_ms: REMOTE_TTL_MS,
+        };
+        self.remote(route, |client| async move { client.acquire_lease(message).await }).await.map(|grant| grant.lease_id)
+    }
+
+    async fn renew_remote(&self, route: &Route, lease_id: String) -> Result<(), Status> {
+        let message = control::LeaseRenewal { origin: self.origin()?, destination: route.peer_id.clone(), lease_id, ttl_ms: REMOTE_TTL_MS };
+        self.remote(route, |client| async move { client.renew_lease(message).await }).await.map(drop)
+    }
+
+    async fn release_remote(&self, route: &Route, lease_id: String) -> Result<(), Status> {
+        let message = control::LeaseRelease { origin: self.origin()?, destination: route.peer_id.clone(), lease_id };
+        self.remote(route, |client| async move { client.release_lease(message).await }).await.map(drop)
+    }
+
+    fn origin(&self) -> Result<String, Status> {
+        self.credentials.store.snapshot().map(|snapshot| snapshot.server_id).map_err(|_| Status::unavailable("trust state unavailable"))
+    }
+
+    /// One control call on a fresh connection to the route's executor.
+    async fn remote<R, F>(&self, route: &Route, call: impl FnOnce(control::FederationClient<crate::federation::runtime::outbound::Transport>) -> F) -> Result<R, Status>
+    where
+        F: Future<Output = Result<Response<R>, Status>>,
+    {
+        let connected = self.credentials.connect(&route.peer_id, route.action(), self.executor.clone()).await
+            .map_err(|_| Status::unavailable("federation_transport_failed"))?;
+        tokio::select! {
+            biased;
+            result = call(connected.client) => result.map(Response::into_inner),
+            () = connected.drive => Err(Status::unavailable("federation_transport_failed")),
+        }
     }
 
     pub(crate) fn contains(&self, alias: &str) -> bool {
@@ -71,7 +169,7 @@ impl Router {
         self.routes
             .values()
             .filter_map(|route| {
-                let descriptor =
+                let (descriptor, host) =
                     Selection::visible(&self.credentials.store, &self.cache, route, request)
                         .ok()?;
                 // Peer labels are untrusted; never multiply the catalog size bound
@@ -90,7 +188,14 @@ impl Router {
                     },
                     ready,
                     weight_bytes: 0,
-                    upstream: String::new(),
+                    geometry: None,
+                    chat_format: String::new(),
+                    host: Some(grpc::Host { name: route.peer_id.clone(), ..host }),
+                    class: descriptor.class.as_str().into(),
+                    capabilities: crate::registry::Capability::names(&descriptor.capabilities),
+                    residency: if descriptor.resident { "resident" } else { "available" }.into(),
+                    leases: self.leases.count(&route.alias, std::time::Instant::now()),
+                    error: String::new(),
                 })
             })
             .collect()
@@ -321,6 +426,7 @@ impl OperationContext {
                     send.send(Message::Token(grpc::SynthesizeResponse {
                         token_id: token.token_id,
                         text: token.text,
+                        ..grpc::SynthesizeResponse::default()
                     }))
                     .await
                     .map_err(|_| Status::cancelled("cancelled"))?;

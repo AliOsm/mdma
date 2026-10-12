@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>mdma · federation preview</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+    <script type="module" src="/assets/scene.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <span class="brand">mdma</span>
+      <span class="pill">federation preview · stub data</span>
+    </header>
+    <main class="view view-federation">
+      <section class="stage"><div id="scene" data-view="federation"></div></section>
+      <aside class="panel">
+        <h1>Stub fleet</h1>
+        <form id="stub">
+          <label><span>peers</span><input name="peers" type="number" min="0" max="1000" value="100" /></label>
+          <label><span>seed</span><input name="seed" type="number" value="1" /></label>
+          <label class="check"><input name="federated" type="checkbox" /><span>operator topology</span></label>
+          <div class="actions"><button type="submit">Show</button></div>
+        </form>
+        <p class="hint">Hover a peer to see its models. Zoom in to read every label.</p>
+        <div class="legend">
+          <span class="os freebsd">FreeBSD</span><span class="os linux">Linux</span><span class="os macos">macOS</span>
+          <span class="class generative">generative</span><span class="class decision">decision</span>
+          <span class="class embedding">embedding</span><span class="class reranker">reranker</span>
+          <span class="cap reasoning">reasoning</span><span class="cap tools">tools</span>
+          <span class="cap vision">vision</span><span class="cap audio">audio</span>
+          <span class="residency ok">loaded</span><span class="residency idle">on disk</span>
+          <span class="residency busy">loading</span><span class="residency bad">failed</span>
+        </div>
+      </aside>
+    </main>
+    <script type="module" src="/preview.js"></script>
+  </body>
+</html>

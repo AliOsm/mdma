@@ -1,12 +1,14 @@
 // Minimal mTLS gRPC client for a running `mdma-serve`: streams a completion to
 // stdout, or prints Introspect when given no prompt. Env, like the server:
-//   MDMA_ADDR=host:port            (default localhost:50051; must match the server cert's SAN)
+//   MDMA_ADDR=host:port            (default localhost:6362; must match the server cert's SAN)
 //   MDMA_TLS_CERT / MDMA_TLS_KEY   the client cert/key mdma-certs wrote (client.pem, client-key.pem)
 //   MDMA_TLS_CA                    ca.pem
 //   MDMA_MAX_TOKENS                default 64
 //   MDMA_MODEL                     registry name; empty means the server's default
 //   MDMA_READY_TIMEOUT_SECS        default 120; 0 makes one bounded Introspect check
 //   MDMA_GREEDY                    1 requests greedy decoding without repetition penalties; default 0
+//   MDMA_CHAT                      1 sends the prompt as one user turn in the model's chat format; default 0
+//   MDMA_SYSTEM                    with MDMA_CHAT=1, a system message before that turn
 //   MDMA_RPC_TIMEOUT_MS            optional 1..300000; required for federation routes
 // Usage: mdma-client [prompt words...]
 //        mdma-client --decide request.json   ({"state": ..., "questions": {...}} to a Laya model)
@@ -29,11 +31,20 @@ fn env(name: &str) -> Result<String, BoxError> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), BoxError> {
-    let addr = std::env::var("MDMA_ADDR").unwrap_or_else(|_| "localhost:50051".to_string());
+    let addr = std::env::var("MDMA_ADDR").unwrap_or_else(|_| "localhost:6362".to_string());
     let max_tokens: u32 = std::env::var("MDMA_MAX_TOKENS").ok().and_then(|s| s.parse().ok()).unwrap_or(64);
     let ready_timeout = readiness::timeout(|name| std::env::var(name))?;
     let sampler = sampling::config(|name| std::env::var(name))?;
     let rpc_timeout = deadline::timeout(|name| std::env::var(name))?;
+    let chat = match std::env::var("MDMA_CHAT").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(std::env::VarError::NotPresent) => false,
+        _ => return Err("MDMA_CHAT must be 0 or 1".into()),
+    };
+    let system = std::env::var("MDMA_SYSTEM").unwrap_or_default();
+    if !chat && !system.is_empty() {
+        return Err("MDMA_SYSTEM requires MDMA_CHAT=1".into());
+    }
     let client = mtls_client(
         &format!("https://{addr}"),
         env("MDMA_TLS_CERT")?.as_ref(),
@@ -69,13 +80,16 @@ async fn main() -> Result<(), BoxError> {
         println!("ready={} state={} backend={} default={}", h.ready, h.server_state, h.backend, h.default_model);
         for m in h.models {
             let size = if m.weight_bytes > 0 { format!(" {} MB", m.weight_bytes >> 20) } else { String::new() };
-            let target = if m.upstream.is_empty() { m.backend } else { m.upstream };
-            println!("  {:<20} {:<9} {:<10} ready={} arch={} n_ctx={}{size}", m.name, m.kind, target, m.ready, m.architecture, m.n_ctx);
+            let target = m.host.map_or(m.backend, |host| host.name);
+            println!(
+                "  {:<20} {:<9} {:<10} ready={} {} leases={} arch={} n_ctx={}{size}",
+                m.name, m.kind, target, m.ready, m.residency, m.leases, m.architecture, m.n_ctx,
+            );
         }
         return Ok(());
     }
     let mut stream = client.synthesize(deadline::request(
-        SynthesizeRequest { prompt, max_tokens, sampler, model }, rpc_timeout,
+        SynthesizeRequest { prompt, max_tokens, sampler, model, emit_events: false, chat, system }, rpc_timeout,
     )?).await?.into_inner();
     let mut out = std::io::stdout();
     let started = std::time::Instant::now();

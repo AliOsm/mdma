@@ -67,10 +67,9 @@ different things.
 
 ## Client and federation boundary
 
-The client-facing [`Mdma` API](../proto/mdma.proto) has `Synthesize`, `Decide`
-and `Introspect`. The [documented upstream configuration](serving.md#several-models-on-one-port)
-forwards named models over mTLS and bounds forwarding at eight hops.
-It is static forwarding, not this proposed federation protocol.
+The client-facing [`Mdma` API](../proto/mdma.proto) has `Synthesize`, `Decide`,
+`Introspect` and `Watch`. Federation routes are the only way a node serves
+another node's models.
 
 The proposed `mdma.federation.v1.Federation` service defines:
 
@@ -88,14 +87,14 @@ Catalog execution-operation labels are `synthesize` and `decide`, respectively.
 `ScanCapabilities` polls the configured peer's authorized catalog; it does
 not scan the network or discover peers.
 
-Federation is disabled by default. The client service, registry and static
-upstream forwarding remain available independently. Enabling federation
-requires the safe credential separation described below. There is no
-automatic upgrade or fallback between client/upstream RPCs and federation RPCs.
+Federation is disabled by default. The client service and registry remain
+available independently. Enabling federation requires the safe credential
+separation described below. There is no automatic upgrade or fallback between
+client RPCs and federation RPCs.
 
 The initial implementation should use a separate federation listener.
 Whether listeners are separate or shared, federation credentials must not
-reach client/upstream RPCs to bypass federation policy. Keep peer issuers out of
+reach client RPCs to bypass federation policy. Keep peer issuers out of
 the client trust store; overlapping roots require independent client
 identity allowlists and rejection of federation-profile certificates before
 enabling federation.
@@ -153,8 +152,7 @@ operator, not remotely verifiable proof of its hardware or computation.
 
 Use established implementations for networking, TLS, Ed25519, Base64 and
 canonical JSON. Keep federation outside compute kernels and backend traits.
-Reuse local inference/admission mechanisms without inheriting static
-upstream forwarding on the executor.
+Reuse local inference/admission mechanisms on the executor.
 
 ## Review before freezing
 

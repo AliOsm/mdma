@@ -10,7 +10,7 @@ flag in Rust. The native service manager owns supervision:
 | macOS (launchd) | `deploy/launchd/org.seuros.mdma.plist` | plist `EnvironmentVariables` | `/usr/local/var/log/mdma/serve.log` |
 | FreeBSD (rc.d) | `deploy/rc.d/mdma` | `/usr/local/etc/mdma/mdma.env` | syslog, tag `mdma` |
 
-All templates default to **CPU**, loopback port 50051 and mandatory mTLS.
+All templates default to **CPU**, loopback port 6362 and mandatory mTLS.
 System services use an unprivileged service account; the user unit runs as
 your login user. GPU use requires a supported runtime/device
 and the corresponding build feature. Metal is available on unified-memory
@@ -35,9 +35,8 @@ Cargo writes the executable.
 Before enabling any service:
 
 1. Provision the account described below.
-2. Place a supported GGUF model at the configured absolute path, readable
-   by that account. Examples use `model.gguf`; no model is bundled or
-   downloaded.
+2. Put supported GGUF models in the configured models folder, readable
+   by that account. No model is bundled or downloaded.
 3. Provision `server.pem`, `server-key.pem`, and `ca.pem`. The CA must
    validate client certificates; clients must trust the server's CA and
    its certificate must cover the DNS name/IP they connect to.
@@ -69,8 +68,8 @@ sudo install -o root -g mdma -m 0640 certs/server.pem certs/server-key.pem certs
 sudo install -o root -g root -m 0644 deploy/systemd/mdma.service /etc/systemd/system/mdma.service
 ```
 
-Edit `/etc/mdma/mdma.env`, and place the model at `/var/lib/mdma/model.gguf`
-or change `MDMA_GGUF_PATH`. The env file uses systemd `EnvironmentFile`
+Edit `/etc/mdma/mdma.env`, and put models in `/var/lib/mdma/models`
+or change `MDMA_MODELS_DIR`. The env file uses systemd `EnvironmentFile`
 syntax, not a shell script: no `export`, substitutions, or commands.
 Use quoted literal values for paths containing spaces.
 
@@ -91,14 +90,12 @@ The unit restarts failures after five seconds, with a five-starts/minute
 limit. After correcting a repeated startup failure, use
 `sudo systemctl reset-failed mdma` and start again.
 
-On ROCm, models which exhaust device memory are left unloaded instead of
-terminating the daemon. ROCm checks live free device memory before uploading each unique
-model, leaving 256 MiB of headroom; allocation races and warm-up memory failures
-also unload the affected model and all its aliases. Native tensor/buffer quota
-failures follow the same skip policy. Other configured models
-can still serve. Introspect lists skipped models with `ready=false`; node readiness
-is false when every entry is unloaded, and requests to skipped models return
-`RESOURCE_EXHAUSTED` with the reason. Upstream reachability is reported
+A model that exhausts memory when it loads stays unloaded instead of
+terminating the daemon. Before each upload the server checks live free device
+memory (CUDA, ROCm, Vulkan), leaving 256 MiB of headroom; allocation races,
+native tensor/buffer quota failures and warm-up memory failures also leave the
+model and its aliases unloaded. Requests to it return `RESOURCE_EXHAUSTED` with
+the reason and retry the load. Other models keep serving. Upstream reachability is reported
 per model, separately from node readiness. The configured default never silently
 changes. Free memory and restart MDMA to retry loading; there is no background
 retry or eviction of other processes. Invalid configuration, model files and
@@ -153,8 +150,8 @@ The CA private key is not persisted by the helper. The server configuration
 does not reference the client private key. For federation or a deployment
 beyond localhost, provision identities through your PKI instead.
 
-Edit both env files: replace `/home/YOUR_USER`, set the real model path (or
-`MDMA_MODELS` registry), backend and runtime library path. `server.env` is
+Edit both env files: replace `/home/YOUR_USER`, set the models folder,
+backend and runtime library path. `server.env` is
 systemd `EnvironmentFile` syntax: no shell expansion. `client.env` is sourced
 by the wrapper **as your user** and must remain private, trusted and user-owned.
 Ensure `~/.local/bin` is on your shell's PATH; otherwise use its absolute path.
@@ -235,7 +232,7 @@ sudo install -o root -g _mdma -m 0640 certs/server.pem certs/server-key.pem cert
 sudo install -o root -g wheel -m 0644 deploy/launchd/org.seuros.mdma.plist /Library/LaunchDaemons/org.seuros.mdma.plist
 ```
 
-Place the model at `/usr/local/var/lib/mdma/model.gguf`. Edit the installed
+Put models in `/usr/local/var/lib/mdma/models`. Edit the installed
 plist's `EnvironmentVariables` to change paths, context size, or timeout.
 launchd does not source your shell profile or expand `~`, `$HOME`, or shell
 commands. `/usr/local` is an explicit manual-install prefix on both Intel
@@ -276,8 +273,8 @@ install -o root -g mdma -m 0640 certs/server.pem certs/server-key.pem certs/ca.p
 install -o root -g wheel -m 0555 deploy/rc.d/mdma /usr/local/etc/rc.d/mdma
 ```
 
-Edit `/usr/local/etc/mdma/mdma.env` and place the model at
-`/var/db/mdma/model.gguf`. Unlike systemd, this env file **is sourced as
+Edit `/usr/local/etc/mdma/mdma.env` and put models in
+`/var/db/mdma/models`. Unlike systemd, this env file **is sourced as
 root by `/bin/sh`**: use shell quoting and never make it writable by the
 service account. The pre-start hook exports the assignments to the child.
 
@@ -310,35 +307,33 @@ Output goes to syslog with facility `daemon`, priority `notice`, tag
 
 ## Startup warm-up
 
-`mdma-serve` is a resident daemon under the service manager. Startup is:
+`mdma-serve` is a resident daemon under the service manager. Startup reads the
+models folder and listens; each model then loads on its first use:
 
 ```text
-Initialize backend → load weights → warm prefill/decode → join device work → listen
+Initialize backend → read models folder → listen
+first use of a model → load weights → warm prefill/decode → join device work → serve
 ```
 
-`MDMA_WARMUP_ROUNDS` defaults to **2** and accepts integers **0..8**. Set **0**
+`MDMA_WARMUP_ROUNDS` defaults to **1** and accepts integers **0..8**. Set **0**
 to explicitly skip warm-up; blank, malformed, non-Unicode and out-of-range values
-fail startup. Each unique local GGUF model runs up to **16 synthetic token-zero
-prefill positions plus four greedy decode steps** per round, capped by its trained
-context and the largest configured context among aliases. A one-position context
-only prefills. Aliases share one warm-up; Laya and remote upstream entries are
-not exercised.
+fail startup. Each GGUF load runs up to **16 synthetic token-zero
+prefill positions plus four greedy decode steps** per round, capped by its
+context. A one-position context
+only prefills. Aliases share one warm-up; Laya entries are not exercised.
 
 Prefill and decode read logits back to the host, joining device work and rejecting
 empty/nonfinite outputs. Decode uses the normal backend factory, including HIP/CUDA
 graphs when eligible. Temporary KV, workspaces and captured graphs are released
-before listening; no synthetic prefix or output enters user sessions. Request-specific
+before the model serves; no synthetic prefix or output enters user sessions. Request-specific
 allocation and graph capture still happen on requests. Weights remain resident.
 Warm-up is bounded work, not an arbitrary sleep or a guarantee of stable GPU clocks,
 and it does not eliminate steady-state kernel bandwidth costs.
 
 Existing native tensor and backend buffer budgets apply. Leave headroom for warm-up
-scratch; an allocation, execution or readback failure exits nonzero with the model
-name instead of publishing readiness. Stop requests are checked between models,
-rounds, prefill and decode steps; already submitted device work is not interrupted.
-
-The listener is not bound until loading and enabled warm-up complete. No
-listener is available while startup is in progress.
+scratch; an execution or readback failure during warm-up marks the model `failed`
+instead of serving it. The first request to a model waits for its load and
+warm-up.
 
 ### Client readiness waiting
 
@@ -349,7 +344,7 @@ Introspect call bounded to five seconds and fails if unready.
 
 Introspect with no `MDMA_MODEL` checks node readiness only. Work requests check
 the explicit model or server default as well, without waiting for unrelated
-unready upstreams. An unknown model on a ready node fails immediately.
+unready models. An unknown model on a ready node fails immediately.
 Calls are capped at five seconds each and by the remaining overall deadline;
 retries pause 200 ms and stop at the deadline. A stalled Introspect call cannot
 extend that deadline. The client prints one waiting message to stderr and a
@@ -390,7 +385,7 @@ Increase these as well if increasing MDMA's 30-second timeout; similarly
 allow enough time in FreeBSD's host shutdown policy. There is no SIGHUP
 reload: restart to change the model, certificates, or configuration.
 
-Service-manager “running” is **not readiness**: loading or warm-up may still be
+Service-manager “running” is **not readiness**: startup may still be
 in progress. Check the mTLS `Introspect` RPC. The “mdma listening” log is emitted
 only after a successful bind. Missing configuration/TLS files, invalid
 numeric configuration, unavailable backends, and bind failures exit

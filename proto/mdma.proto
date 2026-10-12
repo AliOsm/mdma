@@ -20,6 +20,12 @@ message SynthesizeRequest {
   SamplerConfig sampler = 3;
   // A name from the server's model registry; empty means the default model.
   string model = 4;
+  // Adds an `accepted` message before the tokens and a `completed` one after.
+  bool emit_events = 5;
+  // Send `prompt` as a user turn in the model's chat format (ModelStatus.chat_format).
+  bool chat = 6;
+  // System message, with `chat`.
+  string system = 7;
 }
 
 // Laya typed decisions: a state and a set of questions in, a distribution
@@ -36,30 +42,204 @@ message DecideResponse {
 
 message ModelStatus {
   string name = 1;
-  // "gguf" (native decoder), "laya" (native typed decisions, CPU) or
-  // "upstream" (a model on another MDMA node).
+  // "gguf" (native decoder) or "laya" (native typed decisions, CPU).
   string kind = 2;
   string backend = 3;
   string architecture = 4;
   uint32 n_ctx = 5;
   bool ready = 6;
-  // Weights as stored on disk; 0 for upstreams.
+  // Weights as stored on disk; 0 for federated routes.
   uint64 weight_bytes = 7;
-  string upstream = 8;
+  reserved 8;
+  // Native decoders only.
+  ModelGeometry geometry = 9;
+  // "chatml", "llama3", "zephyr", "gemma", "gemma4", "inst", or empty.
+  string chat_format = 10;
+  // The machine running it, for federated models.
+  Host host = 11;
+  // "generative", "decision", "embedding" or "reranker".
+  string class = 12;
+  // Inputs and behaviours beyond plain text: "reasoning", "tools", "vision", "audio".
+  repeated string capabilities = 13;
+  // "available" (on disk; the next use loads it), "loading", "resident" or "failed".
+  string residency = 14;
+  // Callers keeping it loaded.
+  uint32 leases = 15;
+  // Why the last load failed or was refused.
+  string error = 16;
 }
 
+message Host {
+  // MDMA_NODE_NAME, or the short host name.
+  string name = 1;
+  // "linux", "macos", "freebsd".
+  string os = 2;
+  // e.g. "FreeBSD 16.0-CURRENT", "macOS 15.6".
+  string os_name = 3;
+  // As the OS names it: "amd64", "arm64", "x86_64".
+  string arch = 4;
+  string cpu = 5;
+  uint64 memory_bytes = 6;
+  // The accelerator, or the backend name.
+  string device = 7;
+  // Free RAM now.
+  uint64 memory_available_bytes = 8;
+  // The accelerator's memory (its share of RAM when unified); 0 when it has none.
+  uint64 device_memory_bytes = 9;
+  uint64 device_available_bytes = 10;
+  // The filesystem that holds the models folder.
+  uint64 disk_bytes = 11;
+  uint64 disk_available_bytes = 12;
+}
+
+message ModelGeometry {
+  uint32 n_layers = 1;
+  uint32 n_embd = 2;
+  uint32 n_ff = 3;
+  uint32 n_heads = 4;
+  uint32 n_kv_heads = 5;
+  uint32 head_dim = 6;
+  // KV bytes per position, all layers.
+  uint64 kv_bytes_per_token = 7;
+  // KV width of each layer.
+  repeated uint32 layer_kv_widths = 8;
+}
+
+// The admitted request.
+message SynthesizeAccepted {
+  uint32 prompt_tokens = 1;
+  // Output cap after context and power limits.
+  uint32 max_tokens = 2;
+  uint32 n_ctx = 3;
+}
+
+// How generation ended.
+message SynthesizeCompleted {
+  uint32 emitted_tokens = 1;
+  // "eos", "max_tokens" or "context_limit".
+  string finish_reason = 2;
+  // Time to first token.
+  uint32 prefill_ms = 3;
+  // First token to last token.
+  uint32 decode_ms = 4;
+}
+
+// A token, or with `emit_events` an `accepted` or `completed` event.
 message SynthesizeResponse {
   uint32 token_id = 1;
   string text = 2;
+  SynthesizeAccepted accepted = 3;
+  SynthesizeCompleted completed = 4;
 }
 
 message IntrospectRequest {}
+
+message WatchRequest {
+  // Milliseconds between snapshots, 250..60000 (default 1000).
+  uint32 interval_ms = 1;
+}
+
+message MemoryUsage {
+  uint64 used_bytes = 1;
+  // 0 means no limit.
+  uint64 limit_bytes = 2;
+}
+
+message DeviceMemory {
+  string name = 1;
+  bool unified_memory = 2;
+  // Free device memory.
+  optional uint64 available_bytes = 3;
+}
+
+// One uploaded weight set; aliases of the same file share it.
+message WeightUpload {
+  uint32 upload_id = 1;
+  // Reserved native bytes, or the on-disk size when `reserved` is false.
+  uint64 bytes = 2;
+  bool reserved = 3;
+  repeated string models = 4;
+}
+
+message MemorySnapshot {
+  // Native tensor budget; a limit of 0 means none.
+  uint64 limit_bytes = 1;
+  uint64 used_bytes = 2;
+  uint64 weights_bytes = 3;
+  uint64 kv_bytes = 4;
+  uint64 workspace_bytes = 5;
+  // Backend buffer quotas, when set.
+  MemoryUsage device_buffers = 6;
+  MemoryUsage host_buffers = 7;
+  DeviceMemory device = 8;
+  repeated WeightUpload weights = 9;
+  // Synthesize and Decide calls in flight.
+  uint32 active_requests = 10;
+}
+
+// A peer's current catalog.
+message CatalogView {
+  uint64 issued_at_ms = 1;
+  uint64 expires_at_ms = 2;
+  string server_state = 3;
+  repeated CatalogModel models = 4;
+}
+
+message CatalogModel {
+  string model = 1;
+  string architecture = 2;
+  string backend = 3;
+  bool ready = 4;
+  string class = 5;
+  repeated string capabilities = 6;
+  // Weights loaded; otherwise the first request loads them.
+  bool resident = 7;
+}
+
+message FederationPeer {
+  string peer_id = 1;
+  string endpoint = 2;
+  // "staged", "active", "suspended" or "revoked".
+  string state = 3;
+  // Models this server lets the peer see, run here, and route to it.
+  repeated string catalog_exports = 4;
+  repeated string execute_exports = 5;
+  repeated string route_imports = 6;
+  CatalogView catalog = 7;
+  // From the peer's catalog.
+  Host host = 8;
+}
+
+message FederationRoute {
+  string alias = 1;
+  string peer_id = 2;
+  string model = 3;
+  // "synthesize" or "decide".
+  string operation = 4;
+}
+
+// Filled for operators (MDMA_OPERATOR_SPKI) only.
+message FederationTopology {
+  bool authorized = 1;
+  // Federation is configured.
+  bool enabled = 2;
+  string server_id = 3;
+  uint64 trust_generation = 4;
+  repeated FederationPeer peers = 5;
+  repeated FederationRoute routes = 6;
+}
+
+message ServerSnapshot {
+  IntrospectResponse status = 1;
+  MemorySnapshot memory = 2;
+  FederationTopology federation = 3;
+}
 
 message IntrospectResponse {
   bool ready = 1;
   // e.g. "internlm2" - from the GGUF's general.architecture metadata.
   string model_architecture = 2;
-  // "cpu" or "rocm" - which Backend this node is actually running.
+  // "cpu", "metal", "rocm", ... - which Backend this node is actually running.
   string backend = 3;
   // "serving", "degraded" (power-capped or some models unloaded for memory),
   // "critical" (battery
@@ -74,10 +254,43 @@ message IntrospectResponse {
   uint32 gpu_power_default_mw = 8;
   repeated ModelStatus models = 9;
   string default_model = 10;
+  Host host = 11;
+}
+
+// Keep a model loaded: `wait` loads it before answering; otherwise the load
+// starts in the background. Renew before `ttl_ms` passes or the lease ends.
+message AcquireRequest {
+  string model = 1;
+  // 5 s to 10 min; 60 s when 0.
+  uint32 ttl_ms = 2;
+  bool wait = 3;
+}
+
+message RenewRequest {
+  string lease_id = 1;
+  uint32 ttl_ms = 2;
+}
+
+message ReleaseRequest {
+  string lease_id = 1;
+}
+
+message ReleaseResponse {}
+
+message LeaseStatus {
+  string lease_id = 1;
+  string model = 2;
+  uint32 ttl_ms = 3;
+  // As in ModelStatus.residency.
+  string residency = 4;
 }
 
 service Mdma {
   rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeResponse);
   rpc Decide(DecideRequest) returns (DecideResponse);
   rpc Introspect(IntrospectRequest) returns (IntrospectResponse);
+  rpc Watch(WatchRequest) returns (stream ServerSnapshot);
+  rpc Acquire(AcquireRequest) returns (LeaseStatus);
+  rpc Renew(RenewRequest) returns (LeaseStatus);
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
 }

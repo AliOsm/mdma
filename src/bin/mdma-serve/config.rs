@@ -5,16 +5,17 @@ use std::env::VarError;
 use std::time::Duration;
 
 const DEFAULT_N_CTX: u32 = 4096;
+/// "mdma" on a phone keypad.
+const DEFAULT_LISTEN: &str = "127.0.0.1:6362";
 const DEFAULT_SHUTDOWN_TIMEOUT_SECS: u32 = 30;
 const MAX_SHUTDOWN_TIMEOUT_SECS: u32 = 86400;
 const MAX_POWER_POLL_SECS: u32 = 3600;
 const MAX_POWER_DEBOUNCE: u32 = 100;
 
-/// A `MDMA_MODELS` registry file or a single `MDMA_GGUF_PATH` model.
+/// The `MDMA_MODELS_DIR` folder, or none for control-only federation.
 #[derive(Debug)]
 pub(super) enum ModelsSource {
-    File(String),
-    Gguf(String),
+    Dir { path: String, default: Option<String> },
     ControlOnly,
 }
 
@@ -26,6 +27,10 @@ pub(super) struct Config {
     pub tls_key: String,
     pub tls_ca: String,
     pub federation_config: Option<String>,
+    /// MDMA_OPERATOR_SPKI pins.
+    pub operators: Vec<String>,
+    /// MDMA_NODE_NAME, or the short host name.
+    pub node: String,
     pub backend: String,
     /// Validated on every build so `MDMA_HIP_F32` typos fail startup; read by ROCm.
     #[cfg_attr(not(any(feature = "rocm", test)), expect(dead_code, reason = "consumed only by the ROCm backend"))]
@@ -36,6 +41,8 @@ pub(super) struct Config {
     pub host_buffer_bytes: Option<usize>,
     pub shutdown_timeout: Duration,
     pub warmup_rounds: u32,
+    /// Unload a model unused this long; `None` keeps models until evicted.
+    pub idle_unload: Option<Duration>,
     /// `None` when `MDMA_POWER=off`: no watcher, always serving.
     pub power: Option<PowerConfig>,
 }
@@ -49,13 +56,7 @@ pub(super) struct PowerConfig {
 
 impl Config {
     pub fn load(env: impl Fn(&str) -> Result<String, VarError>) -> Result<Self, BoxError> {
-        let required = |name: &str| -> Result<String, BoxError> {
-            let value = env(name).map_err(|e| format!("{name}: {e}"))?;
-            if value.trim().is_empty() {
-                return Err(format!("{name} must not be empty").into());
-            }
-            Ok(value)
-        };
+        let required = |name: &str| super::vars::required(&env, name);
         let optional = |name: &str, default: &str| -> Result<String, BoxError> {
             match env(name) {
                 Ok(value) => Ok(value),
@@ -113,17 +114,19 @@ impl Config {
             _ => return Err("MDMA_FEDERATION_CONTROL_ONLY must be 0 or 1".into()),
         };
         let models = if control_only {
-            if !matches!(env("MDMA_MODELS"), Err(VarError::NotPresent))
-                || !matches!(env("MDMA_GGUF_PATH"), Err(VarError::NotPresent)) {
+            if !matches!(env("MDMA_MODELS_DIR"), Err(VarError::NotPresent)) {
                 return Err("control-only federation cannot load model sources".into());
             }
             ModelsSource::ControlOnly
-        } else { match env("MDMA_MODELS") {
-            Ok(path) if !path.trim().is_empty() => ModelsSource::File(path),
-            Ok(_) => return Err("MDMA_MODELS must not be empty".into()),
-            Err(VarError::NotPresent) => ModelsSource::Gguf(required("MDMA_GGUF_PATH").map_err(|e| format!("{e} (or set MDMA_MODELS)"))?),
-            Err(e) => return Err(format!("MDMA_MODELS: {e}").into()),
-        }};
+        } else {
+            let default = match env("MDMA_DEFAULT_MODEL") {
+                Ok(name) if name.trim().is_empty() => return Err("MDMA_DEFAULT_MODEL must not be empty".into()),
+                Ok(name) => Some(name.trim().to_owned()),
+                Err(VarError::NotPresent) => None,
+                Err(e) => return Err(format!("MDMA_DEFAULT_MODEL: {e}").into()),
+            };
+            ModelsSource::Dir { path: required("MDMA_MODELS_DIR")?, default }
+        };
         let byte_limit = |name: &str| -> Result<Option<usize>, BoxError> {
             match env(name) {
                 Ok(value) => Ok(Some(value.parse::<usize>().ok().filter(|n| *n > 0)
@@ -147,8 +150,17 @@ impl Config {
         let warmup_rounds = match env("MDMA_WARMUP_ROUNDS") {
             Ok(value) => value.parse::<u32>().ok().filter(|n| *n <= mdma::registry::MAX_WARMUP_ROUNDS)
                 .ok_or_else(|| format!("MDMA_WARMUP_ROUNDS must be between 0 and {}", mdma::registry::MAX_WARMUP_ROUNDS))?,
-            Err(VarError::NotPresent) => 2,
+            Err(VarError::NotPresent) => 1,
             Err(e) => return Err(format!("MDMA_WARMUP_ROUNDS: {e}").into()),
+        };
+        let idle_unload = match env("MDMA_IDLE_UNLOAD_SECS") {
+            Ok(value) => match value.parse::<u64>() {
+                Ok(0) => None,
+                Ok(secs) if secs <= 86_400 => Some(Duration::from_secs(secs)),
+                _ => return Err("MDMA_IDLE_UNLOAD_SECS must be between 0 and 86400".into()),
+            },
+            Err(VarError::NotPresent) => None,
+            Err(e) => return Err(format!("MDMA_IDLE_UNLOAD_SECS: {e}").into()),
         };
         let federation_config = match env("MDMA_FEDERATION_CONFIG") {
             Ok(path) if !path.trim().is_empty() => Some(path),
@@ -156,18 +168,43 @@ impl Config {
             Err(VarError::NotPresent) => None,
             Err(error) => return Err(format!("MDMA_FEDERATION_CONFIG: {error}").into()),
         };
+        let operators = match env("MDMA_OPERATOR_SPKI") {
+            Ok(list) => list.split(',').map(str::trim).filter(|pin| !pin.is_empty()).map(|pin| {
+                let valid = pin.strip_prefix("sha256:")
+                    .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+                if valid { Ok(pin.to_owned()) } else {
+                    Err(format!("MDMA_OPERATOR_SPKI: {pin:?} is not a sha256:<64 lowercase hex> pin (see `mdma-certs --spki`)"))
+                }
+            }).collect::<Result<Vec<_>, _>>()?,
+            Err(VarError::NotPresent) => Vec::new(),
+            Err(e) => return Err(format!("MDMA_OPERATOR_SPKI: {e}").into()),
+        };
+        let node = match env("MDMA_NODE_NAME") {
+            Ok(name) if name.trim().is_empty() => return Err("MDMA_NODE_NAME must not be empty".into()),
+            Ok(name) => name.trim().to_owned(),
+            Err(VarError::NotPresent) => sysinfo::System::host_name()
+                .map(|host| host.split('.').next().unwrap_or_default().to_owned())
+                .unwrap_or_default(),
+            Err(e) => return Err(format!("MDMA_NODE_NAME: {e}").into()),
+        };
         if control_only && (federation_config.is_none() || backend != "cpu") {
             return Err("control-only federation requires MDMA_FEDERATION_CONFIG and cpu backend".into());
         }
         Ok(Self {
             models,
-            listen: required("MDMA_LISTEN")?
-                .parse()
-                .map_err(|e| format!("MDMA_LISTEN: {e}"))?,
+            listen: match env("MDMA_LISTEN") {
+                Ok(addr) => addr,
+                Err(VarError::NotPresent) => DEFAULT_LISTEN.to_owned(),
+                Err(e) => return Err(format!("MDMA_LISTEN: {e}").into()),
+            }
+            .parse()
+            .map_err(|e| format!("MDMA_LISTEN: {e}"))?,
             tls_cert: required("MDMA_TLS_CERT")?,
             tls_key: required("MDMA_TLS_KEY")?,
             tls_ca: required("MDMA_TLS_CA")?,
             federation_config,
+            operators,
+            node,
             backend,
             rocm_f32,
             n_ctx: positive("MDMA_N_CTX", DEFAULT_N_CTX, u32::MAX)? as usize,
@@ -175,6 +212,7 @@ impl Config {
             device_buffer_bytes,
             host_buffer_bytes,
             warmup_rounds,
+            idle_unload,
             shutdown_timeout: Duration::from_secs(u64::from(positive(
                 "MDMA_SHUTDOWN_TIMEOUT_SECS",
                 DEFAULT_SHUTDOWN_TIMEOUT_SECS,

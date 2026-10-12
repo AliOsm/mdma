@@ -3,14 +3,14 @@
 mod config;
 #[path = "mdma-serve/lifecycle.rs"]
 mod lifecycle;
-#[path = "mdma-serve/prefill.rs"]
-mod prefill;
+#[path = "mdma-serve/vars.rs"]
+mod vars;
 
 use config::{Config, ModelsSource};
 use mdma::backend::Backend;
 use mdma::backend::cpu::CpuBackend;
 use mdma::grpc::{MdmaServer, MdmaService};
-use mdma::registry::{ModelsFile, Registry};
+use mdma::registry::Registry;
 use rama::Layer;
 use rama::error::BoxError;
 use rama::futures::FutureExt;
@@ -80,22 +80,18 @@ where
             .with_client_verify(ClientVerifyMode::ClientAuth(ca_certs))
             .with_alpn_http_auto();
 
-        let file = match &config.models {
-            ModelsSource::File(path) => ModelsFile::parse(&std::fs::read_to_string(path).map_err(|e| format!("MDMA_MODELS {path}: {e}"))?)?,
-            ModelsSource::Gguf(path) => ModelsFile::single_gguf(path),
-            ModelsSource::ControlOnly => return Err("control-only mode cannot load a model registry".into()),
+        let ModelsSource::Dir { path, default } = &config.models else {
+            return Err("control-only mode cannot load a model registry".into());
         };
-        let memory = config.native_tensor_bytes.map(mdma::memory::NativeMemoryBudget::new);
-        let mut all_f16 = true;
-        let calibrate = |model: &mdma::model::Model<B>| {
-            prefill::calibrate(&*backend, model, &mut all_f16);
+        let memory = mdma::memory::NativeMemoryBudget::new(config.native_tensor_bytes.unwrap_or_else(|| default_budget(backend_name)));
+        let options = mdma::registry::Options {
+            n_ctx: config.n_ctx,
+            warmup_rounds: config.warmup_rounds,
+            frozen: federation.is_some(),
+            budget: Some(memory.clone()),
         };
-        let mut registry = if federation.is_some() {
-            Registry::load_available_frozen_with_budget(&*backend, &file, config.n_ctx, memory.as_ref(), calibrate)
-        } else {
-            Registry::load_available_with_budget(&*backend, &file, config.n_ctx, memory.as_ref(), calibrate)
-        }?;
-        if let Some(memory) = &memory {
+        let mut registry = Registry::open(backend.clone(), std::path::Path::new(path), default.as_deref(), options)?;
+        if memory.limit() != usize::MAX {
             eprintln!("mdma native tensor budget: {}/{} bytes reserved (not a process/VRAM cap)", memory.used(), memory.limit());
         }
         if let Some(buffers) = backend.buffer_budget() {
@@ -104,28 +100,43 @@ where
                 eprintln!("mdma {domain} buffers: {}/{limit} bytes allocated (excludes driver internals)", buffers.used(domain));
             }
         }
-        for model in registry.iter() {
-            eprintln!("mdma model {}: {} ({} MB on disk)", model.name, model.kind.name(), model.weight_bytes >> 20);
+        for entry in registry.entries() {
+            eprintln!("mdma model {}: {} {} ({} MB on disk)", entry.name, entry.info.kind.name(), entry.info.architecture, entry.info.disk_bytes >> 20);
         }
-        let started = std::time::Instant::now();
-        eprintln!("mdma warm-up: {} rounds per unique native GGUF (0 disables)", config.warmup_rounds);
-        if !registry.warmup_available(&*backend, config.warmup_rounds, || guard.cancelled().now_or_never().is_some())? {
-            eprintln!("mdma warm-up cancelled; not opening listener");
-            return Ok(None);
-        }
-        eprintln!("mdma warm-up complete in {:.3}s", started.elapsed().as_secs_f64());
+        eprintln!("mdma models load on first use ({} warm-up rounds each)", config.warmup_rounds);
         if federation.is_some() {
-            match registry.capture_execution_profiles(&*backend) {
+            match registry.capture_execution_profiles() {
                 Ok(count) => eprintln!("mdma federation native profiles: {count} verified (not export grants)"),
                 Err(error) => eprintln!("mdma federation native profiles unavailable: {error}; native models cannot export"),
             }
         }
-        for model in registry.iter() {
-            if let mdma::registry::Entry::Unavailable(unavailable) = &model.entry {
-                eprintln!("mdma model {} not loaded: {}; free memory and restart to retry", model.name, unavailable.reason);
-            }
+        let host = mdma::host::detect(&config.node, &backend.device_label().unwrap_or_else(|| backend_name.to_owned()));
+        eprintln!("mdma node {}: {} {} ({})", host.name, host.os_name, host.arch, host.device);
+        let mut service = MdmaService::new(registry, backend_name)
+            .with_shutdown_guard(guard.clone_weak())
+            .with_memory_budget(memory)
+            .with_operators(std::mem::take(&mut config.operators))
+            .with_host(host);
+        if federation.is_some() {
+            // Federation names a model by its bytes; hash them before the first load.
+            let (registry, stop) = (service.registry().clone(), guard.clone_weak());
+            std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                registry.hash_artifacts(|| stop.cancelled().now_or_never().is_some());
+                eprintln!("mdma federation: model files hashed in {:.1}s", started.elapsed().as_secs_f64());
+            });
         }
-        let mut service = MdmaService::new(backend, registry, backend_name).with_shutdown_guard(guard.clone_weak());
+        // Lease expiry and idle unload.
+        let (registry, idle, stop) = (service.registry().clone(), config.idle_unload, guard.clone_weak());
+        guard.spawn_task(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    () = stop.cancelled() => return,
+                    _ = tick.tick() => registry.sweep(std::time::Instant::now(), idle),
+                }
+            }
+        });
         if let Some(power) = power {
             // Started after the model loads, so the first reading applies
             // before the listener accepts anything.
@@ -188,6 +199,17 @@ where
     }
 
     Ok(())
+}
+
+/// The CPU backend has no device memory to check before a load, so the
+/// budget keeps a quarter of RAM for everything else.
+fn default_budget(backend_name: &str) -> usize {
+    if backend_name != "cpu" {
+        return usize::MAX;
+    }
+    let mut system = sysinfo::System::new();
+    system.refresh_memory();
+    usize::try_from(system.total_memory() / 4 * 3).unwrap_or(usize::MAX)
 }
 
 /// The backend's GPU power-limit probe, if it has one (cuda, through NVML).

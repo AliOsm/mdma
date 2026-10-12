@@ -26,10 +26,6 @@ impl Fixture {
         mtls_client(url, &self.dir.join("client.pem"), &self.dir.join("client-key.pem"), &self.dir.join("ca.pem")).unwrap()
     }
 
-    pub(super) async fn start<S: proto::mdma_server::Mdma>(&self, make_service: impl FnOnce(&str) -> S) -> Node {
-        self.start_on(Executor::default(), make_service).await
-    }
-
     pub(super) async fn start_on<S: proto::mdma_server::Mdma>(&self, executor: Executor, make_service: impl FnOnce(&str) -> S) -> Node {
         let listener = TcpListener::bind_address("127.0.0.1:0", executor.clone()).await.unwrap();
         let addr = listener.local_addr().unwrap();

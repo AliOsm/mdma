@@ -55,6 +55,7 @@ impl Fixture {
             }],
             signer_id: "ed25519:runtime".into(),
             signer_key: dir.path().join("catalog.pk8"),
+            endpoint: None,
             poll_catalogs: false,
             enable_execution: false,
             enable_routing: false,
@@ -90,7 +91,7 @@ impl Fixture {
 
     fn prepare(&self) -> Result<Prepared, BoxError> {
         // The temp directory remains alive throughout preparation.
-        Prepared::load(self.config.clone(), "127.0.0.1:50051".parse().unwrap(),
+        Prepared::load(self.config.clone(), "127.0.0.1:6362".parse().unwrap(),
             std::slice::from_ref(&self.client_root), std::slice::from_ref(&self.client_leaf))
     }
 }
@@ -172,7 +173,7 @@ fn local_issuer_and_selected_signer_material_must_match_reviewed_pins() {
 #[test]
 fn separate_listener_and_no_execution_or_route_activation_are_required() {
     let mut fixture = Fixture::new();
-    fixture.config.listen = "127.0.0.1:50051".parse().unwrap();
+    fixture.config.listen = "127.0.0.1:6362".parse().unwrap();
     assert!(fixture.prepare().is_err());
     let fixture = Fixture::new();
     let store = Store::open(&fixture.config.trust_state, &fixture.config.server_id).unwrap();

@@ -19,7 +19,7 @@ use x509_parser::prelude::*;
 mod binding;
 pub(crate) mod caller;
 pub use caller::BindCallerService;
-pub(crate) use caller::{Caller, listener_expiry};
+pub(crate) use caller::{Caller, ClientSpki, listener_expiry};
 pub use binding::utc_ms;
 pub use binding::{BindPeerService, Binding};
 

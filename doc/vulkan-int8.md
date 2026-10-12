@@ -40,9 +40,8 @@ The upstream MIT notice is in `LICENSE-llama.cpp` and ships with the crate.
   activations, not against the original f32 inputs.
 - A budget-accounted scratch buffer is reused, grows to the largest
   batch seen, and remains resident until the backend is dropped.
-- Int8 takes precedence over `MDMA_VK_F16_WEIGHTS`. The server skips f16
-  calibration while int8 is enabled; direct `calibrate_f16` callers must
-  disable int8 first.
+- Int8 takes precedence over `MDMA_VK_F16_WEIGHTS`. Direct `calibrate_f16`
+  callers must disable int8 first.
 - Vulkan builds need a GLSL compiler supporting `GL_KHR_cooperative_matrix`
   and `GL_EXT_integer_dot_product`
   (tested with glslangValidator 16.4.0).

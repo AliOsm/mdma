@@ -255,8 +255,7 @@ pub struct VulkanBackend {
     /// Device-local, preferring a type the host cannot see: every buffer
     /// a kernel reads or writes.
     device_type: u32,
-    /// Prefill stages its tiles as f16 (gemm_q_f16). MDMA_VK_F16_WEIGHTS:
-    /// 1 on, 0 off, unset or `auto` decided by `calibrate_f16` at load.
+    /// Prefill stages its tiles as f16 (gemm_q_f16) with MDMA_VK_F16_WEIGHTS=1.
     f16_weights: AtomicBool,
     fused_norm: AtomicBool,
     tiled_attention: AtomicBool,
@@ -834,15 +833,6 @@ impl VulkanBackend {
         self.int8.load(Ordering::Relaxed) != INT8_OFF
     }
 
-    /// Whether MDMA_VK_F16_WEIGHTS leaves the choice to `calibrate_f16`
-    /// (unset or `auto`).
-    pub fn f16_weights_auto() -> bool {
-        match std::env::var_os("MDMA_VK_F16_WEIGHTS") {
-            None => true,
-            Some(v) => v == "auto",
-        }
-    }
-
     fn dev(&self) -> &ash::Device {
         &self.inner.device
     }
@@ -1301,6 +1291,11 @@ impl Backend for VulkanBackend {
         // SAFETY: `inner.pdev` was enumerated from `inner.instance`, both live while `self` is.
         matches!(unsafe { self.inner.instance.get_physical_device_properties(self.inner.pdev) }.device_type,
             vk::PhysicalDeviceType::INTEGRATED_GPU | vk::PhysicalDeviceType::CPU)
+    }
+
+    fn total_device_bytes(&self) -> Option<usize> {
+        let heap = self.inner.mem.memory_types[self.device_type as usize].heap_index as usize;
+        usize::try_from(self.inner.mem.memory_heaps[heap].size).ok()
     }
 
     fn available_device_bytes(&self) -> Result<Option<usize>> {

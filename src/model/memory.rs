@@ -2,7 +2,7 @@ use super::{Decoder, Model, ModelConfig};
 use crate::backend::{Backend, Error, Result};
 use crate::gguf::GgufModel;
 use crate::kv_cache::KvCache;
-use crate::memory::{NativeMemoryBudget, Reservation, product, sum};
+use crate::memory::{MemoryCategory, NativeMemoryBudget, Reservation, product, sum};
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -50,11 +50,17 @@ impl<B: Backend> Model<B> {
         self.memory.as_ref().map(|memory| &memory.budget)
     }
 
+    /// Weight bytes this model holds in its budget, if it was loaded under one.
+    pub fn weight_reservation_bytes(&self) -> Option<usize> {
+        self.memory.as_ref().map(Reservation::bytes)
+    }
+
     pub fn kv_bytes(&self, backend: &B, capacity: usize) -> Result<usize> {
         KvCache::<B>::allocation_bytes(backend, &self.kv_widths()?, capacity.min(self.config.n_ctx))
     }
 
-    pub(super) fn kv_widths(&self) -> Result<Vec<usize>> {
+    /// K (and V) elements per position, per layer.
+    pub(crate) fn kv_widths(&self) -> Result<Vec<usize>> {
         if let Decoder::Gemma4(gemma) = &self.architecture {
             return gemma.config.kv_widths(&self.config);
         }
@@ -80,8 +86,8 @@ impl<B: Backend> Model<B> {
         let kv = new_kv.map(|capacity| self.kv_bytes(backend, capacity)).transpose()?.unwrap_or(0);
         // Conservative even on a prefix hit; prompt_tokens >= 1 also covers decode.
         let scratch = self.workspace_bytes(prompt_tokens)?;
-        let mut memory = budget.reserve(sum([kv, scratch])?)?;
-        let kv = new_kv.map(|_| memory.split(kv));
+        let mut memory = budget.reserve(sum([kv, scratch])?, MemoryCategory::Workspace)?;
+        let kv = new_kv.map(|_| memory.split_as(kv, MemoryCategory::Kv));
         Ok(RequestMemory { kv, scratch: Some(Arc::new(memory)) })
     }
 }

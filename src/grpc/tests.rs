@@ -1,3 +1,4 @@
+use std::assert_matches;
 use super::{proto, sampler_config_from_proto, MdmaServer, MdmaService};
 use crate::backend::cpu::CpuBackend;
 use crate::gguf::GgufModel;
@@ -17,7 +18,6 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
-mod upstream;
 mod transport;
 mod native;
 
@@ -46,79 +46,69 @@ fn runtime_oom_is_resource_exhausted_not_internal() {
 }
 
 #[tokio::test]
-async fn memory_pressure_keeps_introspect_available_with_no_ready_models() {
+async fn a_model_that_does_not_fit_is_refused_without_degrading_the_node() {
     use proto::mdma_server::Mdma;
     use rama::http::grpc::{Code, Request};
     use crate::memory::NativeMemoryBudget;
-    use crate::registry::ModelsFile;
+    use crate::registry::{Options, Source};
 
     let file = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer().write();
-    let mut config = ModelsFile::single_gguf(file.path().to_str().unwrap());
-    config.models[0].name = "minicheck".into();
     let budget = NativeMemoryBudget::new(0);
-    let backend = Arc::new(CpuBackend);
-    let mut registry = Registry::load_available_with_budget(&*backend, &config, 64, Some(&budget), |_| panic!("no upload")).unwrap();
-    assert!(registry.warmup_available(&*backend, 2, || false).unwrap());
-    let service = MdmaService::new(backend, registry, "cpu");
-    for _ in 0..2 {
-        let health = service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
-        assert!(!health.ready);
-        assert_eq!(health.server_state, "degraded");
-        assert_eq!(health.default_model, "minicheck");
-        assert_eq!(health.models.len(), 1);
-        assert_eq!(health.model_architecture, "internlm2");
-        assert!(!health.models[0].ready);
-    }
+    let options = Options { budget: Some(budget.clone()), warmup_rounds: 2, ..Options::new(64) };
+    let registry = Registry::new(Arc::new(CpuBackend), vec![("minicheck".into(), Source::Gguf(file.path().into()))], None, options).unwrap();
+    let service = MdmaService::new(registry, "cpu");
+    let health = service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
+    assert!(health.ready && health.models[0].ready);
+    assert_eq!((health.server_state.as_str(), health.default_model.as_str(), health.model_architecture.as_str()), ("serving", "minicheck", "internlm2"));
+    assert_eq!(health.models[0].residency, "available");
     for model in ["", "minicheck"] {
         let error = service.synthesize(Request::new(proto::SynthesizeRequest {
-            prompt: "hello".into(), max_tokens: 1, sampler: None, model: model.into(),
+            prompt: "hello".into(), max_tokens: 1, sampler: None, model: model.into(), emit_events: false, chat: false, system: String::new(),
         })).await.err().unwrap();
         assert_eq!(error.code(), Code::ResourceExhausted);
-        assert!(error.message().contains("not loaded") && error.message().contains("memory budget exhausted"));
+        assert!(error.message().contains("does not fit") && error.message().contains("memory budget exhausted"), "{}", error.message());
         let error = service.decide(Request::new(proto::DecideRequest {
             model: model.into(), state_json: "{}".into(), questions_json: "{}".into(),
         })).await.unwrap_err();
-        assert_eq!(error.code(), Code::ResourceExhausted);
+        assert_eq!(error.code(), Code::InvalidArgument, "a text model never answers Decide");
     }
+    let health = service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
+    assert_eq!((health.server_state.as_str(), health.models[0].residency.as_str()), ("serving", "available"));
+    assert!(health.models[0].error.contains("memory budget exhausted"));
     let error = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 1, sampler: None, model: "unknown".into(),
+        prompt: "hello".into(), max_tokens: 1, sampler: None, model: "unknown".into(), emit_events: false, chat: false, system: String::new(),
     })).await.err().unwrap();
     assert_eq!(error.code(), Code::NotFound);
     assert_eq!(budget.used(), 0);
 }
 
 #[tokio::test]
-async fn memory_pressure_preserves_default_routing_and_serves_fitting_models() {
+async fn memory_pressure_keeps_the_default_and_serves_models_that_fit() {
     use proto::mdma_server::Mdma;
     use rama::http::grpc::{Code, Request};
     use crate::memory::NativeMemoryBudget;
-    use crate::registry::ModelsFile;
+    use crate::registry::{Options, Source};
 
     let large = crate::gguf::tests::Fixture::new(8, 8).with_tokenizer().write();
     let small = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer().write();
     let bytes = crate::model::memory::weight_bytes(&GgufModel::open(small.path()).unwrap()).unwrap();
-    let mut config = ModelsFile::single_gguf(large.path().to_str().unwrap());
-    config.models[0].name = "large".into();
-    config.models.push(ModelsFile::single_gguf(small.path().to_str().unwrap()).models.remove(0));
-    config.models[1].name = "small".into();
     let budget = NativeMemoryBudget::new(bytes + 8192);
-    let backend = Arc::new(CpuBackend);
-    let registry = Registry::load_available_with_budget(&*backend, &config, 64, Some(&budget), |_| {}).unwrap();
-    let service = MdmaService::new(backend, registry, "cpu");
-    let health = service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
-    assert!(health.ready);
-    assert_eq!(health.server_state, "degraded");
-    assert_eq!(health.default_model, "large");
-    assert!(!health.models[0].ready);
-    assert!(health.models[1].ready);
+    let models = vec![("large".into(), Source::Gguf(large.path().into())), ("small".into(), Source::Gguf(small.path().into()))];
+    let registry = Registry::new(Arc::new(CpuBackend), models, None, Options { budget: Some(budget), ..Options::new(64) }).unwrap();
+    let service = MdmaService::new(registry, "cpu");
     let error = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 0, sampler: None, model: String::new(),
+        prompt: "hello".into(), max_tokens: 0, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     })).await.err().unwrap();
     assert_eq!(error.code(), Code::ResourceExhausted);
     let stream = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 0, sampler: None, model: "small".into(),
+        prompt: "hello".into(), max_tokens: 0, sampler: None, model: "small".into(), emit_events: false, chat: false, system: String::new(),
     })).await.unwrap().into_inner();
     assert!(stream.collect::<Vec<_>>().await.is_empty());
+    let health = service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
+    assert!(health.ready);
+    assert_eq!(health.default_model, "large");
+    let residency: Vec<_> = health.models.iter().map(|m| m.residency.as_str()).collect();
+    assert_eq!(residency, ["available", "resident"]);
 }
 
 #[test]
@@ -145,17 +135,16 @@ async fn native_budget_exhaustion_is_resource_exhausted_before_streaming() {
     use proto::mdma_server::Mdma;
     use rama::http::grpc::{Code, Request};
     use crate::memory::NativeMemoryBudget;
-    use crate::registry::ModelsFile;
+    use crate::registry::{Options, Source};
 
     let file = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer().write();
     let gguf = GgufModel::open(file.path()).unwrap();
     let bytes = crate::model::memory::weight_bytes(&gguf).unwrap();
     let budget = NativeMemoryBudget::new(bytes);
-    let backend = Arc::new(CpuBackend);
-    let registry = Registry::load_with_budget(&*backend, &ModelsFile::single_gguf(file.path().to_str().unwrap()), 64, Some(&budget), |_| {}).unwrap();
-    let service = MdmaService::new(backend, registry, "cpu");
+    let registry = Registry::new(Arc::new(CpuBackend), vec![("m".into(), Source::Gguf(file.path().into()))], None, Options { budget: Some(budget.clone()), ..Options::new(64) }).unwrap();
+    let service = MdmaService::new(registry, "cpu");
     let error = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "abc".into(), max_tokens: 4, sampler: None, model: String::new(),
+        prompt: "abc".into(), max_tokens: 4, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     })).await.err().unwrap();
     assert_eq!(error.code(), Code::ResourceExhausted);
     assert!(error.message().contains("native tensor memory budget"));
@@ -178,10 +167,10 @@ async fn shutdown_rejects_new_requests_but_drains_admitted_generation() {
     let backend = Arc::new(CpuBackend);
     let model = Arc::new(crate::model::tests::tiny_model(&*backend));
     let tokenizer = Arc::new(crate::tokenizer::tests::tiny_tokenizer());
-    let service = MdmaService::new(backend, tiny_registry(model, tokenizer), "cpu")
+    let service = MdmaService::new(tiny_registry(model, tokenizer), "cpu")
         .with_shutdown_guard(weak.clone());
     assert!(service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner().ready);
-    let request = proto::SynthesizeRequest { prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new() };
+    let request = proto::SynthesizeRequest { prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new() };
     let stream = service.synthesize(Request::new(request.clone())).await.unwrap().into_inner();
 
     trigger.cancel();
@@ -215,10 +204,10 @@ async fn shutdown_waits_for_disconnected_generation_worker() {
     let backend = Arc::new(CpuBackend);
     let model = Arc::new(crate::model::tests::tiny_model(&*backend));
     let tokenizer = Arc::new(crate::tokenizer::tests::tiny_tokenizer());
-    let service = MdmaService::new(backend, tiny_registry(model.clone(), tokenizer), "cpu")
+    let service = MdmaService::new(tiny_registry(model.clone(), tokenizer), "cpu")
         .with_shutdown_guard(shutdown.guard_weak());
     let stream = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(),
+        prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     })).await.unwrap().into_inner();
     drop(stream);
     drop(service);
@@ -228,7 +217,7 @@ async fn shutdown_waits_for_disconnected_generation_worker() {
 }
 
 fn tiny_registry(model: Arc<Model<CpuBackend>>, tokenizer: Arc<Tokenizer>) -> Registry<CpuBackend> {
-    Registry::single("tiny", Decoder { model, tokenizer, architecture: "tiny".into(), n_ctx: 64 })
+    Registry::single(Arc::new(CpuBackend), "tiny", "tiny", 64, Decoder { model, tokenizer })
 }
 
 fn tiny_service(status: crate::power::PowerStatus, limits: crate::power::DegradedLimits) -> MdmaService<CpuBackend> {
@@ -242,8 +231,8 @@ fn tiny_service_ctx(status: crate::power::PowerStatus, limits: crate::power::Deg
     let (tx, rx) = tokio::sync::watch::channel(status);
     // The receiver keeps the last value after the sender is gone.
     drop(tx);
-    let registry = Registry::single("tiny", Decoder { model, tokenizer, architecture: "tiny".into(), n_ctx });
-    MdmaService::new(backend, registry, "cpu").with_power(rx, limits)
+    let registry = Registry::single(backend, "tiny", "tiny", n_ctx, Decoder { model, tokenizer });
+    MdmaService::new(registry, "cpu").with_power(rx, limits)
 }
 
 #[tokio::test]
@@ -258,7 +247,7 @@ async fn unknown_models_are_not_found_and_introspect_lists_the_registry() {
     assert_eq!((health.models[0].kind.as_str(), health.models[0].backend.as_str(), health.models[0].n_ctx), ("gguf", "cpu", 64));
     assert_eq!(health.model_architecture, "tiny");
 
-    let request = proto::SynthesizeRequest { prompt: "hello".into(), max_tokens: 1, sampler: None, model: "nope".into() };
+    let request = proto::SynthesizeRequest { prompt: "hello".into(), max_tokens: 1, sampler: None, model: "nope".into(), emit_events: false, chat: false, system: String::new() };
     let error = service.synthesize(Request::new(request)).await.err().unwrap();
     assert_eq!(error.code(), Code::NotFound);
     assert!(error.message().contains("tiny"), "{}", error.message());
@@ -329,11 +318,51 @@ async fn degraded_clamps_max_tokens_and_reports_power() {
     assert_eq!(health.battery_percent, 63);
 
     let stream = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(),
+        prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     })).await.unwrap().into_inner();
     let tokens: Vec<_> = stream.collect().await;
     assert_eq!(tokens.len(), 4);
     assert!(tokens.iter().all(Result::is_ok));
+    assert!(tokens.iter().flatten().all(|t| t.accepted.is_none() && t.completed.is_none()), "no events unless asked");
+
+    // With events: the admitted (clamped) cap first, the worker's verdict last.
+    let stream = service.synthesize(Request::new(proto::SynthesizeRequest {
+        prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(), emit_events: true, chat: false, system: String::new(),
+    })).await.unwrap().into_inner();
+    let messages: Vec<_> = stream.map(Result::unwrap).collect().await;
+    let accepted = messages.first().and_then(|m| m.accepted).expect("accepted comes first");
+    assert_eq!((accepted.max_tokens, accepted.n_ctx), (4, 64));
+    assert!(accepted.prompt_tokens > 0);
+    let completed = messages.last().and_then(|m| m.completed.clone()).expect("completed comes last");
+    let tokens = &messages[1..messages.len() - 1];
+    assert!(tokens.iter().all(|t| t.accepted.is_none() && t.completed.is_none()));
+    assert_eq!(completed.emitted_tokens as usize, tokens.len());
+    assert!(tokens.len() <= 4);
+    let expected = if tokens.len() == 4 { "max_tokens" } else { "eos" };
+    assert_eq!(completed.finish_reason, expected);
+}
+
+#[tokio::test]
+async fn emitted_events_report_context_limit_and_zero_output() {
+    use crate::power::{DegradedLimits, PowerStatus};
+    use proto::mdma_server::Mdma;
+    use rama::http::grpc::Request;
+
+    let service = tiny_service_ctx(PowerStatus::default(), DegradedLimits::default(), 8);
+    let run = |prompt: &str, max_tokens| service.synthesize(Request::new(proto::SynthesizeRequest {
+        prompt: prompt.into(), max_tokens, sampler: None, model: String::new(), emit_events: true, chat: false, system: String::new(),
+    }));
+    let messages: Vec<_> = run("hello", 0).await.unwrap().into_inner().map(Result::unwrap).collect().await;
+    assert_eq!(messages.len(), 2, "accepted and completed only");
+    let completed = messages[1].completed.clone().unwrap();
+    assert_eq!((completed.emitted_tokens, completed.decode_ms), (0, 0));
+
+    // Asking past the window is capped to it and reported as such (unless EOS ends it first).
+    let messages: Vec<_> = run("hi", 40).await.unwrap().into_inner().map(Result::unwrap).collect().await;
+    let accepted = messages[0].accepted.unwrap();
+    assert_eq!(accepted.max_tokens + accepted.prompt_tokens, 8);
+    let completed = messages.last().unwrap().completed.clone().unwrap();
+    assert_matches!(completed.finish_reason.as_str(), "context_limit" | "eos", "{completed:?}");
 }
 
 #[tokio::test]
@@ -346,7 +375,7 @@ async fn degraded_rejects_prompts_over_the_reduced_context() {
     assert!(crate::tokenizer::tests::tiny_tokenizer().encode(prompt).len() > 2);
     let service = tiny_service(on_battery(ServerState::Degraded, 50), DegradedLimits { max_tokens: 4, n_ctx: 2 });
     let error = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: prompt.into(), max_tokens: 4, sampler: None, model: String::new(),
+        prompt: prompt.into(), max_tokens: 4, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     })).await.err().unwrap();
     assert_eq!(error.code(), Code::ResourceExhausted);
 }
@@ -363,7 +392,7 @@ async fn critical_refuses_new_generations() {
     assert_eq!(health.server_state, "critical");
     assert_eq!(health.battery_percent, 7);
     let error = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 4, sampler: None, model: String::new(),
+        prompt: "hello".into(), max_tokens: 4, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     })).await.err().unwrap();
     assert_eq!(error.code(), Code::Unavailable);
     assert!(error.message().contains("7%"), "{}", error.message());
@@ -386,7 +415,7 @@ async fn degraded_budgets_prompt_and_output_together() {
     ] {
         let service = tiny_service(status, DegradedLimits { max_tokens: 4, n_ctx: 8 });
         let stream = service.synthesize(Request::new(proto::SynthesizeRequest {
-            prompt: "hello".into(), max_tokens: requested, sampler: None, model: String::new(),
+            prompt: "hello".into(), max_tokens: requested, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
         })).await.unwrap().into_inner();
         let tokens: Vec<_> = stream.collect().await;
         assert!(tokens.iter().all(Result::is_ok), "{tokens:?}");
@@ -408,7 +437,7 @@ async fn degraded_budget_respects_server_and_model_context_caps() {
             server_ctx,
         );
         let stream = service.synthesize(Request::new(proto::SynthesizeRequest {
-            prompt: "a".repeat(prompt_len), max_tokens: 40, sampler: None, model: String::new(),
+            prompt: "a".repeat(prompt_len), max_tokens: 40, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
         })).await.unwrap().into_inner();
         let tokens: Vec<_> = stream.collect().await;
         assert!(tokens.iter().all(Result::is_ok), "{tokens:?}");
@@ -427,13 +456,13 @@ async fn degraded_full_context_requires_zero_requested_output() {
         DegradedLimits { max_tokens: 4, n_ctx: 5 },
     );
     let error = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 1, sampler: None, model: String::new(),
+        prompt: "hello".into(), max_tokens: 1, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     })).await.err().unwrap();
     assert_eq!(error.code(), Code::ResourceExhausted);
     assert!(error.message().contains("no room for output"));
 
     let mut stream = service.synthesize(Request::new(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 0, sampler: None, model: String::new(),
+        prompt: "hello".into(), max_tokens: 0, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     })).await.unwrap().into_inner();
     assert!(stream.next().await.is_none());
 }
@@ -446,7 +475,7 @@ async fn without_a_watcher_introspect_reports_serving() {
     let backend = Arc::new(CpuBackend);
     let model = Arc::new(crate::model::tests::tiny_model(&*backend));
     let tokenizer = Arc::new(crate::tokenizer::tests::tiny_tokenizer());
-    let service = MdmaService::new(backend, tiny_registry(model, tokenizer), "cpu");
+    let service = MdmaService::new(tiny_registry(model, tokenizer), "cpu");
     let health = service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
     assert!(health.ready);
     assert_eq!(health.server_state, "serving");
@@ -558,7 +587,7 @@ async fn shutdown_drains_real_mtls_transport() {
     let backend = Arc::new(CpuBackend);
     let model = Arc::new(crate::model::tests::tiny_model(&*backend));
     let tokenizer = Arc::new(crate::tokenizer::tests::tiny_tokenizer());
-    let service = MdmaService::new(backend, tiny_registry(model, tokenizer), "cpu")
+    let service = MdmaService::new(tiny_registry(model, tokenizer), "cpu")
         .with_shutdown_guard(shutdown.guard_weak());
     let server_tls = TlsServerConfig::new()
         .with_single_cert(ServerAuthData { private_key: certs.server_key, cert_chain: certs.server_cert, ocsp: None })
@@ -585,7 +614,7 @@ async fn shutdown_drains_real_mtls_transport() {
         .build_client::<rama::http::Body, rama::http::Body, _>();
     let client = proto::mdma_client::MdmaClient::new(connector, format!("https://localhost:{}", addr.port()).parse().unwrap());
     let response = client.synthesize(proto::SynthesizeRequest {
-        prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(),
+        prompt: "hello".into(), max_tokens: 40, sampler: None, model: String::new(), emit_events: false, chat: false, system: String::new(),
     }).await.unwrap();
     let mut stream = response.into_inner();
     assert!(stream.next().await.unwrap().is_ok());
@@ -603,8 +632,8 @@ fn load_service() -> MdmaServer<MdmaService<CpuBackend>> {
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Arc::new(Model::load(&*backend, &mut gguf).expect("load model"));
     let tokenizer = Arc::new(Tokenizer::from_gguf(&gguf).expect("build tokenizer"));
-    let registry = Registry::single("minicheck", Decoder { model, tokenizer, architecture: "internlm2".into(), n_ctx: 4096 });
-    let service = MdmaService::new(backend, registry, "cpu");
+    let registry = Registry::single(backend, "minicheck", "internlm2", 4096, Decoder { model, tokenizer });
+    let service = MdmaService::new(registry, "cpu");
     MdmaServer::new(service)
 }
 
@@ -661,7 +690,7 @@ async fn synthesize_works_over_real_mtls() {
             repetition_penalty: Some(1.0),
             repetition_window: Some(0),
         }),
-        model: String::new(),
+        model: String::new(), emit_events: false, chat: false, system: String::new(),
     };
 
     let response = client.synthesize(request).await.expect("synthesize rpc");
@@ -673,4 +702,132 @@ async fn synthesize_works_over_real_mtls() {
     }
 
     assert_eq!(ids, EXPECTED_CONTINUATION);
+}
+
+#[tokio::test]
+async fn a_models_folder_is_listed_and_classified_from_gguf_tags() {
+    use crate::registry::Options;
+    use candle_core::quantized::gguf_file::Value;
+    use proto::mdma_server::Mdma;
+    use rama::http::grpc::Request;
+
+    let mut fixture = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer();
+    fixture.metadata.insert("general.tags".into(), Value::Array(vec![Value::String("text-classification".into())]));
+    fixture.metadata.insert("tokenizer.chat_template".into(), Value::String("{{ '<|assistant|>\\n<think>\\n' }}".into()));
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("check.gguf"), std::fs::read(fixture.write().path()).unwrap()).unwrap();
+    std::fs::hard_link(dir.path().join("check.gguf"), dir.path().join("verify.gguf")).unwrap();
+    std::fs::write(dir.path().join("broken.gguf"), b"not a gguf").unwrap();
+    let registry = Registry::open(Arc::new(CpuBackend), dir.path(), Some("verify"), Options::new(64)).unwrap();
+    let host = crate::host::detect("periscope", "CPU");
+    let service = MdmaService::new(registry, "cpu").with_host(host.clone());
+    let status = service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
+    let classes: Vec<_> = status.models.iter().map(|m| (m.name.as_str(), m.class.as_str(), m.capabilities.clone(), m.residency.as_str())).collect();
+    let reasoning = || vec!["reasoning".to_owned()];
+    assert_eq!(classes, [("check", "decision", reasoning(), "available"), ("verify", "decision", reasoning(), "available")], "broken files are skipped");
+    assert_eq!(status.default_model, "verify");
+    let reported = status.host.unwrap();
+    assert_eq!((reported.name.as_str(), reported.os_name.as_str()), (host.name.as_str(), host.os_name.as_str()));
+    assert!(reported.disk_bytes > 0 && reported.memory_available_bytes > 0, "live figures for the models folder's disk and RAM");
+    assert!(status.models.iter().all(|m| m.host.is_none()), "local models run on the reported host");
+}
+
+#[tokio::test]
+async fn chat_wraps_one_user_turn_in_the_detected_format() {
+    use proto::mdma_server::Mdma;
+    use rama::http::grpc::{Code, Request};
+    use crate::registry::{Options, Source};
+
+    let mut fixture = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer();
+    fixture.metadata.insert("tokenizer.chat_template".into(), candle_core::quantized::gguf_file::Value::String(
+        "{% for m in messages %}{{ '<|user|>\\n' + m['content'] + eos_token }}{{ '<|assistant|>\\n' }}{% endfor %}".into(),
+    ));
+    let file = fixture.write();
+    let registry = Registry::new(Arc::new(CpuBackend), vec![("chat".into(), Source::Gguf(file.path().into()))], None, Options::new(64)).unwrap();
+    let service = MdmaService::new(registry, "cpu");
+    let status = service.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
+    assert_eq!(status.models[0].chat_format, "zephyr");
+
+    let accepted = |chat| {
+        let service = &service;
+        async move {
+            let stream = service.synthesize(Request::new(proto::SynthesizeRequest {
+                prompt: "hi".into(), max_tokens: 1, sampler: None, model: String::new(), emit_events: true, chat, system: String::new(),
+            })).await.unwrap().into_inner();
+            let messages: Vec<_> = stream.map(Result::unwrap).collect().await;
+            messages[0].accepted.unwrap().prompt_tokens
+        }
+    };
+    // The wrapped turn is plain text to this byte tokenizer: one token per byte.
+    let wrapped = crate::tokenizer::ChatFormat::Zephyr.user_turn("hi").len() as u32;
+    assert_eq!((accepted(false).await, accepted(true).await), (2, wrapped));
+
+    let with_system = service.synthesize(Request::new(proto::SynthesizeRequest {
+        prompt: "hi".into(), max_tokens: 1, sampler: None, model: String::new(), emit_events: true, chat: true, system: "Concise.".into(),
+    })).await.unwrap().into_inner().map(Result::unwrap).collect::<Vec<_>>().await;
+    // No spaces: this ASCII-only byte vocabulary cannot encode SentencePiece's `▁`.
+    let expected = crate::tokenizer::ChatFormat::Zephyr.conversation(Some("Concise."), "hi").len() as u32;
+    assert_eq!(with_system[0].accepted.unwrap().prompt_tokens, expected);
+    let error = service.synthesize(Request::new(proto::SynthesizeRequest {
+        prompt: "hi".into(), max_tokens: 1, sampler: None, model: String::new(), emit_events: false, chat: false, system: "Be kind.".into(),
+    })).await.err().unwrap();
+    assert_eq!(error.code(), Code::InvalidArgument, "system without chat is refused, not dropped");
+
+    let plain = tiny_service(crate::power::PowerStatus::default(), crate::power::DegradedLimits::default());
+    let status = plain.introspect(Request::new(proto::IntrospectRequest {})).await.unwrap().into_inner();
+    assert_eq!(status.models[0].chat_format, "", "no template, no format");
+    let error = plain.synthesize(Request::new(proto::SynthesizeRequest {
+        prompt: "hi".into(), max_tokens: 1, sampler: None, model: String::new(), emit_events: false, chat: true, system: String::new(),
+    })).await.err().unwrap();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().contains("no known chat format"), "{}", error.message());
+}
+
+#[tokio::test]
+async fn leases_load_models_and_keep_them_until_released() {
+    use crate::registry::{Options, Source};
+    use proto::mdma_server::Mdma;
+    use rama::http::grpc::{Code, Request};
+
+    let file = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer().write();
+    let models = ["a", "b"].map(|name| (name.to_owned(), Source::Gguf(file.path().into()))).into();
+    let registry = Registry::new(Arc::new(CpuBackend), models, None, Options::new(64)).unwrap();
+    let service = MdmaService::new(registry, "cpu");
+    let residency = |service: &MdmaService<CpuBackend>| {
+        let status = service.status(&Request::new(()));
+        status.models.iter().map(|m| (m.residency.clone(), m.leases)).collect::<Vec<_>>()
+    };
+    let lease = service.acquire(Request::new(proto::AcquireRequest { model: "b".into(), ttl_ms: 1000, wait: true })).await.unwrap().into_inner();
+    assert_eq!((lease.model.as_str(), lease.ttl_ms, lease.residency.as_str()), ("b", 5000, "resident"), "ttl is clamped");
+    assert_eq!(residency(&service), [("resident".into(), 1), ("resident".into(), 1)], "aliases share the lease's model");
+    let again = service.renew(Request::new(proto::RenewRequest { lease_id: lease.lease_id.clone(), ttl_ms: 0 })).await.unwrap().into_inner();
+    assert_eq!(again.ttl_ms, 60_000);
+    service.release(Request::new(proto::ReleaseRequest { lease_id: lease.lease_id.clone() })).await.unwrap();
+    assert_eq!(residency(&service)[0], ("resident".into(), 0), "released models stay loaded until evicted");
+    for error in [
+        service.renew(Request::new(proto::RenewRequest { lease_id: lease.lease_id.clone(), ttl_ms: 0 })).await.unwrap_err(),
+        service.release(Request::new(proto::ReleaseRequest { lease_id: lease.lease_id })).await.unwrap_err(),
+        service.acquire(Request::new(proto::AcquireRequest { model: "nope".into(), ttl_ms: 0, wait: false })).await.unwrap_err(),
+    ] {
+        assert_eq!(error.code(), Code::NotFound, "{error:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_lease_without_waiting_loads_in_the_background() {
+    use crate::registry::{Options, Source};
+    use proto::mdma_server::Mdma;
+    use rama::http::grpc::Request;
+
+    let file = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer().write();
+    let registry = Registry::new(Arc::new(CpuBackend), vec![("m".into(), Source::Gguf(file.path().into()))], None, Options::new(64)).unwrap();
+    let service = MdmaService::new(registry, "cpu");
+    let mut changes = service.registry().subscribe();
+    let lease = service.acquire(Request::new(proto::AcquireRequest { model: String::new(), ttl_ms: 0, wait: false })).await.unwrap().into_inner();
+    assert_eq!((lease.model.as_str(), lease.residency.as_str()), ("m", "loading"));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while service.registry().resident("m").is_none() {
+            changes.changed().await.unwrap();
+        }
+    }).await.expect("the background load finishes");
 }

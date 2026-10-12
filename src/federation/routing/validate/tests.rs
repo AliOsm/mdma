@@ -15,6 +15,9 @@ fn fixture() -> (SynthesizeRequest, ModelDescriptor, SynthesizeEvent) {
         backend: "cpu".into(),
         ready: true,
         max_input_bytes: 65536,
+        class: crate::registry::Class::Generative,
+        capabilities: vec![],
+        resident: true,
         limits: Limits::Synthesize {
             n_ctx: 32,
             max_output_tokens: 8,

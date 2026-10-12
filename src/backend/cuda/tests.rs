@@ -491,19 +491,19 @@ fn qmatmul_matches_cpu_on_f16_weights() {
     run_qmatmul(GgmlDType::F16, &w, &[n_out, n_in], &x, 1e-3);
 }
 
-fn embed_matches_cpu(dtype: GgmlDType, table: Vec<u8>, vocab: usize, n: usize) {
+fn embed_matches_cpu(dtype: GgmlDType, table: &[u8], vocab: usize, n: usize) {
     let ids = [vocab as u32 - 1, 0, 2, 2];
     let cpu = CpuBackend;
     let w = QWeight {
         dtype,
         shape: vec![vocab, n],
-        buf: crate::backend::cpu::CpuBuf(table.clone()),
+        buf: crate::backend::cpu::CpuBuf(table.to_vec()),
     };
     let mut out_cpu = cpu.alloc(ids.len() * n * 4, Pool::Scratch).unwrap();
     cpu.embed(&w, &ids, &mut out_cpu).unwrap();
     let gpu = gpu();
     let mut buf = gpu.alloc(table.len(), Pool::Weights).unwrap();
-    gpu.upload(&mut buf, 0, &table).unwrap();
+    gpu.upload(&mut buf, 0, table).unwrap();
     let w_g = QWeight {
         dtype,
         shape: vec![vocab, n],
@@ -519,7 +519,7 @@ fn embed_matches_cpu(dtype: GgmlDType, table: Vec<u8>, vocab: usize, n: usize) {
 #[test]
 fn embed_matches_cpu_on_synthetic_kquant_tables() {
     for dtype in [GgmlDType::Q4K, GgmlDType::Q6K] {
-        embed_matches_cpu(dtype, synthetic_kquant(dtype, 5, 512), 5, 512);
+        embed_matches_cpu(dtype, &synthetic_kquant(dtype, 5, 512), 5, 512);
     }
 }
 
@@ -701,7 +701,7 @@ fn greedy_continuation_matches_llama_cpp() {
     const PROMPT: &[u32] = &[1, 918, 6872, 446, 9760, 505];
     const EXPECTED: &[u32] = &[12247, 281, 12247, 505, 395];
     let backend = gpu();
-    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Model::load(&backend, &mut gguf).expect("load model");
     let mut kv = model.new_kv_cache(&backend, 64).expect("kv");
@@ -729,7 +729,7 @@ fn gemm_prefill_continues_like_per_token_decode() {
         "{} has no int8 mma.sync",
         backend.device_name()
     );
-    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Model::load(&backend, &mut gguf).expect("load model");
     let prompt: Vec<u32> = (0..40).map(|i| 1 + (i * 2749 + 918) % 30000).collect();
@@ -791,7 +791,7 @@ fn bench_wall_time() {
     use std::time::Instant;
     let backend = gpu();
     let start = Instant::now();
-    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Model::load(&backend, &mut gguf).expect("load model");
     eprintln!(
@@ -849,7 +849,7 @@ fn bench_wall_time() {
         eprintln!(
             "BENCH kind=decode prefix={prefix} tokens={n_steps} elapsed_ms={:.1} tok_s={:.2}",
             elapsed.as_secs_f64() * 1e3,
-            n_steps as f64 / elapsed.as_secs_f64()
+            f64::from(n_steps) / elapsed.as_secs_f64()
         );
     }
 }
@@ -860,7 +860,7 @@ fn bench_wall_time() {
 /// Run explicitly: `cargo test --release --lib --features cuda
 /// -- --ignored --nocapture bench_qmatmul_bandwidth`.
 #[test]
-#[ignore]
+#[ignore = "benchmark: cargo test --release --features cuda bench_qmatmul_bandwidth -- --ignored --nocapture"]
 fn bench_qmatmul_bandwidth() {
     use std::time::Instant;
     let gpu = gpu();
@@ -889,7 +889,7 @@ fn bench_qmatmul_bandwidth() {
             gpu.qmatmul(&w_gpu, &x_buf, &mut y_buf).unwrap();
         }
         gpu.download(&y_buf, 0, &mut sink).unwrap();
-        let per = start.elapsed().as_secs_f64() / reps as f64;
+        let per = start.elapsed().as_secs_f64() / f64::from(reps);
         eprintln!(
             "BENCH kind=qmatmul dtype={dtype:?} shape={n_out}x{n_in} us={:.1} gb_s={:.1}",
             per * 1e6,

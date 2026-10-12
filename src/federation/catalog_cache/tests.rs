@@ -30,6 +30,7 @@ fn wire(poll: &Poll, key: &KeyPairHandle, now_ms: u64, lifetime_ms: u64) -> Sign
         issued_at_ms: now_ms,
         expires_at_ms: now_ms + lifetime_ms,
         server_state: catalog::ServerState::Serving,
+        host: crate::grpc::Host::default(),
         models: vec![],
     };
     let envelope = catalog::sign_catalog(&body, "ed25519:catalog", key).unwrap();
@@ -287,6 +288,7 @@ fn a_new_empty_snapshot_withdraws_previously_advertised_models() {
         issued_at_ms: f.now_ms,
         expires_at_ms: f.now_ms + 60_000,
         server_state: catalog::ServerState::Serving,
+        host: crate::grpc::Host { name: "citadel".into(), os: "freebsd".into(), os_name: "FreeBSD 16.0-CURRENT".into(), ..Default::default() },
         models: vec![catalog::ModelDescriptor {
             model: "model".into(),
             kind: catalog::Kind::Gguf,
@@ -296,6 +298,9 @@ fn a_new_empty_snapshot_withdraws_previously_advertised_models() {
             backend: "cpu".into(),
             ready: true,
             max_input_bytes: 1024,
+            class: crate::registry::Class::Decision,
+            capabilities: vec![crate::registry::Capability::Reasoning],
+            resident: true,
             limits: catalog::Limits::Synthesize {
                 n_ctx: 64,
                 max_output_tokens: 32,
@@ -323,6 +328,11 @@ fn a_new_empty_snapshot_withdraws_previously_advertised_models() {
             .len(),
         1
     );
+    let topology = crate::federation::topology::Topology::new(f.remote_store.clone(), Some(cache.clone()), vec![]).snapshot();
+    let peer = &topology.peers[0];
+    assert_eq!(peer.host.as_ref().map(|h| h.os_name.as_str()), Some("FreeBSD 16.0-CURRENT"), "operators see the peer's host");
+    let model = &peer.catalog.as_ref().unwrap().models[0];
+    assert_eq!((model.class.as_str(), model.capabilities.as_slice()), ("decision", ["reasoning".to_owned()].as_slice()));
     let poll = cache
         .begin(&f.remote_store, &binding, f.now_ms, now)
         .unwrap();

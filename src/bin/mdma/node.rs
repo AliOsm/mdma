@@ -11,7 +11,7 @@ use rama::service::BoxService;
 use rama::tcp::server::TcpListener;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use sysinfo::{Disks, System};
+use sysinfo::System;
 
 #[path = "node/discovery.rs"]
 mod discovery;
@@ -93,12 +93,8 @@ fn snapshot(
     let mut system = System::new();
     system.refresh_memory();
     system.refresh_cpu_all();
-    let disks = Disks::new_with_refreshed_list();
-    let disk = disks
-        .iter()
-        .filter(|disk| storage.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().components().count())
-        .ok_or("cannot determine filesystem for model storage")?;
+    let (disk_total_bytes, disk_available_bytes) =
+        mdma::host::disk_of(storage).ok_or("cannot determine filesystem for model storage")?;
     Ok(proto::ResourceSnapshot {
         node_name: System::host_name().ok_or("cannot determine hostname")?,
         os: std::env::consts::OS.into(),
@@ -117,8 +113,8 @@ fn snapshot(
         memory_total_bytes: system.total_memory(),
         memory_available_bytes: system.available_memory(),
         storage_path: storage.to_string_lossy().into_owned(),
-        disk_total_bytes: disk.total_space(),
-        disk_available_bytes: disk.available_space(),
+        disk_total_bytes,
+        disk_available_bytes,
         network_interface: address.and_then(network::interface),
         identity: Some(version::local()),
     })

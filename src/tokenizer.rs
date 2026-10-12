@@ -6,6 +6,8 @@ use std::collections::{BinaryHeap, HashMap};
 const SPM_SPACE: char = '\u{2581}';
 
 mod byte_bpe;
+mod chat;
+pub use chat::ChatFormat;
 
 pub struct Tokenizer {
     pieces: Vec<String>,
@@ -20,6 +22,7 @@ pub struct Tokenizer {
     specials: Vec<(String, u32)>,
     stop_ids: Vec<u32>,
     byte_bpe: Option<tokenizers::pipeline::PipelineTokenizer>,
+    chat: Option<ChatFormat>,
 }
 
 struct Sym {
@@ -150,11 +153,12 @@ impl Tokenizer {
         } else {
             None
         };
-        let piece_to_id = pieces
+        let piece_to_id: HashMap<String, u32> = pieces
             .iter()
             .enumerate()
             .map(|(id, p)| (p.clone(), id as u32))
             .collect();
+        let chat = ChatFormat::detect(model.metadata_str("tokenizer.chat_template"), |marker| piece_to_id.contains_key(marker));
 
         Some(Self {
             pieces,
@@ -173,7 +177,13 @@ impl Tokenizer {
             specials,
             stop_ids,
             byte_bpe,
+            chat,
         })
+    }
+
+    /// The model's chat format, if recognised.
+    pub const fn chat_format(&self) -> Option<ChatFormat> {
+        self.chat
     }
 
     pub fn eos_id(&self) -> Option<u32> {

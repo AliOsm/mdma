@@ -3,8 +3,9 @@
 
 use super::catalog::{self, Kind, Limits, ModelDescriptor, ServerState};
 use crate::backend::Backend;
+use crate::grpc::Host;
 use crate::power::{DegradedLimits, PowerStatus};
-use crate::registry::{Entry, Registry};
+use crate::registry::{Phase, Registry};
 use rama::futures::FutureExt;
 use rama::graceful::WeakShutdownGuard;
 use std::sync::Arc;
@@ -14,6 +15,16 @@ use tokio::sync::watch;
 pub(crate) struct Snapshot {
     pub state: ServerState,
     pub models: Vec<ModelDescriptor>,
+    pub host: Host,
+}
+
+impl Snapshot {
+    /// The same state and models; live host figures and residency may differ.
+    pub(crate) fn same_offer(&self, other: &Self) -> bool {
+        self.state == other.state
+            && self.models.len() == other.models.len()
+            && self.models.iter().zip(&other.models).all(|(a, b)| a.same_selection(b))
+    }
 }
 
 pub(crate) trait Inventory: Send + Sync {
@@ -31,6 +42,7 @@ impl Inventory for Empty {
         Snapshot {
             state: ServerState::Serving,
             models: vec![],
+            host: Host::default(),
         }
     }
 }
@@ -39,6 +51,7 @@ pub(crate) struct Native<B: Backend> {
     pub registry: Arc<Registry<B>>,
     pub shutdown: Option<WeakShutdownGuard>,
     pub power: Option<(watch::Receiver<PowerStatus>, DegradedLimits)>,
+    pub host: Arc<Host>,
 }
 
 impl<B> Inventory for Native<B>
@@ -69,23 +82,24 @@ where
             ServerState::Serving
         };
         if state == ServerState::Serving
-            && self
-                .registry
-                .iter()
-                .any(|m| matches!(m.entry, Entry::Unavailable(_)))
+            && self.registry.entries().any(|entry| entry.phase == Phase::Failed)
         {
             state = ServerState::Degraded;
         }
         // Policy order is stable and bounded (<=256); no default-name fallback,
-        // upstream introspection, filesystem discovery or export inference.
+        // filesystem discovery or export inference.
         let mut models = Vec::new();
         for name in exports {
             if super::config::validate_model(name).is_err() {
                 continue;
             }
-            let Some(loaded) = self.registry.get(name) else {
+            let Some(entry) = self.registry.entries().find(|entry| entry.name == name) else {
                 continue;
             };
+            if entry.phase == Phase::Failed {
+                continue;
+            }
+            let info = entry.info;
             let Some(artifact) = self.registry.artifact_id(name) else {
                 continue;
             };
@@ -97,12 +111,12 @@ where
                 .as_object()
                 .and_then(|manifest| manifest.get("backend"))
                 .and_then(|value| value.as_str());
-            let Some(backend @ ("cpu" | "metal" | "rocm" | "vulkan")) = backend else {
+            let Some(backend @ ("cpu" | "cuda" | "metal" | "rocm" | "vulkan")) = backend else {
                 continue;
             };
-            let (kind, architecture, limits) = match &loaded.entry {
-                Entry::Decoder(decoder) => {
-                    let n_ctx = decoder.n_ctx.min(decoder.model.config().n_ctx);
+            let (kind, limits) = match info.kind {
+                crate::registry::Kind::Gguf => {
+                    let n_ctx = info.n_ctx;
                     // Use the power observation, not registry degradation, for
                     // request caps, exactly as the native service does.
                     let (n_ctx, output) = match power {
@@ -119,41 +133,41 @@ where
                     };
                     (
                         Kind::Gguf,
-                        decoder.architecture.clone(),
                         Limits::Synthesize {
                             n_ctx,
                             max_output_tokens,
                         },
                     )
                 }
-                Entry::Laya(predictor) => (
+                crate::registry::Kind::Laya => (
                     Kind::Laya,
-                    predictor.architecture().into(),
                     Limits::Decide {
                         max_questions: catalog::MAX_DECIDE_QUESTIONS,
                         max_result_bytes: catalog::MAX_DECIDE_RESULT_BYTES,
                     },
                 ),
-                Entry::Upstream(_) | Entry::Unavailable(_) => continue,
             };
             let descriptor = ModelDescriptor {
-                model: loaded.name.clone(),
+                model: entry.name.to_owned(),
                 kind,
                 artifact_id: artifact.as_str().into(),
                 profile_id: profile.as_str().into(),
-                architecture,
+                architecture: info.architecture.clone(),
                 // Taken from a concrete loader-created, still-current profile.
                 backend: backend.into(),
                 ready: !state.forces_unready(),
                 max_input_bytes: catalog::MAX_MAX_INPUT_BYTES,
                 limits,
+                class: info.class,
+                capabilities: info.capabilities.clone(),
+                resident: entry.phase == Phase::Resident,
             };
             // Invalid/unsupported local names or limits are unexportable.
             if descriptor.validate().is_ok() {
                 models.push(descriptor);
             }
         }
-        Snapshot { state, models }
+        Snapshot { state, models, host: self.registry.live_host(&self.host) }
     }
 }
 

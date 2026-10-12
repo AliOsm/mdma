@@ -153,6 +153,9 @@ pub trait Backend {
     /// A live free-memory snapshot, not a reservation against other processes.
     fn available_device_bytes(&self) -> Result<Option<usize>> { Ok(None) }
 
+    /// Device memory in total, when the backend has its own.
+    fn total_device_bytes(&self) -> Option<usize> { None }
+
     /// Identifies the exact prepared layout, target and kernel build.
     fn weight_cache_profile(&self) -> Option<&str> { None }
 

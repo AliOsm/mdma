@@ -72,7 +72,7 @@ impl NvmlProbe {
                 return Err(Error::Backend(describe("nvmlInit_v2", r)));
             }
             let mut device = std::ptr::null_mut();
-            let r = nvmlDeviceGetHandleByPciBusId_v2(bus.as_ptr(), &mut device);
+            let r = nvmlDeviceGetHandleByPciBusId_v2(bus.as_ptr(), &raw mut device);
             if r != NVML_SUCCESS {
                 nvmlShutdown();
                 return Err(Error::Backend(describe(
@@ -94,7 +94,7 @@ impl NvmlProbe {
         // SAFETY: `self.device` came from nvmlDeviceGetHandleByPciBusId_v2 and
         // stays valid while this probe holds its nvmlInit reference;
         // `limit_mw` is a live u32 (c_uint) out-pointer.
-        let r = unsafe { nvmlDeviceGetEnforcedPowerLimit(self.device, &mut limit_mw) };
+        let r = unsafe { nvmlDeviceGetEnforcedPowerLimit(self.device, &raw mut limit_mw) };
         if r != NVML_SUCCESS {
             return Err(io::Error::other(describe(
                 "nvmlDeviceGetEnforcedPowerLimit",
@@ -103,7 +103,7 @@ impl NvmlProbe {
         }
         // SAFETY: the same live handle as above; `default_mw` is a live u32
         // (c_uint) out-pointer.
-        let r = unsafe { nvmlDeviceGetPowerManagementDefaultLimit(self.device, &mut default_mw) };
+        let r = unsafe { nvmlDeviceGetPowerManagementDefaultLimit(self.device, &raw mut default_mw) };
         if r != NVML_SUCCESS {
             return Err(io::Error::other(describe(
                 "nvmlDeviceGetPowerManagementDefaultLimit",

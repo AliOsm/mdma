@@ -119,7 +119,7 @@ fn deferred_and_failed_frees_do_not_refund_early() {
 fn native_reservations_are_not_charged_to_buffer_quota() {
     let native = crate::memory::NativeMemoryBudget::new(100);
     let buffers = BufferBudget::new(Some(100), None);
-    let reservation = native.reserve(100).unwrap();
+    let reservation = native.reserve(100, crate::memory::MemoryCategory::Weights).unwrap();
     let buf = Buffer::new(&buffers, 100).unwrap();
     assert_eq!(native.used(), 100);
     assert_eq!(buffers.used(Device), 100);

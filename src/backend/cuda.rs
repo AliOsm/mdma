@@ -86,6 +86,9 @@ type CuFunction = *mut c_void;
 type CuDevicePtr = u64;
 type CuStream = *mut c_void;
 
+/// The kernels, JIT-compiled for the device at startup.
+const PTX: &str = include_str!(env!("MDMA_CUDA_PTX"));
+
 /// cuStreamCreate flag: no implicit sync with the legacy default stream.
 const CU_STREAM_NON_BLOCKING: c_uint = 1;
 
@@ -97,6 +100,9 @@ const CU_STREAM_NON_BLOCKING: c_uint = 1;
 // (_ptsz) variants, so a null stream means the legacy stream.
 unsafe extern "C" {
     fn cuMemGetInfo_v2(free: *mut usize, total: *mut usize) -> CuResult;
+    fn cuDriverGetVersion(version: *mut c_int) -> CuResult;
+    /// `uuid` is a CUuuid, 16 bytes.
+    fn cuDeviceGetUuid_v2(uuid: *mut u8, dev: CuDevice) -> CuResult;
     fn cuInit(flags: c_uint) -> CuResult;
     fn cuDeviceGetCount(count: *mut c_int) -> CuResult;
     fn cuDeviceGet(device: *mut CuDevice, ordinal: c_int) -> CuResult;
@@ -142,6 +148,16 @@ unsafe extern "C" {
     fn cuGetErrorName(err: CuResult, s: *mut *const c_char) -> CuResult;
 }
 
+/// A size as a kernel's `int` argument.
+fn int(n: impl TryInto<c_int>) -> Result<c_int> {
+    n.try_into().map_err(|_| Error::SizeOverflow)
+}
+
+/// An element offset as a kernel's `long long` argument.
+fn long(n: usize) -> Result<i64> {
+    i64::try_from(n).map_err(|_| Error::SizeOverflow)
+}
+
 fn cu(what: &str, r: CuResult) -> Result<()> {
     if r == CUDA_SUCCESS {
         return Ok(());
@@ -151,7 +167,7 @@ fn cu(what: &str, r: CuResult) -> Result<()> {
     // through `&mut name`, a live local initialised to null. Any failure
     // (unknown code, or cuInit itself having failed) leaves or stores NULL,
     // and both the status and the null are checked before `name` is read.
-    let name = if unsafe { cuGetErrorName(r, &mut name) } == CUDA_SUCCESS && !name.is_null() {
+    let name = if unsafe { cuGetErrorName(r, &raw mut name) } == CUDA_SUCCESS && !name.is_null() {
         // SAFETY: on success `name` is non-null (checked above) and points to
         // a static NUL-terminated string owned by libcuda for the life of the
         // process; into_owned copies it before returning.
@@ -238,6 +254,7 @@ impl Drop for Kernels {
     }
 }
 
+#[expect(clippy::struct_excessive_bools, reason = "independent device capabilities and modes")]
 pub struct CudaBackend {
     device: CuDevice,
     ctx: CuContext,
@@ -269,6 +286,10 @@ pub struct CudaBackend {
     stream: CuStream,
     /// Set on a graph twin: token and position come from device memory.
     replay: Option<graph::Replay>,
+    /// Withdraws the federation profile once device work cannot be joined.
+    health: crate::federation::profile::gpu::Health,
+    /// Decode may capture a graph (MDMA_CUDA_GRAPHS unset or not 0).
+    graphs: bool,
     buffers: crate::memory::BufferBudget,
     /// Declared last so the buffers above are freed before the context
     /// can be released.
@@ -296,9 +317,14 @@ impl Drop for CudaBackend {
         unsafe {
             cuCtxSetCurrent(self.ctx);
             if !self.stream.is_null() {
-                cuStreamSynchronize(self.stream);
+                if cuStreamSynchronize(self.stream) != CUDA_SUCCESS {
+                    self.health.withdraw();
+                }
                 cuStreamDestroy_v2(self.stream);
             }
+        }
+        if self.replay.is_none() {
+            self.health.withdraw();
         }
     }
 }
@@ -371,10 +397,20 @@ fn rope_setup(
     spec: &RopeSpec,
 ) -> Result<(Freqs, i32, i32)> {
     let shape::Rope { n_q_heads, n_kv_heads } = shape::rope(spec, q.len / 4, k.len / 4, n_tokens)?;
-    Ok((rope_freqs("rope", spec)?, n_q_heads as i32, n_kv_heads as i32))
+    Ok((rope_freqs("rope", spec)?, int(n_q_heads)?, int(n_kv_heads)?))
 }
 
 impl CudaBackend {
+
+    /// Free and total device bytes.
+    fn memory_info(&self) -> Result<(usize, usize)> {
+        self.bind()?;
+        let (mut free, mut total) = (0, 0);
+        // SAFETY: `bind` made the context current, as cuMemGetInfo requires;
+        // `free` and `total` are live usize locals matching `size_t *`.
+        cu("cuMemGetInfo", unsafe { cuMemGetInfo_v2(&raw mut free, &raw mut total) })?;
+        Ok((free, total))
+    }
     /// Opens device `MDMA_CUDA_DEVICE` (default 0) on its primary context
     /// and JITs the embedded PTX for it.
     pub fn new() -> Result<Self> {
@@ -393,24 +429,24 @@ impl CudaBackend {
         unsafe {
             cu("cuInit", cuInit(0))?;
             let mut count = 0;
-            cu("cuDeviceGetCount", cuDeviceGetCount(&mut count))?;
+            cu("cuDeviceGetCount", cuDeviceGetCount(&raw mut count))?;
             if ordinal < 0 || ordinal >= count {
                 return Err(Error::Backend(format!(
                     "CUDA device {ordinal} requested, {count} present"
                 )));
             }
             let mut device = 0;
-            cu("cuDeviceGet", cuDeviceGet(&mut device, ordinal))?;
+            cu("cuDeviceGet", cuDeviceGet(&raw mut device, ordinal))?;
             let mut raw = [0 as c_char; 256];
             cu(
                 "cuDeviceGetName",
-                cuDeviceGetName(raw.as_mut_ptr(), raw.len() as c_int, device),
+                cuDeviceGetName(raw.as_mut_ptr(), int(raw.len())?, device),
             )?;
             let (mut major, mut minor) = (0, 0);
             cu(
                 "cuDeviceGetAttribute",
                 cuDeviceGetAttribute(
-                    &mut major,
+                    &raw mut major,
                     CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
                     device,
                 ),
@@ -418,7 +454,7 @@ impl CudaBackend {
             cu(
                 "cuDeviceGetAttribute",
                 cuDeviceGetAttribute(
-                    &mut minor,
+                    &raw mut minor,
                     CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
                     device,
                 ),
@@ -426,10 +462,10 @@ impl CudaBackend {
             let mut sms = 0;
             cu(
                 "cuDeviceGetAttribute",
-                cuDeviceGetAttribute(&mut sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device),
+                cuDeviceGetAttribute(&raw mut sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device),
             )?;
             let mut integrated = 0;
-            cu("cuDeviceGetAttribute", cuDeviceGetAttribute(&mut integrated, CU_DEVICE_ATTRIBUTE_INTEGRATED, device))?;
+            cu("cuDeviceGetAttribute", cuDeviceGetAttribute(&raw mut integrated, CU_DEVICE_ATTRIBUTE_INTEGRATED, device))?;
             // SAFETY: cuDeviceGetName succeeded with `raw`'s real length
             // (256), and the driver returns the name NUL-terminated within
             // `len` bytes, so CStr::from_ptr stays inside `raw`, which
@@ -442,7 +478,7 @@ impl CudaBackend {
             let mut ctx = std::ptr::null_mut();
             cu(
                 "cuDevicePrimaryCtxRetain",
-                cuDevicePrimaryCtxRetain(&mut ctx, device),
+                cuDevicePrimaryCtxRetain(&raw mut ctx, device),
             )?;
             let release = |e: Error| {
                 cuDevicePrimaryCtxRelease_v2(device);
@@ -451,8 +487,7 @@ impl CudaBackend {
             cu("cuCtxSetCurrent", cuCtxSetCurrent(ctx)).map_err(release)?;
 
             // PTX must be NUL-terminated for the JIT.
-            let ptx =
-                CString::new(include_str!(env!("MDMA_CUDA_PTX"))).expect("PTX has no interior NUL");
+            let ptx = CString::new(PTX).expect("PTX has no interior NUL");
             let mut log = vec![0u8; 8192];
             let mut opts = [CU_JIT_ERROR_LOG_BUFFER, CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES];
             let mut vals = [log.as_mut_ptr().cast::<c_void>(), log.len() as *mut c_void];
@@ -464,7 +499,7 @@ impl CudaBackend {
             // the log there and may write the used size into vals[1] (ours).
             // Kernel lookups below pass CStrings alive across each call.
             let r = cuModuleLoadDataEx(
-                &mut module,
+                &raw mut module,
                 ptx.as_ptr().cast(),
                 2,
                 opts.as_mut_ptr(),
@@ -482,7 +517,7 @@ impl CudaBackend {
             for &k in KERNELS {
                 let c_name = CString::new(k).expect("kernel name");
                 let mut f = std::ptr::null_mut();
-                let r = cuModuleGetFunction(&mut f, module, c_name.as_ptr());
+                let r = cuModuleGetFunction(&raw mut f, module, c_name.as_ptr());
                 if r != CUDA_SUCCESS {
                     cuModuleUnload(module);
                     return Err(release(
@@ -515,11 +550,13 @@ impl CudaBackend {
                 dp4a_capable,
                 q8_scratch: Mutex::new(None),
                 writes: AtomicU64::new(0),
-                sms: sms.max(1) as usize,
+                sms: sms.max(1).unsigned_abs() as usize,
                 attn_scratch: Mutex::new(None),
                 attn_chunk: None,
                 stream: std::ptr::null_mut(),
                 replay: None,
+                health: crate::federation::profile::gpu::Health::default(),
+                graphs: std::env::var("MDMA_CUDA_GRAPHS").as_deref() != Ok("0"),
                 buffers: crate::memory::BufferBudget::default(),
                 kernels: Arc::new(Kernels {
                     device,
@@ -541,7 +578,7 @@ impl CudaBackend {
         // local out-pointer. The new stream moves into `twin`, whose Drop
         // destroys it, including when the alloc below fails.
         cu("cuStreamCreate", unsafe {
-            cuStreamCreate(&mut stream, CU_STREAM_NON_BLOCKING)
+            cuStreamCreate(&raw mut stream, CU_STREAM_NON_BLOCKING)
         })?;
         let mut twin = Self {
             device: self.device,
@@ -558,6 +595,8 @@ impl CudaBackend {
             attn_chunk: self.attn_chunk,
             stream,
             replay: None,
+            health: self.health.clone(),
+            graphs: self.graphs,
             buffers: self.buffers.clone(),
             kernels: Arc::clone(&self.kernels),
         };
@@ -573,9 +612,43 @@ impl CudaBackend {
         self.bind()?;
         // SAFETY: `bind` made the context current; `self.stream` is either
         // null (the legacy stream) or this twin's own stream, live until Drop.
-        cu("cuStreamSynchronize", unsafe {
+        self.health.check(cu("cuStreamSynchronize", unsafe {
             cuStreamSynchronize(self.stream)
-        })
+        }))
+    }
+
+    pub(crate) fn federation_profile(&self) -> std::io::Result<crate::federation::profile::gpu::Gpu> {
+        use crate::federation::profile::gpu::{Gpu, fields};
+        use sha2::{Digest, Sha256};
+        let (mut driver, mut uuid) = (0, [0u8; 16]);
+        // SAFETY: both write through pointers to live locals of the
+        // prototypes' types (an int, a 16-byte CUuuid); `self.device` came
+        // from cuDeviceGet after cuInit, and neither call needs a context.
+        cu("cuDriverGetVersion", unsafe { cuDriverGetVersion(&raw mut driver) }).map_err(std::io::Error::other)?;
+        cu("cuDeviceGetUuid", unsafe { cuDeviceGetUuid_v2(uuid.as_mut_ptr(), self.device) }).map_err(std::io::Error::other)?;
+        if driver <= 0 || uuid == [0; 16] {
+            return Err(std::io::Error::other("unverifiable CUDA driver or device"));
+        }
+        let pci = self.pci_bus_id().map_err(std::io::Error::other)?;
+        Ok(Gpu::immutable("cuda", "f32", "f16", fields([
+            ("vocabulary", "mdma.cuda.v1".into()),
+            ("workload", "decoder".into()),
+            ("device_name", self.name.clone()),
+            ("device_identity", format!("pci-{pci}/uuid-{}", hex::encode(uuid))),
+            ("driver_version", driver.to_string()),
+            ("kernel_target", env!("MDMA_CUDA_ARCH_BUILT").into()),
+            ("kernel_id", format!("sha256:{}", hex::encode(Sha256::digest(PTX)))),
+            ("weights", "gguf-raw-matrices-f32-norms".into()),
+            ("int8_prefill", if self.int8_mma { "mma-q8_1" } else { "off" }.into()),
+            ("int8_decode", if self.dp4a { "dp4a-q8_1" } else { "off" }.into()),
+            ("execution", if self.graphs { "eligible-request-graph-with-eager-fallback" } else { "eager" }.into()),
+            ("attention", match self.attn_chunk {
+                Some(keys) => format!("f16kv-chunks-of-{keys}"),
+                None => format!("f16kv-split-over-{}-sms", self.sms),
+            }),
+            ("target_arch", std::env::consts::ARCH.into()),
+            ("target_os", std::env::consts::OS.into()),
+        ]), self.health.clone()))
     }
 
     /// Device name and compute capability, e.g. for the serve banner.
@@ -590,7 +663,7 @@ impl CudaBackend {
         // and this device query needs no current context. `raw` is 32 bytes
         // and that length is passed; the `dddd:bb:dd.f` id needs 13 with NUL.
         cu("cuDeviceGetPCIBusId", unsafe {
-            cuDeviceGetPCIBusId(raw.as_mut_ptr(), raw.len() as c_int, self.device)
+            cuDeviceGetPCIBusId(raw.as_mut_ptr(), int(raw.len())?, self.device)
         })?;
         // SAFETY: the call above succeeded, so `raw` holds a NUL-terminated
         // id within its 32 bytes; into_owned copies it before `raw` drops.
@@ -611,6 +684,7 @@ impl CudaBackend {
 
     /// Adds the dp4a decode matvec where the device has it, as with
     /// MDMA_CUDA_INT8=all.
+    #[must_use]
     pub fn with_int8_decode(mut self) -> Self {
         self.dp4a = self.dp4a_capable;
         self
@@ -618,6 +692,7 @@ impl CudaBackend {
 
     /// Attention in chunks of `keys` keys (at least 1), merged by
     /// attn_merge whenever that makes more than one chunk.
+    #[must_use]
     pub fn with_attn_chunk(mut self, keys: usize) -> Self {
         self.attn_chunk = Some(keys.max(1));
         self
@@ -672,6 +747,7 @@ impl CudaBackend {
 
     /// K-quant matmuls on f32 activations only (gemv_q), as with
     /// MDMA_CUDA_INT8=off.
+    #[must_use]
     pub fn without_int8(mut self) -> Self {
         self.int8_mma = false;
         self.dp4a = false;
@@ -705,6 +781,7 @@ impl CudaBackend {
     /// and runs gemm_q4k / gemm_q6k (prefill) or gemv_q8 (decode) into y, under one
     /// scratch lock.
     #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes y on the device")]
     fn qmatmul_q8(
         &self,
         w: &QWeight<CudaBuf>,
@@ -743,7 +820,7 @@ impl CudaBackend {
         let key = (x.ptr, x.len, self.writes.load(Ordering::Acquire));
         if s.holds != Some(key) {
             let mut x_ptr = x.ptr;
-            let mut n_blocks_i = n_blocks as i32;
+            let mut n_blocks_i = int(n_blocks)?;
             self.launch_quiet(
                 "quantize_q8_1",
                 [(n_blocks as u32 * 8).div_ceil(Q8_THREADS), 1, 1],
@@ -757,10 +834,10 @@ impl CudaBackend {
             s.holds = None;
         }
         let (mut w_ptr, mut y_ptr) = (w.buf.ptr, y.ptr);
-        let (mut n_out_i, mut n_in_i) = (n_out as i32, n_in as i32);
+        let (mut n_out_i, mut n_in_i) = (int(n_out)?, int(n_in)?);
         let mut code = dtype_code::code(w.dtype)?;
         if gemm {
-            let mut n_tok_i = n_tokens as i32;
+            let mut n_tok_i = int(n_tokens)?;
             let grid = [
                 (n_out as u32).div_ceil(GEMM_M),
                 (n_tokens as u32).div_ceil(GEMM_N),
@@ -820,12 +897,13 @@ impl CudaBackend {
     }
 
     // Arguments stay live through launch, including its write-epoch update.
+    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes y on the device")]
     fn launch_binary_f32(&self, op: &str, kernel: &str, a: &CudaBuf, b: &CudaBuf, y: &mut CudaBuf) -> Result<()> {
         let n = shape::elementwise(op, &[a.len, b.len], &[y.len])? / 4;
         let mut a_ptr = a.ptr;
         let mut b_ptr = b.ptr;
         let mut y_ptr = y.ptr;
-        let mut n_i = n as i32;
+        let mut n_i = int(n)?;
         self.launch(
             kernel,
             [(n as u32).div_ceil(256), 1, 1],
@@ -878,16 +956,22 @@ impl CudaBackend {
 impl Backend for CudaBackend {
     type Buf = CudaBuf;
 
+    /// Joins this backend's own stream. Graph twins join theirs when
+    /// dropped; synchronizing the whole context would invalidate another
+    /// thread's graph capture (CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED).
+    fn join_execution(&self) -> Result<()> {
+        self.sync()
+    }
+
     fn device_label(&self) -> Option<String> { Some(self.device_name().into()) }
     fn unified_memory(&self) -> bool { self.unified_memory }
 
     fn available_device_bytes(&self) -> Result<Option<usize>> {
-        self.bind()?;
-        let (mut free, mut total) = (0, 0);
-        // SAFETY: `bind` made the context current, as cuMemGetInfo requires;
-        // `free` and `total` are live usize locals matching `size_t *`.
-        cu("cuMemGetInfo", unsafe { cuMemGetInfo_v2(&mut free, &mut total) })?;
-        Ok(Some(free))
+        self.memory_info().map(|(free, _)| Some(free))
+    }
+
+    fn total_device_bytes(&self) -> Option<usize> {
+        self.memory_info().ok().map(|(_, total)| total)
     }
 
     super::delegate_decoder!(graph::decoder);
@@ -949,7 +1033,7 @@ impl Backend for CudaBackend {
             // SAFETY: `bind` above made `self.ctx` current on this thread and
             // `allocate` runs this closure synchronously; `ptr` is a live u64
             // out-pointer and the size is non-zero, which cuMemAlloc requires.
-            cu("cuMemAlloc", unsafe { cuMemAlloc_v2(&mut ptr, bytes.max(4)) })?;
+            cu("cuMemAlloc", unsafe { cuMemAlloc_v2(&raw mut ptr, bytes.max(4)) })?;
             Ok(ptr)
         })?;
         let buf = CudaBuf {
@@ -1052,13 +1136,13 @@ impl Backend for CudaBackend {
         };
         for (i, (w, y)) in [(wq, &*q), (wk, &*k), (wv, &*v)].into_iter().enumerate() {
             let n_out = shape::matmul(&w.shape, x.len / 4, y.len / 4)?.n_out;
-            m.n_out[i] = n_out as i32;
+            m.n_out[i] = int(n_out)?;
             m.dtype[i] = dtype_code::code(w.dtype)?;
             m.block_bytes[i] = dtype_code::block_bytes(w.dtype);
-            m.blocks[i] = (n_out as u32).div_ceil(WARPS * Q_ROWS) as i32;
+            m.blocks[i] = int(n_out.div_ceil((WARPS * Q_ROWS) as usize))?;
         }
-        let total = m.blocks.iter().sum::<i32>() as u32;
-        let (mut x_ptr, mut n_in_i) = (x.ptr, n_in as i32);
+        let total = u32::try_from(m.blocks.iter().sum::<i32>()).map_err(|_| Error::SizeOverflow)?;
+        let (mut x_ptr, mut n_in_i) = (x.ptr, int(n_in)?);
         self.launch(
             "gemv_q3",
             [total, n_tokens as u32, 1],
@@ -1089,7 +1173,7 @@ impl Backend for CudaBackend {
         };
         let n_out = shape::matmul(&gate.shape, x.len / 4, y.len / 4)?.n_out;
         let (mut wg, mut wu, mut x_ptr, mut y_ptr) = (gate.buf.ptr, up.buf.ptr, x.ptr, y.ptr);
-        let (mut n_out_i, mut n_in_i) = (n_out as i32, n_in as i32);
+        let (mut n_out_i, mut n_in_i) = (int(n_out)?, int(n_in)?);
         let (mut dt_g, mut bb_g) = (dtype_code::code(gate.dtype)?, dtype_code::block_bytes(gate.dtype));
         let (mut dt_u, mut bb_u) = (dtype_code::code(up.dtype)?, dtype_code::block_bytes(up.dtype));
         self.launch(
@@ -1109,18 +1193,11 @@ impl Backend for CudaBackend {
         let mut w_ptr = w.buf.ptr;
         let mut x_ptr = x.ptr;
         let mut y_ptr = y.ptr;
-        let mut n_out_i = n_out as i32;
-        let mut n_in_i = n_in as i32;
+        let mut n_out_i = int(n_out)?;
+        let mut n_in_i = int(n_in)?;
         let grid = [(n_out as u32).div_ceil(WARPS), n_tokens as u32, 1];
         let block = [32, WARPS, 1];
-        if !dtype_code::is_kquant(code) {
-            self.launch(
-                "gemv_f",
-                grid,
-                block,
-                &mut params!(w_ptr, x_ptr, y_ptr, n_out_i, n_in_i, code),
-            )
-        } else {
+        if dtype_code::is_kquant(code) {
             shape::kquant_aligned("qmatmul", w.dtype, n_in)?;
             if self.int8_mma && n_tokens >= GEMM_MIN_TOKENS {
                 return self.qmatmul_q8(w, x, y, n_out, n_in, n_tokens, true);
@@ -1136,6 +1213,13 @@ impl Backend for CudaBackend {
                 block,
                 &mut params!(w_ptr, x_ptr, y_ptr, n_out_i, n_in_i, code, bb),
             )
+        } else {
+            self.launch(
+                "gemv_f",
+                grid,
+                block,
+                &mut params!(w_ptr, x_ptr, y_ptr, n_out_i, n_in_i, code),
+            )
         }
     }
 
@@ -1150,7 +1234,7 @@ impl Backend for CudaBackend {
         let mut code = dtype_code::decoder_code(table.dtype)?;
         let mut table_ptr = table.buf.ptr;
         let mut out_ptr = out.ptr;
-        let mut n_embd_i = n_embd as i32;
+        let mut n_embd_i = int(n_embd)?;
         let mut bb = dtype_code::block_bytes(table.dtype);
         let grid = [(n_embd as u32).div_ceil(256), token_ids.len() as u32, 1];
         if let Some(replay) = &self.replay {
@@ -1188,7 +1272,7 @@ impl Backend for CudaBackend {
         let mut w_ptr = w.ptr;
         let mut x_ptr = x.ptr;
         let mut y_ptr = y.ptr;
-        let mut dim_i = dim as i32;
+        let mut dim_i = int(dim)?;
         let mut eps = eps;
         self.launch(
             "rmsnorm_f32",
@@ -1211,9 +1295,9 @@ impl Backend for CudaBackend {
         let pairs = spec.head_dim / 2;
         let mut q_ptr = q.ptr;
         let mut k_ptr = k.ptr;
-        let mut pos_i = pos as i32;
-        let mut head_dim = spec.head_dim as i32;
-        let grid = [1, (n_q + n_kv) as u32, n_tokens as u32];
+        let mut pos_i = int(pos)?;
+        let mut head_dim = int(spec.head_dim)?;
+        let grid = [1, (n_q + n_kv).cast_unsigned(), n_tokens as u32];
         self.launch(
             "rope_f32",
             grid,
@@ -1240,7 +1324,7 @@ impl Backend for CudaBackend {
         let n_tokens = shape::rows("add_rmsnorm", dim, a.len / 4, y.len / 4)? as u32;
         let (mut w_ptr, mut a_ptr, mut b_ptr) = (w.ptr, a.ptr, b.ptr);
         let (mut sum_ptr, mut y_ptr) = (sum.ptr, y.ptr);
-        let mut dim_i = dim as i32;
+        let mut dim_i = int(dim)?;
         let mut eps = eps;
         self.launch(
             "add_rmsnorm_f32",
@@ -1280,8 +1364,8 @@ impl Backend for CudaBackend {
         }
         let (mut k_ptr, mut v_ptr) = (k.ptr, v.ptr);
         let (mut dk, mut dv) = (dst_k.ptr, dst_v.ptr);
-        let mut n = n_elems as i32;
-        let mut offset = elem_offset as i64;
+        let mut n = int(n_elems)?;
+        let mut offset = long(elem_offset)?;
         self.launch(
             "kv_write_f16",
             [(n_elems as u32).div_ceil(256), 1, 1],
@@ -1304,19 +1388,18 @@ impl Backend for CudaBackend {
         n_elems: usize,
     ) -> Result<()> {
         let (mut freqs, mut n_q, mut n_kv) = rope_setup(q, k, n_tokens, spec)?;
-        let mut pp = 0u64;
         // Replay writes wherever the params' pos points: one token's row
         // anywhere below the capacity, at the offset kv_cache derives from pos.
-        let mut dst_bytes = (elem_offset + n_elems) * 2;
-        if let Some(replay) = &self.replay {
+        let (mut pp, dst_bytes) = if let Some(replay) = &self.replay {
             if n_tokens != 1 || elem_offset != pos as usize * n_elems {
                 return Err(Error::ShapeMismatch(format!(
                     "rope_kv_write: graph replay takes 1 token at pos * row, got {n_tokens} at {elem_offset}"
                 )));
             }
-            pp = replay.params.ptr;
-            dst_bytes = replay.capacity * n_elems * 2;
-        }
+            (replay.params.ptr, replay.capacity * n_elems * 2)
+        } else {
+            (0u64, (elem_offset + n_elems) * 2)
+        };
         if n_elems != k.len / 4 || v.len != k.len || dst_bytes > dst_k.len || dst_bytes > dst_v.len
         {
             return Err(Error::ShapeMismatch(format!(
@@ -1326,12 +1409,12 @@ impl Backend for CudaBackend {
         }
         let (mut q_ptr, mut k_ptr, mut v_ptr) = (q.ptr, k.ptr, v.ptr);
         let (mut dk, mut dv) = (dst_k.ptr, dst_v.ptr);
-        let mut pos_i = pos as i32;
-        let mut head_dim = spec.head_dim as i32;
-        let mut offset = elem_offset as i64;
+        let mut pos_i = int(pos)?;
+        let mut head_dim = int(spec.head_dim)?;
+        let mut offset = long(elem_offset)?;
         self.launch(
             "rope_kv_f16",
-            [1, (n_q + n_kv) as u32, n_tokens as u32],
+            [1, (n_q + n_kv).cast_unsigned(), n_tokens as u32],
             [(spec.head_dim / 2) as u32, 1, 1],
             &mut params!(
                 q_ptr, k_ptr, v_ptr, dk, dv, pos_i, head_dim, n_q, n_kv, offset, freqs, pp
@@ -1375,27 +1458,26 @@ impl Backend for CudaBackend {
                 kv.k.len, kv.v.len
             )));
         }
-        let mut prefix = prefix as i32;
+        let mut prefix = int(prefix)?;
         let mut q_ptr = q.ptr;
         let mut k_ptr = kv.k.ptr;
         let mut v_ptr = kv.v.ptr;
         let mut o_ptr = o.ptr;
-        let mut head_dim = spec.head_dim as i32;
-        let mut n_q_heads = spec.n_q_heads as i32;
-        let mut n_kv_heads = spec.n_kv_heads as i32;
+        let mut head_dim = int(spec.head_dim)?;
+        let mut n_q_heads = int(spec.n_q_heads)?;
+        let mut n_kv_heads = int(spec.n_kv_heads)?;
         // Query heads per block: the largest G the kernel is built for that
         // divides the GQA group, so a block reads its kv head's rows once.
         let group = spec.n_q_heads / spec.n_kv_heads;
-        let mut group_i = group as i32;
+        let mut group_i = int(group)?;
         let (g, chunk, splits) = self.attn_layout(spec, n_q, keys);
-        let mut chunk_i = chunk as i32;
+        let mut chunk_i = int(chunk)?;
         // Held across both enqueues, like the Q8_1 scratch.
         let mut scratch = self
             .attn_scratch
             .lock()
             .map_err(|_| Error::Backend("cuda: attention scratch lock poisoned".into()))?;
-        let mut part_ptr = 0u64;
-        if splits > 1 {
+        let mut part_ptr = if splits > 1 {
             let bytes = Self::attn_partials_bytes(spec, n_q, splits);
             if scratch.as_ref().is_none_or(|b| b.len < bytes) {
                 // Queued merges may still read the old partials.
@@ -1405,8 +1487,10 @@ impl Backend for CudaBackend {
                 *scratch = None;
                 *scratch = Some(self.alloc(bytes, Pool::Scratch)?);
             }
-            part_ptr = scratch.as_ref().expect("allocated above").ptr;
-        }
+            scratch.as_ref().expect("allocated above").ptr
+        } else {
+            0u64
+        };
         self.launch(
             ["attn_f16kv_g1", "attn_f16kv_g2", "attn_f16kv_g4", "attn_f16kv_g8"]
                 [g.trailing_zeros() as usize],
@@ -1418,7 +1502,7 @@ impl Backend for CudaBackend {
             ),
         )?;
         if splits > 1 {
-            let mut splits_i = splits as i32;
+            let mut splits_i = int(splits)?;
             self.launch(
                 "attn_merge",
                 [spec.n_q_heads as u32, n_q as u32, 1],

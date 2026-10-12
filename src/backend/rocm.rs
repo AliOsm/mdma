@@ -313,13 +313,11 @@ impl Backend for HipBackend {
     fn unified_memory(&self) -> bool { self.unified_memory }
 
     fn available_device_bytes(&self) -> Result<Option<usize>> {
-        let mut free = 0;
-        let mut total = 0;
-        // SAFETY: `free`/`total` are live usize (size_t) out-params. The query targets the
-        // calling thread's current device, which is device 0 here (set in create(), and
-        // HIP's per-thread default), and touches no stream or backend state.
-        let status = unsafe { ffi::hipMemGetInfo(&mut free, &mut total) };
-        rocm_rs::hip::error::Error::from_hip_error_with_value(status, Some(free)).map_err(hip_err)
+        memory_info().map(|(free, _)| Some(free))
+    }
+
+    fn total_device_bytes(&self) -> Option<usize> {
+        memory_info().ok().map(|(_, total)| total)
     }
 
     fn weight_cache_profile(&self) -> Option<&str> {
@@ -1185,3 +1183,14 @@ mod attention;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// Free and total bytes of the current device.
+fn memory_info() -> Result<(usize, usize)> {
+    let mut free = 0;
+    let mut total = 0;
+    // SAFETY: `free`/`total` are live usize (size_t) out-params. The query targets the
+    // calling thread's current device, which is device 0 here (set in create(), and
+    // HIP's per-thread default), and touches no stream or backend state.
+    let status = unsafe { ffi::hipMemGetInfo(&mut free, &mut total) };
+    rocm_rs::hip::error::Error::from_hip_error_with_value(status, (free, total)).map_err(hip_err)
+}

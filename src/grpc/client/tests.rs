@@ -1,4 +1,5 @@
 use super::*;
+use std::assert_matches;
 use base64::Engine;
 
 fn pem(label: &str, bytes: &[u8]) -> String {
@@ -35,12 +36,12 @@ fn native_pem_reader_accepts_all_supported_key_containers_and_uses_the_first() {
         .unwrap();
         let key = load_private_key(&path).unwrap();
         assert_eq!(key.secret_der(), &[1, 2, 3]);
-        assert!(matches!(
+        assert_matches!(
             (&key, label),
             (PrivateKeyDer::Pkcs8(_), "PRIVATE KEY")
                 | (PrivateKeyDer::Pkcs1(_), "RSA PRIVATE KEY")
                 | (PrivateKeyDer::Sec1(_), "EC PRIVATE KEY")
-        ));
+        );
     }
 }
 
@@ -72,4 +73,18 @@ fn missing_empty_and_malformed_pem_credentials_are_errors() {
         assert!(load_certs(&path).is_err());
         assert!(load_private_key(&path).is_err());
     }
+}
+
+#[test]
+fn spki_pin_reads_the_leaf_of_a_pem_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap().self_signed(&key).unwrap();
+    let path = dir.path().join("cert.pem");
+    std::fs::write(&path, cert.pem()).unwrap();
+    let pin = spki_pin(&path).unwrap();
+    assert_eq!(pin, crate::federation::tls::certificate_spki_sha256(cert.der()).unwrap());
+    assert!(pin.starts_with("sha256:") && pin.len() == 71, "{pin}");
+    std::fs::write(&path, "not a certificate").unwrap();
+    assert!(spki_pin(&path).unwrap_err().to_string().contains("no certificates found"));
 }

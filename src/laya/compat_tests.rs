@@ -59,28 +59,21 @@ pub(crate) fn checkpoint() -> tempfile::TempDir {
 }
 
 #[cfg(any(feature = "vulkan", all(feature = "metal", target_os = "macos")))]
-fn native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend<B>(backend: &B)
+fn native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend<B>(backend: B)
 where
     B: crate::backend::Backend + Send + Sync + 'static,
     B::Buf: Send + Sync,
 {
-    use crate::registry::{ModelsFile, ModelSpec, Registry};
     let dir = checkpoint();
-    let file = ModelsFile { default: None, models: vec![ModelSpec {
-        name: "laya".into(), gguf: None, laya: Some(dir.path().to_str().unwrap().into()),
-        upstream: None, n_ctx: None,
-    }] };
-    let mut registry = Registry::load_available_frozen_with_budget(
-        backend, &file, 32, None, |_| panic!("not a decoder"),
-    ).unwrap();
-    assert_eq!(registry.capture_execution_profiles(backend).unwrap(), 1);
+    let mut registry = laya_registry(std::sync::Arc::new(backend), dir.path(), true);
+    assert_eq!(registry.capture_execution_profiles().unwrap(), 1);
     let profile = registry.execution_profile("").unwrap();
     assert!(profile.is_current());
     let manifest = profile.manifest().as_object().unwrap();
     assert_eq!(manifest["backend"].as_str(), Some("cpu"));
     assert_eq!(manifest["kv_dtype"].as_str(), Some("none"));
     let inventory = crate::federation::inventory::Native {
-        registry: std::sync::Arc::new(registry), shutdown: None, power: None,
+        registry: std::sync::Arc::new(registry), shutdown: None, power: None, host: std::sync::Arc::default(),
     };
     let snapshot = crate::federation::inventory::Inventory::snapshot(&inventory, &["laya".into()]);
     assert_eq!(snapshot.models.len(), 1);
@@ -91,38 +84,31 @@ where
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn laya_cpu_profile_does_not_claim_the_daemons_metal_backend() {
-    native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend(
-        &crate::backend::metal::MetalBackend::new().unwrap(),
-    );
+    native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend(crate::backend::metal::MetalBackend::new().unwrap());
 }
 
 #[cfg(feature = "vulkan")]
 #[test]
 fn laya_cpu_profile_does_not_claim_the_daemons_vulkan_backend() {
-    native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend(
-        &crate::backend::vulkan::VulkanBackend::new().unwrap(),
-    );
+    native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend(crate::backend::vulkan::VulkanBackend::new().unwrap());
 }
 
 #[test]
 fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_or_reopened_paths() {
-    use crate::registry::{Entry, Registry, ModelsFile, ModelSpec};
+    use crate::registry::Registry;
     let dir = checkpoint();
-    let file = ModelsFile { default: None, models: vec![ModelSpec {
-        name: "laya".into(), gguf: None, laya: Some(dir.path().to_str().unwrap().into()),
-        upstream: None, n_ctx: None,
-    }] };
-    let normal = Registry::load(&CpuBackend, &file, 32, |_| panic!("not a decoder")).unwrap();
+    let backend = std::sync::Arc::new(CpuBackend);
+    let normal = laya_registry(backend.clone(), dir.path(), false);
     assert!(normal.artifact_id("").is_none());
-    let mut frozen = Registry::load_available_frozen_with_budget(&CpuBackend, &file, 32, None, |_| panic!("not a decoder")).unwrap();
-    assert_eq!(frozen.capture_execution_profiles(&CpuBackend).unwrap(), 1);
+    let mut frozen = laya_registry(backend.clone(), dir.path(), true);
+    assert_eq!(frozen.capture_execution_profiles().unwrap(), 1);
     let original_profile = frozen.execution_profile("").unwrap().as_str().to_owned();
     assert_eq!(frozen.execution_profile("").unwrap().manifest().as_object().unwrap()["kv_dtype"].as_str(), Some("none"));
-    let original_id = frozen.artifact_id("").unwrap().clone();
+    let original_id = frozen.artifact_id("").unwrap();
     {
-        let mut registry = Registry::load_available_frozen_with_budget(&CpuBackend, &file, 32, None, |_| {}).unwrap();
-        registry.capture_execution_profiles(&CpuBackend).unwrap();
-        let service = crate::grpc::MdmaService::new(std::sync::Arc::new(CpuBackend), registry, "cpu");
+        let mut registry = laya_registry(backend.clone(), dir.path(), true);
+        registry.capture_execution_profiles().unwrap();
+        let service = crate::grpc::MdmaService::new(registry, "cpu");
         let catalog = service.federation_inventory().snapshot(&["laya".into()]);
         assert_eq!(catalog.models.len(), 1);
         assert_eq!(catalog.models[0].artifact_id, original_id.as_str());
@@ -133,10 +119,7 @@ fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_o
         });
     }
     assert_eq!(&original_id, &super::sources::Sources::capture(dir.path()).unwrap().id());
-    let predictor = |registry: &Registry<CpuBackend>| match &registry.get("").unwrap().entry {
-        Entry::Laya(p) => p.clone(),
-        _ => panic!("not Laya"),
-    };
+    let predictor = |registry: &Registry<CpuBackend>| registry.acquire_blocking("").unwrap().laya().expect("Laya").clone();
     let original = predictor(&frozen);
     assert_eq!(original.temperature_for(Kind::Choice, 2), 0.75);
     let questions = json!({"q": {"type": "choice", "instructions": "hello", "criteria": ["world", "hello"]}});
@@ -148,8 +131,8 @@ fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_o
     let legacy = std::fs::read(&tokenizer_path).unwrap();
     let canonical = tokenizers::canonicalize_str(std::str::from_utf8(&legacy).unwrap()).unwrap();
     std::fs::write(&tokenizer_path, canonical).unwrap();
-    let converted = Registry::load_available_frozen_with_budget(&CpuBackend, &file, 32, None, |_| {}).unwrap();
-    assert_ne!(converted.artifact_id(""), Some(&original_id));
+    let converted = laya_registry(backend.clone(), dir.path(), true);
+    assert_ne!(converted.artifact_id(""), Some(original_id.clone()));
     assert_eq!(predictor(&converted).predict(&json!({}), questions).unwrap(), expected);
     assert_eq!(original.predict(&json!({}), questions).unwrap(), expected);
 
@@ -158,15 +141,24 @@ fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_o
     let mut config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
     config["temperature_by_options"]["choice:2"] = json!(1.5);
     std::fs::write(config_path, config.to_string()).unwrap();
-    let mut recalibrated = Registry::load_available_frozen_with_budget(&CpuBackend, &file, 32, None, |_| {}).unwrap();
-    assert_eq!(recalibrated.capture_execution_profiles(&CpuBackend).unwrap(), 1);
+    let mut recalibrated = laya_registry(backend, dir.path(), true);
+    assert_eq!(recalibrated.capture_execution_profiles().unwrap(), 1);
     assert_eq!(recalibrated.execution_profile("").unwrap().as_str(), original_profile);
-    assert_ne!(recalibrated.artifact_id(""), Some(&original_id));
+    assert_ne!(recalibrated.artifact_id(""), Some(original_id.clone()));
     assert_eq!(predictor(&recalibrated).temperature_for(Kind::Choice, 2), 1.5);
     assert_eq!(original.temperature_for(Kind::Choice, 2), 0.75);
     std::fs::remove_dir_all(dir.path()).unwrap();
     assert_eq!(original.predict(&json!({}), questions).unwrap(), expected);
-    assert_eq!(frozen.artifact_id(""), Some(&original_id));
+    assert_eq!(frozen.artifact_id(""), Some(original_id));
+}
+
+/// One Laya checkpoint named `laya`, loaded.
+fn laya_registry<B: crate::backend::Backend>(backend: std::sync::Arc<B>, dir: &std::path::Path, frozen: bool) -> crate::registry::Registry<B> {
+    use crate::registry::{Options, Registry, Source};
+    let options = Options { frozen, ..Options::new(32) };
+    let registry = Registry::new(backend, vec![("laya".into(), Source::Laya(dir.into()))], None, options).unwrap();
+    assert!(registry.preload().is_empty());
+    registry
 }
 
 fn close(got: &[f32], want: &[f32]) {
@@ -215,8 +207,8 @@ fn laya_workspace_reservation_accounts_for_minimum_two_option_padding_and_checke
     let expected = (16 * seq * d + 3 * seq * inter + 4 * 2 * d + 2 + d + 4 + 512 + actions) * 4;
     assert_eq!(predictor.prepared_workspace_bytes(&prepared).unwrap(), expected);
     assert_eq!(predictor.prepared_workspace_bytes(&[]).unwrap(), 0);
-    assert!(matches!(predictor.model.workspace_bytes(usize::MAX, 16, 2),
-        Err(super::Error::Backend(crate::backend::Error::SizeOverflow))));
+    assert_matches!(predictor.model.workspace_bytes(usize::MAX, 16, 2),
+        Err(super::Error::Backend(crate::backend::Error::SizeOverflow)));
 }
 
 #[test]

@@ -2,7 +2,7 @@
 use crate::backend::{Backend, Error, Pool, QWeight, Result};
 use crate::gguf::{GgmlDType, GgufModel};
 use crate::kv_cache::KvCache;
-use crate::memory::{NativeMemoryBudget, Reservation};
+use crate::memory::{MemoryCategory, NativeMemoryBudget, Reservation};
 use std::sync::Arc;
 
 pub mod decoder;
@@ -113,7 +113,7 @@ impl<B: Backend> Model<B> {
     /// Reserve native weight bytes before materializing/uploading tensors (after cache lookup).
     pub fn load_with_budget(backend: &B, gguf: &mut GgufModel, budget: &NativeMemoryBudget) -> Result<Self> {
         Self::prepare_source(backend, gguf)?;
-        let memory = budget.reserve(memory::weight_bytes(gguf)?)?;
+        let memory = budget.reserve(memory::weight_bytes(gguf)?, MemoryCategory::Weights)?;
         Self::load_reserved(backend, gguf, Some(memory))
     }
 
@@ -157,7 +157,7 @@ impl<B: Backend> Model<B> {
         let n_ctx = n_ctx.min(self.config.n_ctx);
         let memory = match (memory, self.memory_budget()) {
             (Some(memory), Some(budget)) if memory.covers(budget, self.kv_bytes(backend, n_ctx)?) => Some(memory),
-            (None, Some(budget)) => Some(budget.reserve(self.kv_bytes(backend, n_ctx)?)?),
+            (None, Some(budget)) => Some(budget.reserve(self.kv_bytes(backend, n_ctx)?, MemoryCategory::Kv)?),
             (None, None) => None,
             _ => return Err(Error::ShapeMismatch("invalid KV reservation".into())),
         };
@@ -177,7 +177,7 @@ impl<B: Backend> Model<B> {
         let sizes = self.common_workspace_sizes(batch)?;
         let memory = match (memory, self.memory_budget()) {
             (Some(memory), Some(budget)) if memory.covers(budget, bytes) => Some(memory.clone()),
-            (None, Some(budget)) => Some(Arc::new(budget.reserve(bytes)?)),
+            (None, Some(budget)) => Some(Arc::new(budget.reserve(bytes, MemoryCategory::Workspace)?)),
             (None, None) => None,
             _ => return Err(Error::ShapeMismatch("invalid workspace reservation".into())),
         };

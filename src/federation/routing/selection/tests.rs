@@ -98,6 +98,9 @@ impl Setup {
             backend: "cpu".into(),
             ready,
             max_input_bytes: 65536,
+            class: crate::registry::Class::Generative,
+            capabilities: vec![],
+            resident: true,
             limits: Limits::Synthesize {
                 n_ctx: 32,
                 max_output_tokens: 8,
@@ -110,6 +113,7 @@ impl Setup {
             issued_at_ms: now,
             expires_at_ms: now + lifetime,
             server_state: state,
+            host: crate::grpc::Host::default(),
             models: vec![descriptor],
         };
         let signed = catalog::sign_catalog(&body, "ed25519:catalog", &self.key).unwrap();

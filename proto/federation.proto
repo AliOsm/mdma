@@ -7,7 +7,44 @@ service Federation {
   rpc ScanCapabilities(ScanCapabilitiesRequest) returns (SignedCatalog);
   rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeEvent);
   rpc Decide(DecideRequest) returns (DecideResponse);
+  // Keep an exported model loaded for the origin; needs its execute grant.
+  rpc AcquireLease(LeaseRequest) returns (LeaseGrant);
+  rpc RenewLease(LeaseRenewal) returns (LeaseGrant);
+  rpc ReleaseLease(LeaseRelease) returns (LeaseReleased);
 }
+
+// The exact catalog selection the origin routes to.
+message LeaseRequest {
+  string origin = 1;
+  string destination = 2;
+  string model = 3;
+  string artifact_id = 4;
+  string profile_id = 5;
+  // 5 s to 10 min; 60 s when 0.
+  uint32 ttl_ms = 6;
+}
+
+message LeaseRenewal {
+  string origin = 1;
+  string destination = 2;
+  string lease_id = 3;
+  uint32 ttl_ms = 4;
+}
+
+message LeaseRelease {
+  string origin = 1;
+  string destination = 2;
+  string lease_id = 3;
+}
+
+message LeaseGrant {
+  string lease_id = 1;
+  string model = 2;
+  uint32 ttl_ms = 3;
+  bool resident = 4;
+}
+
+message LeaseReleased {}
 
 message IdentifyRequest {
   string origin = 1;

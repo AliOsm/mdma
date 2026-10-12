@@ -9,16 +9,16 @@ src/backend.rs     the Backend trait; cpu, rocm, level0, vulkan, cuda, metal and
 src/kv_cache.rs    KV cache
 src/sampler.rs     temperature, top-p, min-p, repetition penalty
 src/session.rs     inference session lifecycle (state machine)
-src/registry.rs    named decoders, Laya checkpoints and upstream models
+src/registry.rs    named decoders and Laya checkpoints
 src/memory.rs      native tensor admission and backend buffer quotas
 src/cache.rs       prepared model cache
 src/laya.rs        Laya decision heads, prompting and calibration
 src/grpc.rs        gRPC service and mTLS client
-src/upstream.rs    forwarding to other MDMA nodes
 src/federation.rs  peer trust, signed catalogs, routing and execution
 src/power.rs       power-aware admission
-src/bin/           mdma-serve, mdma and companion binaries
+src/bin/           mdma-serve, mdma, mdma-web and companion binaries
 proto/             gRPC definitions
+web/               three.js stage for mdma-web (bun; bundled into src/bin/mdma-web/assets/)
 deploy/            systemd, launchd and rc.d templates
 doc/               operating guides and protocol notes
 ```

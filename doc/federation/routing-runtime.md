@@ -58,7 +58,7 @@ unprofiled. GPU-enabled builds still serve Laya on CPU.
 
 ## Client authentication and deadlines
 
-Ordinary local/default/upstream RPCs retain their existing semantics. Routed
+Ordinary local/default RPCs retain their existing semantics. Routed
 calls require an actual **full TLS 1.3, HTTP/2, authenticated-client handshake**
 and one positive `grpc-timeout`, captured before protobuf decoding. Normal
 client certificates need no federation URI identity. HTTP headers and claimed
@@ -105,15 +105,57 @@ result size and typed question/result schema, including duplicate keys.
 
 Trust APIs publish atomically, persist before success and notify running
 controllers. A running store has one locked writer; never edit its JSON or
-unlink either trust or machine lock. There is not yet a public live-admin CLI.
-For standalone operator changes, stop **your own** server, use the Store APIs,
-then restart with the same reviewed configuration; lost/corrupt trust must not
-be recreated automatically. Generation changes conservatively cancel in-flight
+unlink either trust or machine lock. `mdma-fed` (below) changes a node only
+while its `mdma-serve` is stopped; restart it afterwards. Lost or corrupt
+trust is never recreated automatically. Generation changes conservatively cancel in-flight
 routes, including otherwise unrelated policy edits.
 
 Conformance includes actual two-leg HTTP/2 mTLS loopback inference, native
 synthesis/Laya parity, resumption rejection, deadlines/reset/drop/revocation,
 response quotas and malicious executor output/no-redispatch tests.
+
+### Setting up nodes with mdma-fed
+
+Each node keeps its federation files in one directory:
+
+```sh
+mdma-fed init /var/lib/mdma/fed --id pathfinder.fleet --endpoint https://192.168.3.41:6365
+mdma-fed export /var/lib/mdma/fed > pathfinder.json
+```
+
+`init` makes a root and identity certificate (the id is the DNS name and
+identity URI), a catalog signer, the trust store and `runtime.toml`, valid for
+`--days` (30 by default, at most 397). The root's key is not kept: renewing is
+a new `init` and enrolling again. `export` prints the public bundle and, on
+stderr, its digest; `enroll` prints the digest it read, so the two can be
+compared over another channel.
+
+On each side, enroll the other's bundle:
+
+```sh
+# executor: periscope may see and run every model in its models folder
+mdma-fed enroll /var/lib/mdma/fed periscope.json --execute all --models /srv/models
+# origin: control only; --endpoint dials the peer somewhere else
+mdma-fed enroll ~/.mdma/fed pathfinder.json --endpoint https://192.168.3.41:6365
+```
+
+`--catalog` and `--execute` take `all` or a comma list; the catalog defaults
+to what the peer may run. Enrolling the same bundle again replaces its grants;
+a known peer with other credentials is refused. Execute grants turn on
+`enable_execution`.
+
+Start the executor with `MDMA_FEDERATION_CONFIG=<dir>/runtime.toml`. Then, with
+the origin stopped:
+
+```sh
+mdma-fed routes ~/.mdma/fed --peer pathfinder.fleet --client-cert certs/client.pem
+```
+
+This reads the peer's signed catalog and routes each ready model as
+`pathfinder-<model>` (`--prefix` changes it) for that one client certificate,
+replacing the peer's earlier routes, and turns routing and polling on. Run it
+again after the peer's models change. `mdma-fed status <dir>` shows peers,
+grants and routes, also while the node runs.
 
 ### Hardware acceptance
 
@@ -126,13 +168,16 @@ x86_64 Linux hosts, a real TinyLlama GGUF and the ordinary mTLS client:
 | Metal (Apple silicon) | Synthesis through an approved alias with validated terminal completion; eager and request-owned paths have separate checkpoint gates |
 | Vulkan (Linux, discrete NVIDIA GPU) | Synthesis with exact pins; device/kernel checks, frozen-resource parity, mode-change withdrawal, checkpoint greedy/logprob parity |
 | ROCm f32 reference (Linux, RDNA4) | Checkpoint greedy/logprob parity, serialized ROCm library suite, three-host delegation |
+| CUDA (Linux, RTX 3070 Ti Laptop, sm_86) | Two-leg synthesis through an approved alias, CPU decisions, deadline and reset cancellation |
+| CPU (FreeBSD 16.0-CURRENT amd64) | Library suite, kernel-backed executable identity including replace/unlink withdrawal |
+| Five-host fleet set up with `mdma-fed` (macOS Metal origin; CUDA, ROCm f32 and two FreeBSD CPU executors) | Verified catalogs from every executor with models on disk; synthesis through CUDA and FreeBSD routes loading on first use; a gateway lease evicting an idle CUDA model to load another; the executor lease ending within its TTL after the origin was killed, and returning when it restarted |
 
 All runs rejected missing deadlines, wrong operations and unapproved caller
 disclosure; unapproved callers could not see route aliases. GPU runs also
 failed closed on wrong artifact/profile pins and completed independent work
 after a dropped stream. Previously approved routes stayed usable alongside new
 aliases. These are not production throughput benchmarks or fleet
-certification, and CUDA/Level Zero federation remains unqualified.
+certification, and Level Zero federation remains unqualified.
 
 ### Deployment notes
 
@@ -142,11 +187,25 @@ at startup. Reference mode uses GPU f32 activations/KV without WMMA/int8 or grap
 execution; its numerical mode is part of the profile pin. The known fast ROCm
 checkpoint drift remains unqualified: no tolerances were relaxed to enable it.
 
-On macOS versions enforcing Local Network privacy, daemon permission is an
-independent OS gate. A build
-must have an identifiable app/code-signing identity and the operator must grant
-the necessary permission. A reachable peer from an interactive test does not
-prove daemon access. Do not disable OS policy or tunnel around a denial.
+On macOS, Local Network privacy blocks a program's LAN connections until the
+user allows it. Programs run from Terminal or SSH, launchd daemons and root are
+exempt; a program started from another app, such as an editor or a third-party
+terminal, counts as that app and is allowed only if that app is. A peer
+reachable from an interactive shell therefore says nothing about the daemon.
+
+`mdma-serve` and `mdma-fed` embed an Info.plist that names them and says why,
+and macOS remembers the answer by code signature, so sign them with an
+Apple-issued identity:
+
+```sh
+just features=metal sign "Apple Development: Your Name (TEAMID)"
+```
+
+Run the signed `mdma-serve` as a launchd agent (`deploy/launchd/`, or
+`launchctl submit` for a session) and allow it when macOS asks; rebuilds signed
+with the same identity keep the permission. Run `mdma-fed routes` from Terminal
+or SSH, or allow the app it runs from. Do not disable OS policy or tunnel
+around a denial.
 Diagnostics report only static failure stages and OS error kinds, not private
 transport error text.
 

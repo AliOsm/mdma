@@ -6,7 +6,7 @@
 
 use super::{
     CuResult, CuStream, CudaBackend, CudaBuf, Error, MAX_HEAD_DIM, Q8Scratch, Result, cu,
-    cuCtxSynchronize,
+    cuStreamSynchronize,
 };
 use crate::backend::{AttnSpec, Backend, Pool};
 use crate::kv_cache::KvCache;
@@ -108,7 +108,7 @@ impl Capture {
         // out-slot left null on failure, so Graph::drop skips it; `active` is
         // cleared first so Drop never ends the capture a second time.
         cu("cuStreamEndCapture", unsafe {
-            cuStreamEndCapture(self.stream, &mut graph.0)
+            cuStreamEndCapture(self.stream, &raw mut graph.0)
         })?;
         Ok(graph)
     }
@@ -121,7 +121,7 @@ impl Drop for Capture {
             // SAFETY: as in `finish`: the same live stream, on the thread that
             // began the capture (Capture is !Send), with a live out-slot;
             // whatever graph comes back is destroyed by `graph`'s Drop.
-            unsafe { cuStreamEndCapture(self.stream, &mut graph.0) };
+            unsafe { cuStreamEndCapture(self.stream, &raw mut graph.0) };
         }
     }
 }
@@ -171,11 +171,13 @@ impl GraphState {
             });
         }
         // Prefill and the allocations above ran on the legacy stream, which
-        // the twin's stream does not wait for.
+        // the twin's stream does not wait for. Only that stream: synchronizing
+        // the context would invalidate another thread's capture.
         backend.bind()?;
-        // SAFETY: `bind` just made the context current on this thread, and no
-        // capture is active yet, so the context-wide synchronise is allowed.
-        cu("cuCtxSynchronize", unsafe { cuCtxSynchronize() })?;
+        // SAFETY: `bind` just made the context current on this thread; the
+        // legacy stream is never captured, since twins capture their own
+        // non-blocking streams.
+        cu("cuStreamSynchronize", unsafe { cuStreamSynchronize(std::ptr::null_mut()) })?;
         let saved_len = kv.len();
         let capture = Capture::begin(backend.stream)?;
         let recorded = model.forward_device(&backend, kv, ws, 0, 0);
@@ -191,7 +193,7 @@ impl GraphState {
         // and the twin's scratch/params, which CudaDecoder's borrows and
         // GraphState's ownership keep alive as long as it exists.
         cu("cuGraphInstantiate", unsafe {
-            cuGraphInstantiateWithFlags(&mut executable.0, graph.0, 0)
+            cuGraphInstantiateWithFlags(&raw mut executable.0, graph.0, 0)
         })?;
         Ok(Self {
             executable,
@@ -249,18 +251,18 @@ impl Decoder for CudaDecoder<'_> {
     }
 }
 
-/// A graph decoder unless MDMA_CUDA_GRAPHS=0, heads are wider than
+/// A graph decoder unless MDMA_CUDA_GRAPHS=0 at startup, heads are wider than
 /// attn_f16kv takes (Gemma's 512-wide global heads run eagerly on the
 /// windowed kernel), or the capture fails, which falls back to eager decode
 /// with the reason on stderr.
+#[expect(clippy::unnecessary_wraps, reason = "delegate_decoder! calls fallible factories")]
 pub(super) fn decoder<'a>(
     backend: &'a CudaBackend,
     model: &'a Model<CudaBackend>,
     kv: &'a mut KvCache<CudaBackend>,
     ws: &'a mut Workspace<CudaBackend>,
 ) -> Result<Box<dyn Decoder + 'a>> {
-    if std::env::var("MDMA_CUDA_GRAPHS").as_deref() != Ok("0")
-        && model.config().head_dim <= MAX_HEAD_DIM
+    if backend.graphs && model.config().head_dim <= MAX_HEAD_DIM
     {
         match GraphState::capture(backend, model, kv, ws) {
             Ok(state) => {
@@ -272,7 +274,7 @@ pub(super) fn decoder<'a>(
                 }));
             }
             Err(error) => {
-                eprintln!("mdma: CUDA graph capture unavailable, using eager decode: {error}")
+                eprintln!("mdma: CUDA graph capture unavailable, using eager decode: {error}");
             }
         }
     }

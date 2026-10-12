@@ -11,11 +11,18 @@ fn main() {
     // Changes to the generator/kernel build logic must invalidate cached output.
     println!("cargo::rerun-if-changed=build.rs");
     build_identity();
-    for proto in ["proto/mdma.proto", "proto/node.proto", "proto/federation.proto"] {
+    rama::http::grpc::build::protobuf::configure()
+        .with_type_attribute(".mdma", "#[derive(serde::Serialize)]")
+        .compile_protos(&["proto/mdma.proto"], &["proto"])
+        .unwrap_or_else(|e| panic!("failed to compile proto/mdma.proto: {e}"));
+    for proto in ["proto/node.proto", "proto/federation.proto"] {
         rama::http::grpc::build::protobuf::compile_protos(proto)
             .unwrap_or_else(|e| panic!("failed to compile {proto}: {e}"));
     }
     println!("cargo::rerun-if-changed=proto");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        embed_info_plists();
+    }
 
     if std::env::var("CARGO_FEATURE_ROCM").is_ok() {
         build_hip_kernels();
@@ -28,6 +35,37 @@ fn main() {
     }
     if std::env::var("CARGO_FEATURE_CUDA").is_ok() {
         build_cuda_kernels();
+    }
+}
+
+/// macOS asks before a program reaches the local network and remembers the
+/// answer by code signature; the embedded Info.plist names the program and
+/// says why. `just sign` signs with these identifiers.
+fn embed_info_plists() {
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let version = std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
+    for (bin, why) in [
+        ("mdma-serve", "mdma-serve reads the model catalogs of your enrolled federation peers and runs requests on them."),
+        ("mdma-fed", "mdma-fed reads a federation peer's signed model catalog to set up routes to it."),
+    ] {
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>org.seuros.{bin}</string>
+    <key>CFBundleName</key><string>{bin}</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleShortVersionString</key><string>{version}</string>
+    <key>CFBundleVersion</key><string>{version}</string>
+    <key>NSLocalNetworkUsageDescription</key><string>{why}</string>
+</dict>
+</plist>
+"#
+        );
+        let path = out.join(format!("{bin}.Info.plist"));
+        std::fs::write(&path, plist).unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
+        println!("cargo::rustc-link-arg-bin={bin}=-Wl,-sectcreate,__TEXT,__info_plist,{}", path.display());
     }
 }
 

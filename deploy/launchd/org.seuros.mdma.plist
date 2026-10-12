@@ -18,10 +18,10 @@
     <dict>
         <key>HOME</key>
         <string>/usr/local/var/lib/mdma</string>
-        <key>MDMA_GGUF_PATH</key>
-        <string>/usr/local/var/lib/mdma/model.gguf</string>
+        <key>MDMA_MODELS_DIR</key>
+        <string>/usr/local/var/lib/mdma/models</string>
         <key>MDMA_LISTEN</key>
-        <string>127.0.0.1:50051</string>
+        <string>127.0.0.1:6362</string>
         <key>MDMA_TLS_CERT</key>
         <string>/usr/local/etc/mdma/server.pem</string>
         <key>MDMA_TLS_KEY</key>
