@@ -202,8 +202,9 @@ just features=metal sign "Apple Development: Your Name (TEAMID)"
 ```
 
 Run the signed `mdma-serve` as a launchd agent (`deploy/launchd/`, or
-`launchctl submit` for a session) and allow it when macOS asks; rebuilds signed
-with the same identity keep the permission. Run `mdma-fed routes` from Terminal
+`launchctl submit` for a session) and allow it when macOS asks. macOS also
+keys the permission on the executable's UUID, so it asks again after each
+rebuild; until it is answered, peer dials fail with `HostUnreachable`. Run `mdma-fed routes` from Terminal
 or SSH, or allow the app it runs from. Do not disable OS policy or tunnel
 around a denial.
 Diagnostics report only static failure stages and OS error kinds, not private
