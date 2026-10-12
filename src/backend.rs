@@ -19,6 +19,9 @@ pub mod cuda;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[allow(unsafe_code)]
 pub mod metal;
+// The Edge TPU is driven through a character device; only its `pcie::os` module is unsafe.
+#[cfg(feature = "coral")]
+pub mod coral;
 
 #[cfg(test)]
 pub(crate) mod test_support;

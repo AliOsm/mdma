@@ -1,0 +1,150 @@
+{
+ "name": "fc_64x64",
+ "generator": "offline oracle, compiler-exact FULLY_CONNECTED (padded rows, tile_shift=0, param_offset=0)",
+ "n": 64,
+ "k": 64,
+ "seed": 0,
+ "quant": {
+  "in_zp": 128,
+  "w_zp": 128,
+  "out_zp": 128,
+  "mult": 0.001953125,
+  "lo": 0,
+  "hi": 255
+ },
+ "executables": [
+  {
+   "type": "PARAMETER_CACHING",
+   "bitstreams": [
+    {
+     "file": "caching.bin",
+     "relocs": [
+      {
+       "desc": "PARAMETER",
+       "batch": 0,
+       "name": null,
+       "upper": false,
+       "offset_bit": 582
+      },
+      {
+       "desc": "PARAMETER",
+       "batch": 0,
+       "name": null,
+       "upper": true,
+       "offset_bit": 710
+      }
+     ]
+    }
+   ],
+   "parameters": "params.bin",
+   "hints": [
+    {
+     "kind": "instruction",
+     "direction": "INFEED",
+     "chunk": 0
+    },
+    {
+     "kind": "dma",
+     "direction": "INFEED",
+     "desc": "PARAMETER",
+     "name": null,
+     "offset": 0,
+     "size": 4352
+    },
+    {
+     "kind": "interrupt",
+     "direction": "OUTFEED",
+     "interrupt": 0
+    }
+   ],
+   "inputs": [],
+   "outputs": []
+  },
+  {
+   "type": "EXECUTION_ONLY",
+   "bitstreams": [
+    {
+     "file": "exec.bin",
+     "relocs": [
+      {
+       "desc": "INPUT",
+       "batch": 0,
+       "name": "x",
+       "upper": false,
+       "offset_bit": 1990
+      },
+      {
+       "desc": "INPUT",
+       "batch": 0,
+       "name": "x",
+       "upper": true,
+       "offset_bit": 1862
+      },
+      {
+       "desc": "OUTPUT",
+       "batch": 0,
+       "name": "y",
+       "upper": false,
+       "offset_bit": 12358
+      },
+      {
+       "desc": "OUTPUT",
+       "batch": 0,
+       "name": "y",
+       "upper": true,
+       "offset_bit": 12230
+      }
+     ]
+    }
+   ],
+   "parameters": null,
+   "hints": [
+    {
+     "kind": "instruction",
+     "direction": "INFEED",
+     "chunk": 0
+    },
+    {
+     "kind": "dma",
+     "direction": "INFEED",
+     "desc": "INPUT",
+     "name": "x",
+     "offset": 0,
+     "size": 64
+    },
+    {
+     "kind": "dma",
+     "direction": "OUTFEED",
+     "desc": "OUTPUT",
+     "name": "y",
+     "offset": 0,
+     "size": 64
+    },
+    {
+     "kind": "interrupt",
+     "direction": "OUTFEED",
+     "interrupt": 0
+    }
+   ],
+   "inputs": [
+    {
+     "name": "x",
+     "size": 64
+    }
+   ],
+   "outputs": [
+    {
+     "name": "y",
+     "size": 64
+    }
+   ]
+  }
+ ],
+ "input": {
+  "x": "input.bin"
+ },
+ "expected": {
+  "y": "expected.bin",
+  "valid_bytes": 64
+ }
+}

@@ -77,6 +77,9 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLLibrary", "MTLResource", "MTLTypes",
 ], optional = true }
 
+[target.'cfg(any(target_os = "freebsd", target_os = "linux"))'.dependencies]
+libc = { version = "0.2.190", optional = true }
+
 [build-dependencies]
 rama = { version = "0.4.0", features = ["grpc"] }
 
@@ -88,6 +91,7 @@ vulkan = ["dep:ash"]
 level0 = []
 cuda = []
 metal = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-metal"]
+coral = ["dep:libc"]
 
 [lints.rust]
 unsafe_code = "deny"
