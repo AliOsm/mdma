@@ -43,7 +43,8 @@ fn mapped() -> io::Result<RegionWithPath> {
     let address = header as usize as u64;
     let mut info = MaybeUninit::<RegionWithPath>::zeroed();
     let size = std::mem::size_of::<RegionWithPath>();
-    let abi_size = i32::try_from(size).map_err(|_| io::Error::other("executable region ABI size exceeds i32"))?;
+    let abi_size = i32::try_from(size)
+        .map_err(|_| io::Error::other("executable region ABI size exceeds i32"))?;
     // SAFETY: valid writable buffer of the advertised ABI size, current PID,
     // flavor 8 (PROC_PIDREGIONPATHINFO), and the actual mapped header address.
     let n = unsafe {

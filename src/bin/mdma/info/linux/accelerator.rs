@@ -13,7 +13,11 @@ const CORAL_USB_RUNTIME: (&str, &str) = ("18d1", "9302");
 pub(super) fn collect(sys: &Path, warnings: &mut Vec<String>) -> Vec<Accelerator> {
     let mut found = Vec::new();
     match entries(&sys.join("bus/pci/devices")) {
-        Ok(devices) => found.extend(devices.iter().filter_map(|device| pci_coral(sys, device, warnings))),
+        Ok(devices) => found.extend(
+            devices
+                .iter()
+                .filter_map(|device| pci_coral(sys, device, warnings)),
+        ),
         // The GPU scan already reports an unreadable PCI tree.
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => warnings.push(format!("Coral PCIe detection unavailable: {error}.")),
@@ -27,7 +31,10 @@ pub(super) fn collect(sys: &Path, warnings: &mut Vec<String>) -> Vec<Accelerator
 }
 
 fn entries(dir: &Path) -> io::Result<Vec<std::path::PathBuf>> {
-    let mut paths: Vec<_> = fs::read_dir(dir)?.filter_map(Result::ok).map(|entry| entry.path()).collect();
+    let mut paths: Vec<_> = fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect();
     paths.sort();
     Ok(paths)
 }
@@ -73,7 +80,9 @@ fn usb_coral(device: &Path) -> Option<Accelerator> {
     Some(Accelerator {
         kind: "coral_edge_tpu",
         bus: "usb",
-        address: device.file_name().map(|name| name.to_string_lossy().into_owned()),
+        address: device
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned()),
         vendor_id: format!("0x{vendor}"),
         device_id: format!("0x{product}"),
         driver: link_name(&device.join("driver")),
@@ -89,17 +98,29 @@ fn apex_node(sys: &Path, device: &Path) -> Option<String> {
     entries(&sys.join("class/apex"))
         .ok()?
         .into_iter()
-        .find(|entry| fs::canonicalize(entry.join("device")).is_ok_and(|resolved| resolved == target))
-        .and_then(|entry| entry.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .find(|entry| {
+            fs::canonicalize(entry.join("device")).is_ok_and(|resolved| resolved == target)
+        })
+        .and_then(|entry| {
+            entry
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
 }
 
 fn link_name(path: &Path) -> Option<String> {
-    fs::read_link(path).ok()?.file_name().map(|name| name.to_string_lossy().into_owned())
+    fs::read_link(path)
+        .ok()?
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 fn millidegrees(value: &str) -> Option<f64> {
     // sysfs temperatures are integer millidegrees Celsius.
-    value.parse::<i32>().ok().map(|milli| f64::from(milli) / 1000.0)
+    value
+        .parse::<i32>()
+        .ok()
+        .map(|milli| f64::from(milli) / 1000.0)
 }
 
 #[cfg(test)]

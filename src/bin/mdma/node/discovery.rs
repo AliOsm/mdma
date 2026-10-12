@@ -1,5 +1,5 @@
 //! DNS-SD supplies endpoints, never trust or resource capacity.
-use super::{query, proto, version};
+use super::{proto, query, version};
 use mdns_sd::{IfKind, Receiver, ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 use rama::error::BoxError;
 use rama::futures::StreamExt;
@@ -7,10 +7,10 @@ use rama::futures::stream::FuturesUnordered;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::future::Future;
+use std::io::{IsTerminal, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
-use std::io::{IsTerminal, Write};
 
 #[path = "discovery/table.rs"]
 mod table;
@@ -58,8 +58,14 @@ struct Advertisement {
     rejection: Option<String>,
 }
 
-fn advertisement(info: &ResolvedService, own_instance: Option<&str>, policy: &version::Policy) -> Option<Advertisement> {
-    if !info.get_property_val_str("poc").is_some_and(|poc| poc.starts_with("resources-"))
+fn advertisement(
+    info: &ResolvedService,
+    own_instance: Option<&str>,
+    policy: &version::Policy,
+) -> Option<Advertisement> {
+    if !info
+        .get_property_val_str("poc")
+        .is_some_and(|poc| poc.starts_with("resources-"))
         || info.get_port() == 0
         || own_instance.is_some_and(|own| info.get_property_val_str("instance") == Some(own))
     {
@@ -84,11 +90,18 @@ fn advertisement(info: &ResolvedService, own_instance: Option<&str>, policy: &ve
     let identity = Some(proto::NodeIdentity {
         mdma_version: info.get_property_val_str("version").unwrap_or("").into(),
         build_id: info.get_property_val_str("build").unwrap_or("").into(),
-        protocol_version: info.get_property_val_str("protocol").and_then(|v| v.parse().ok()).unwrap_or(0),
+        protocol_version: info
+            .get_property_val_str("protocol")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
     });
-    let rejection = if info.get_property_val_str("poc") == Some(PROTOCOL) { policy.check(identity.as_ref()).err() } else {
-        Some(format!("legacy/incompatible advertisement {}; require {PROTOCOL}",
-            info.get_property_val_str("poc").unwrap_or("missing")))
+    let rejection = if info.get_property_val_str("poc") == Some(PROTOCOL) {
+        policy.check(identity.as_ref()).err()
+    } else {
+        Some(format!(
+            "legacy/incompatible advertisement {}; require {PROTOCOL}",
+            info.get_property_val_str("poc").unwrap_or("missing")
+        ))
     };
     Some(Advertisement {
         name: info
@@ -102,7 +115,10 @@ fn advertisement(info: &ResolvedService, own_instance: Option<&str>, policy: &ve
     })
 }
 
-#[expect(clippy::struct_excessive_bools, reason = "independent per-peer discovery and polling flags")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-peer discovery and polling flags"
+)]
 struct Peer {
     advertisement: Advertisement,
     present: bool,
@@ -162,7 +178,12 @@ impl Peer {
         self.removed_at = None;
     }
 
-    fn complete(&mut self, generation: u64, result: Result<Value, version::QueryError>, now: Instant) -> bool {
+    fn complete(
+        &mut self,
+        generation: u64,
+        result: Result<Value, version::QueryError>,
+        now: Instant,
+    ) -> bool {
         if generation != self.generation || !self.present {
             return false;
         }
@@ -172,18 +193,24 @@ impl Peer {
         match result {
             Ok(resources) => {
                 self.rejected = false;
-                if let Some(identity) = resources.get("identity") { self.identity = Some(identity.clone()); }
+                if let Some(identity) = resources.get("identity") {
+                    self.identity = Some(identity.clone());
+                }
                 self.resources = Some(resources);
                 self.last_success = Some(now);
                 self.error = None;
             }
             Err(error) => {
                 self.rejected = matches!(error, version::QueryError::Rejected { .. });
-                if let version::QueryError::Rejected { identity: Some(identity), .. } = &error {
+                if let version::QueryError::Rejected {
+                    identity: Some(identity),
+                    ..
+                } = &error
+                {
                     self.identity = Some(identity.clone());
                 }
                 self.error = Some(error.to_string());
-            },
+            }
         }
         true
     }
@@ -223,7 +250,10 @@ pub(super) struct Discovery {
 
 impl Discovery {
     /// A read-only browser passes None; a daemon advertises its bound address.
-    pub(super) fn start(address: Option<SocketAddr>, policy: version::Policy) -> Result<Self, BoxError> {
+    pub(super) fn start(
+        address: Option<SocketAddr>,
+        policy: version::Policy,
+    ) -> Result<Self, BoxError> {
         let daemon = ServiceDaemon::new()?;
         // Construct the guard before fallible configuration to avoid leaked threads.
         let events = match daemon.browse(SERVICE_TYPE) {
@@ -307,8 +337,13 @@ impl Discovery {
         self.watch_output(duration, false).await
     }
 
-    async fn watch_output(&self, duration: Option<Duration>, as_table: bool) -> Result<(), BoxError> {
-        type Query = Pin<Box<dyn Future<Output = (String, u64, Result<Value, version::QueryError>)> + Send>>;
+    async fn watch_output(
+        &self,
+        duration: Option<Duration>,
+        as_table: bool,
+    ) -> Result<(), BoxError> {
+        type Query =
+            Pin<Box<dyn Future<Output = (String, u64, Result<Value, version::QueryError>)> + Send>>;
         let mut peers: BTreeMap<String, Peer> = BTreeMap::new();
         let mut pending: FuturesUnordered<Query> = FuturesUnordered::new();
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -316,14 +351,21 @@ impl Discovery {
         let mut last_render = Instant::now();
         let draw = |peers: &BTreeMap<String, Peer>| -> Result<(), BoxError> {
             let now = Instant::now();
-            let reports: Vec<_> = peers.iter().map(|(key, peer)| peer.report(key, now)).collect();
+            let reports: Vec<_> = peers
+                .iter()
+                .map(|(key, peer)| peer.report(key, now))
+                .collect();
             let mut stdout = std::io::stdout().lock();
-            if terminal { write!(stdout, "\x1b[2J\x1b[H")?; }
+            if terminal {
+                write!(stdout, "\x1b[2J\x1b[H")?;
+            }
             write!(stdout, "{}", table::render(&reports))?;
             stdout.flush()?;
             Ok(())
         };
-        if as_table && terminal { draw(&peers)?; }
+        if as_table && terminal {
+            draw(&peers)?;
+        }
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let deadline = async {
             match duration {
@@ -395,22 +437,30 @@ impl Discovery {
                     let key = key.clone();
                     let generation = peer.generation;
                     let policy = self.policy.clone();
-                    let expected = peer.advertisement.identity.as_ref().map(version::json_identity);
+                    let expected = peer
+                        .advertisement
+                        .identity
+                        .as_ref()
+                        .map(version::json_identity);
                     pending.push(Box::pin(async move {
                         let result = tokio::time::timeout(Duration::from_secs(5), async {
-                            let mut last_error = version::QueryError::Unreachable("no usable endpoints".into());
+                            let mut last_error =
+                                version::QueryError::Unreachable("no usable endpoints".into());
                             for endpoint in endpoints {
                                 match query(&endpoint, &policy).await {
                                     Ok(resources) => {
                                         if expected.as_ref() != resources.get("identity") {
                                             return Err(version::QueryError::Rejected {
-                                                reason: "advertisement/RPC identity mismatch".into(),
+                                                reason: "advertisement/RPC identity mismatch"
+                                                    .into(),
                                                 identity: resources.get("identity").cloned(),
                                             });
                                         }
                                         return Ok(resources);
-                                    },
-                                    Err(error @ version::QueryError::Rejected { .. }) => return Err(error),
+                                    }
+                                    Err(error @ version::QueryError::Rejected { .. }) => {
+                                        return Err(error);
+                                    }
                                     Err(error) => last_error = error,
                                 }
                             }
@@ -450,7 +500,10 @@ pub(super) fn shutdown_signal() -> std::io::Result<impl Future<Output = ()> + Se
 }
 
 pub(super) async fn discover(args: Args) -> Result<(), BoxError> {
-    let policy = version::Policy::new(args.min_peer_version.as_deref(), args.require_peer_build.as_deref())?;
+    let policy = version::Policy::new(
+        args.min_peer_version.as_deref(),
+        args.require_peer_build.as_deref(),
+    )?;
     if !args.watch && !(1..=3600).contains(&args.seconds) {
         return Err("--seconds must be in 1..=3600".into());
     }

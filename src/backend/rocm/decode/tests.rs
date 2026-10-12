@@ -40,7 +40,8 @@ fn upload(hip: &HipBackend, bytes: &[u8]) -> HipBuf {
 
 fn download(hip: &HipBackend, buf: &HipBuf, n: usize) -> Vec<f32> {
     let mut out = vec![0f32; n];
-    hip.download(buf, 0, bytemuck::cast_slice_mut(&mut out)).unwrap();
+    hip.download(buf, 0, bytemuck::cast_slice_mut(&mut out))
+        .unwrap();
     out
 }
 
@@ -80,7 +81,11 @@ fn check_synthetic(dtype: GgmlDType) {
     for rows in [1, 7, 9, 20] {
         for k in [256, 512, 768] {
             let raw = weights(dtype, rows, k);
-            let w = QWeight { dtype, shape: vec![rows, k], buf: upload(&hip, &raw) };
+            let w = QWeight {
+                dtype,
+                shape: vec![rows, k],
+                buf: upload(&hip, &raw),
+            };
             for kind in 0..3 {
                 let x: Vec<f32> = (0..k)
                     .map(|i| match kind {
@@ -94,15 +99,31 @@ fn check_synthetic(dtype: GgmlDType) {
                 hip.qmatmul(&w, &x_buf, &mut y).unwrap();
                 let got = download(&hip, &y, rows + 8);
 
-                let cpu_w = QWeight { dtype, shape: vec![rows, k], buf: CpuBuf(raw.clone()) };
+                let cpu_w = QWeight {
+                    dtype,
+                    shape: vec![rows, k],
+                    buf: CpuBuf(raw.clone()),
+                };
                 let x_hat = requantize(&x);
                 let mut cpu_y = CpuBuf(vec![0; rows * 4]);
-                CpuBackend.qmatmul(&cpu_w, &CpuBuf(bytemuck::cast_slice(&x_hat).to_vec()), &mut cpu_y).unwrap();
+                CpuBackend
+                    .qmatmul(
+                        &cpu_w,
+                        &CpuBuf(bytemuck::cast_slice(&x_hat).to_vec()),
+                        &mut cpu_y,
+                    )
+                    .unwrap();
                 let want: &[f32] = bytemuck::cast_slice(&cpu_y.0);
                 for (i, (&g, &w)) in got[..rows].iter().zip(want).enumerate() {
-                    assert!((g - w).abs() <= 2e-4 + 2e-5 * w.abs(), "{dtype:?} rows={rows} k={k} input={kind} row={i}: {g} != {w}");
+                    assert!(
+                        (g - w).abs() <= 2e-4 + 2e-5 * w.abs(),
+                        "{dtype:?} rows={rows} k={k} input={kind} row={i}: {g} != {w}"
+                    );
                 }
-                assert!(got[rows..].iter().all(|&v| v == 123456.25), "partial block wrote past output");
+                assert!(
+                    got[rows..].iter().all(|&v| v == 123456.25),
+                    "partial block wrote past output"
+                );
             }
         }
     }
@@ -122,8 +143,16 @@ fn q6k_packed_decode_matches_reference_and_masks_tail() {
 fn packed_decode_reuses_q8_across_dtypes_and_invalidates_on_upload() {
     let hip = HipBackend::new().unwrap();
     let (rows, k) = (9, 768);
-    let w4 = QWeight { dtype: GgmlDType::Q4K, shape: vec![rows, k], buf: upload(&hip, &weights(GgmlDType::Q4K, rows, k)) };
-    let w6 = QWeight { dtype: GgmlDType::Q6K, shape: vec![rows, k], buf: upload(&hip, &weights(GgmlDType::Q6K, rows, k)) };
+    let w4 = QWeight {
+        dtype: GgmlDType::Q4K,
+        shape: vec![rows, k],
+        buf: upload(&hip, &weights(GgmlDType::Q4K, rows, k)),
+    };
+    let w6 = QWeight {
+        dtype: GgmlDType::Q6K,
+        shape: vec![rows, k],
+        buf: upload(&hip, &weights(GgmlDType::Q6K, rows, k)),
+    };
     let xa: Vec<f32> = (0..k).map(|i| ((i % 37) as f32 - 18.0) * 0.1).collect();
     let mut x = upload(&hip, bytemuck::cast_slice(&xa));
     let mut y = hip.alloc(rows * 4, Pool::Scratch).unwrap();
@@ -154,14 +183,24 @@ fn packed_decode_and_prefill_share_growing_scratch() {
         let hip = HipBackend::new().unwrap();
         let (rows, k) = (9, 512);
         let raw = weights(dtype, rows, k);
-        let w = QWeight { dtype, shape: vec![rows, k], buf: upload(&hip, &raw) };
-        let cpu_w = QWeight { dtype, shape: vec![rows, k], buf: CpuBuf(raw) };
+        let w = QWeight {
+            dtype,
+            shape: vec![rows, k],
+            buf: upload(&hip, &raw),
+        };
+        let cpu_w = QWeight {
+            dtype,
+            shape: vec![rows, k],
+            buf: CpuBuf(raw),
+        };
         // Upload everything first so only matmuls change the cache below.
         let mut cases: Vec<_> = [1, 16, 1, 64, 1, 2, 1]
             .into_iter()
             .enumerate()
             .map(|(phase, tokens)| {
-                let x: Vec<f32> = (0..tokens * k).map(|i| ((i * 17 + phase * 31) % 255) as f32 / 32.0 - 4.0).collect();
+                let x: Vec<f32> = (0..tokens * k)
+                    .map(|i| ((i * 17 + phase * 31) % 255) as f32 / 32.0 - 4.0)
+                    .collect();
                 let x_buf = upload(&hip, bytemuck::cast_slice(&x));
                 let y = hip.alloc(tokens * rows * 4, Pool::Scratch).unwrap();
                 (tokens, x, x_buf, y)
@@ -173,10 +212,19 @@ fn packed_decode_and_prefill_share_growing_scratch() {
             hip.qmatmul(&w, x_buf, y).unwrap();
             let got = download(&hip, y, *tokens * rows);
             let mut cpu_y = CpuBuf(vec![0; *tokens * rows * 4]);
-            CpuBackend.qmatmul(&cpu_w, &CpuBuf(bytemuck::cast_slice(&requantize(x)).to_vec()), &mut cpu_y).unwrap();
+            CpuBackend
+                .qmatmul(
+                    &cpu_w,
+                    &CpuBuf(bytemuck::cast_slice(&requantize(x)).to_vec()),
+                    &mut cpu_y,
+                )
+                .unwrap();
             let want: &[f32] = bytemuck::cast_slice(&cpu_y.0);
             for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
-                assert!((g - w).abs() <= 2e-4 + 2e-5 * w.abs(), "{dtype:?} T={tokens} index={i}: {g} != {w}");
+                assert!(
+                    (g - w).abs() <= 2e-4 + 2e-5 * w.abs(),
+                    "{dtype:?} T={tokens} index={i}: {g} != {w}"
+                );
             }
             max_tokens = max_tokens.max(*tokens);
             let scratch = hip.q8_scratch.lock().unwrap();
@@ -186,11 +234,18 @@ fn packed_decode_and_prefill_share_growing_scratch() {
             if let Some((ptr, cap)) = previous_allocation {
                 assert!(scratch.cap >= cap);
                 if *tokens == 1 {
-                    assert_eq!(allocation, (ptr, cap), "decode must reuse the prefill allocation");
+                    assert_eq!(
+                        allocation,
+                        (ptr, cap),
+                        "decode must reuse the prefill allocation"
+                    );
                 }
             }
             previous_allocation = Some(allocation);
-            assert_eq!(scratch.cached, Some((x_buf.as_device_ptr() as usize, *tokens as i32, k as i32)));
+            assert_eq!(
+                scratch.cached,
+                Some((x_buf.as_device_ptr() as usize, *tokens as i32, k as i32))
+            );
         }
     }
 }
@@ -215,40 +270,78 @@ fn fused_gate_up_matches_requantized_cpu_and_masks_tail() {
                 let gate_raw = weights(dtype, rows, k);
                 let mut up_raw = weights(dtype, rows + 1, k);
                 let up_raw = up_raw.split_off(up_raw.len() / (rows + 1));
-                let gate = QWeight { dtype, shape: vec![rows, k], buf: upload(&hip, &gate_raw) };
-                let up = QWeight { dtype, shape: vec![rows, k], buf: upload(&hip, &up_raw) };
-                let cpu_gate = QWeight { dtype, shape: vec![rows, k], buf: CpuBuf(gate_raw) };
-                let cpu_up = QWeight { dtype, shape: vec![rows, k], buf: CpuBuf(up_raw) };
+                let gate = QWeight {
+                    dtype,
+                    shape: vec![rows, k],
+                    buf: upload(&hip, &gate_raw),
+                };
+                let up = QWeight {
+                    dtype,
+                    shape: vec![rows, k],
+                    buf: upload(&hip, &up_raw),
+                };
+                let cpu_gate = QWeight {
+                    dtype,
+                    shape: vec![rows, k],
+                    buf: CpuBuf(gate_raw),
+                };
+                let cpu_up = QWeight {
+                    dtype,
+                    shape: vec![rows, k],
+                    buf: CpuBuf(up_raw),
+                };
                 let mut gs = hip.alloc(rows * 4, Pool::Scratch).unwrap();
                 let mut us = hip.alloc(rows * 4, Pool::Scratch).unwrap();
                 for kind in 0..3 {
-                    let x: Vec<f32> = (0..k).map(|i| match kind {
-                        0 => ((i * 17 % 255) as f32 - 127.0) / 1024.0,
-                        1 => -((i * 7 % 31 + 1) as f32) / 1024.0,
-                        _ => 0.0,
-                    }).collect();
+                    let x: Vec<f32> = (0..k)
+                        .map(|i| match kind {
+                            0 => ((i * 17 % 255) as f32 - 127.0) / 1024.0,
+                            1 => -((i * 7 % 31 + 1) as f32) / 1024.0,
+                            _ => 0.0,
+                        })
+                        .collect();
                     let x_buf = upload(&hip, bytemuck::cast_slice(&x));
                     let mut y = upload(&hip, bytemuck::cast_slice(&vec![123456.25f32; rows + 8]));
-                    hip.ffn_gate_up(&gate, &up, &x_buf, &mut gs, &mut us, &mut y).unwrap();
+                    hip.ffn_gate_up(&gate, &up, &x_buf, &mut gs, &mut us, &mut y)
+                        .unwrap();
                     let got = download(&hip, &y, rows + 8);
                     let mut cpu_y = CpuBuf(vec![0; rows * 4]);
-                    CpuBackend.ffn_gate_up(
-                        &cpu_gate, &cpu_up, &CpuBuf(bytemuck::cast_slice(&requantize(&x)).to_vec()),
-                        &mut CpuBuf(vec![0; rows * 4]), &mut CpuBuf(vec![0; rows * 4]), &mut cpu_y,
-                    ).unwrap();
+                    CpuBackend
+                        .ffn_gate_up(
+                            &cpu_gate,
+                            &cpu_up,
+                            &CpuBuf(bytemuck::cast_slice(&requantize(&x)).to_vec()),
+                            &mut CpuBuf(vec![0; rows * 4]),
+                            &mut CpuBuf(vec![0; rows * 4]),
+                            &mut cpu_y,
+                        )
+                        .unwrap();
                     let want: &[f32] = bytemuck::cast_slice(&cpu_y.0);
                     for (i, (&g, &w)) in got[..rows].iter().zip(want).enumerate() {
-                        assert!((g - w).abs() <= 4e-4 + 4e-5 * w.abs(), "{dtype:?} rows={rows} k={k} kind={kind} row={i}: {g} != {w}");
+                        assert!(
+                            (g - w).abs() <= 4e-4 + 4e-5 * w.abs(),
+                            "{dtype:?} rows={rows} k={k} kind={kind} row={i}: {g} != {w}"
+                        );
                     }
-                    assert!(got[rows..].iter().all(|&v| v == 123456.25), "fused output overrun");
-                    assert_eq!(hip.q8_scratch.lock().unwrap().cached, Some((x_buf.as_device_ptr() as usize, 1, k as i32)));
-                    hip.ffn_gate_up(&gate, &up, &x_buf, &mut gs, &mut us, &mut y).unwrap();
+                    assert!(
+                        got[rows..].iter().all(|&v| v == 123456.25),
+                        "fused output overrun"
+                    );
+                    assert_eq!(
+                        hip.q8_scratch.lock().unwrap().cached,
+                        Some((x_buf.as_device_ptr() as usize, 1, k as i32))
+                    );
+                    hip.ffn_gate_up(&gate, &up, &x_buf, &mut gs, &mut us, &mut y)
+                        .unwrap();
                     assert_eq!(got, download(&hip, &y, rows + 8));
                     hip.qmatmul(&gate, &x_buf, &mut gs).unwrap();
                     hip.qmatmul(&up, &x_buf, &mut us).unwrap();
                     hip.silu_mul(&gs, &us, &mut y).unwrap();
                     for (&g, w) in got[..rows].iter().zip(download(&hip, &y, rows)) {
-                        assert!((g - w).abs() <= 2e-5 + 2e-5 * w.abs(), "fused vs unfused: {g} != {w}");
+                        assert!(
+                            (g - w).abs() <= 2e-5 + 2e-5 * w.abs(),
+                            "fused vs unfused: {g} != {w}"
+                        );
                     }
                 }
             }
@@ -261,34 +354,61 @@ fn gate_up_falls_back_for_prefill_float_and_mixed_weights() {
     use GgmlDType::{F16, F32, Q4K, Q6K};
     let hip = HipBackend::new().unwrap();
     let (rows, k) = (9, 256);
-    for (gd, ud, tokens) in [(Q4K, Q6K, 1), (Q6K, Q4K, 1), (Q4K, Q4K, 3), (Q6K, Q6K, 16), (F32, F32, 1), (F16, F16, 1), (F32, Q4K, 1)] {
+    for (gd, ud, tokens) in [
+        (Q4K, Q6K, 1),
+        (Q6K, Q4K, 1),
+        (Q4K, Q4K, 3),
+        (Q6K, Q6K, 16),
+        (F32, F32, 1),
+        (F16, F16, 1),
+        (F32, Q4K, 1),
+    ] {
         let make_weight = |dtype, phase| {
-            let values: Vec<f32> = (0..rows * k).map(|i| ((i * 19 + phase * 7) % 31) as f32 / 512.0 - 0.03).collect();
+            let values: Vec<f32> = (0..rows * k)
+                .map(|i| ((i * 19 + phase * 7) % 31) as f32 / 512.0 - 0.03)
+                .collect();
             let raw = match dtype {
                 F32 => bytemuck::cast_slice(&values).to_vec(),
-                F16 => values.iter().flat_map(|v| f16::from_f32(*v).to_le_bytes()).collect(),
+                F16 => values
+                    .iter()
+                    .flat_map(|v| f16::from_f32(*v).to_le_bytes())
+                    .collect(),
                 _ => {
                     let mut raw = weights(dtype, rows + phase, k);
                     raw.split_off(phase * (raw.len() / (rows + phase)))
                 }
             };
-            QWeight { dtype, shape: vec![rows, k], buf: upload(&hip, &raw) }
+            QWeight {
+                dtype,
+                shape: vec![rows, k],
+                buf: upload(&hip, &raw),
+            }
         };
         let gate = make_weight(gd, 0);
         let mut up = make_weight(ud, 1);
-        let x: Vec<f32> = (0..k * tokens).map(|i| ((i * 17 % 255) as f32 - 127.0) / 1024.0).collect();
+        let x: Vec<f32> = (0..k * tokens)
+            .map(|i| ((i * 17 % 255) as f32 - 127.0) / 1024.0)
+            .collect();
         let x = upload(&hip, bytemuck::cast_slice(&x));
         let mut gs = hip.alloc(rows * tokens * 4, Pool::Scratch).unwrap();
         let mut us = hip.alloc(rows * tokens * 4, Pool::Scratch).unwrap();
         let mut y = hip.alloc(rows * tokens * 4, Pool::Scratch).unwrap();
-        hip.ffn_gate_up(&gate, &up, &x, &mut gs, &mut us, &mut y).unwrap();
+        hip.ffn_gate_up(&gate, &up, &x, &mut gs, &mut us, &mut y)
+            .unwrap();
         let got = download(&hip, &y, rows * tokens);
         hip.qmatmul(&gate, &x, &mut gs).unwrap();
         hip.qmatmul(&up, &x, &mut us).unwrap();
         hip.silu_mul(&gs, &us, &mut y).unwrap();
-        assert_eq!(got, download(&hip, &y, rows * tokens), "{gd:?}/{ud:?} T={tokens}");
+        assert_eq!(
+            got,
+            download(&hip, &y, rows * tokens),
+            "{gd:?}/{ud:?} T={tokens}"
+        );
         up.shape[0] += 1;
-        assert!(hip.ffn_gate_up(&gate, &up, &x, &mut gs, &mut us, &mut y).is_err());
+        assert!(
+            hip.ffn_gate_up(&gate, &up, &x, &mut gs, &mut us, &mut y)
+                .is_err()
+        );
     }
 }
 
@@ -304,13 +424,19 @@ fn bench_fused_gate_up() {
         let mut load = |name| {
             let desc = gguf.tensor_desc(name).unwrap().clone();
             let raw = gguf.read_tensor_bytes(name).unwrap();
-            QWeight { dtype: desc.dtype, shape: desc.shape, buf: upload(&hip, &raw) }
+            QWeight {
+                dtype: desc.dtype,
+                shape: desc.shape,
+                buf: upload(&hip, &raw),
+            }
         };
         let gate = load(gate_name);
         let up = load(up_name);
         assert_eq!(gate.dtype, up.dtype);
         assert_eq!(gate.shape, up.shape);
-        let [rows, k] = gate.shape[..] else { panic!("rank-2 weight") };
+        let [rows, k] = gate.shape[..] else {
+            panic!("rank-2 weight")
+        };
         let x: Vec<f32> = (0..k).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
         let x = upload(&hip, bytemuck::cast_slice(&x));
         let mut gs = hip.alloc(rows * 4, Pool::Scratch).unwrap();
@@ -330,12 +456,21 @@ fn bench_fused_gate_up() {
             for rows_per_block in [1, 2, 4, 8, 16] {
                 let fused = time_launches(|| {
                     hip.q8_invalidate();
-                    hip.launch_decode_i8(&gate, Some(&up), &x, &mut y, rows_per_block).unwrap();
+                    hip.launch_decode_i8(&gate, Some(&up), &x, &mut y, rows_per_block)
+                        .unwrap();
                 });
                 for (g, &w) in download(&hip, &y, rows).iter().zip(&want) {
-                    assert!((g - w).abs() <= 2e-5 + 2e-5 * w.abs(), "real fused vs unfused: {g} != {w}");
+                    assert!(
+                        (g - w).abs() <= 2e-5 + 2e-5 * w.abs(),
+                        "real fused vs unfused: {g} != {w}"
+                    );
                 }
-                eprintln!("FFN dtype={:?} rows={rows} k={k} trial={trial} rows_per_block={rows_per_block} unfused_ns={} fused_ns={}", gate.dtype, unfused.as_nanos(), fused.as_nanos());
+                eprintln!(
+                    "FFN dtype={:?} rows={rows} k={k} trial={trial} rows_per_block={rows_per_block} unfused_ns={} fused_ns={}",
+                    gate.dtype,
+                    unfused.as_nanos(),
+                    fused.as_nanos()
+                );
             }
         }
     }
@@ -355,20 +490,43 @@ fn q4k_decode_covers_all_six_bit_scales_and_minima() {
             block[12 + g] = (scales[g + 4] & 15) | ((minima[g + 4] & 15) << 4);
         }
     }
-    let w = QWeight { dtype: GgmlDType::Q4K, shape: vec![rows, k], buf: upload(&hip, &raw) };
-    let cpu_w = QWeight { dtype: w.dtype, shape: w.shape.clone(), buf: CpuBuf(raw) };
+    let w = QWeight {
+        dtype: GgmlDType::Q4K,
+        shape: vec![rows, k],
+        buf: upload(&hip, &raw),
+    };
+    let cpu_w = QWeight {
+        dtype: w.dtype,
+        shape: w.shape.clone(),
+        buf: CpuBuf(raw),
+    };
     for group in 0..=8 {
-        let x: Vec<f32> = (0..k).map(|i| {
-            if group == 8 || i / 32 == group { ((i * 17 % 255) as f32 - 127.0) / 32.0 } else { 0.0 }
-        }).collect();
+        let x: Vec<f32> = (0..k)
+            .map(|i| {
+                if group == 8 || i / 32 == group {
+                    ((i * 17 % 255) as f32 - 127.0) / 32.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
         let mut cpu_y = CpuBuf(vec![0; rows * 4]);
-        CpuBackend.qmatmul(&cpu_w, &CpuBuf(bytemuck::cast_slice(&requantize(&x)).to_vec()), &mut cpu_y).unwrap();
+        CpuBackend
+            .qmatmul(
+                &cpu_w,
+                &CpuBuf(bytemuck::cast_slice(&requantize(&x)).to_vec()),
+                &mut cpu_y,
+            )
+            .unwrap();
         let want: &[f32] = bytemuck::cast_slice(&cpu_y.0);
         let x = upload(&hip, bytemuck::cast_slice(&x));
         let mut y = hip.alloc(rows * 4, Pool::Scratch).unwrap();
         hip.qmatmul(&w, &x, &mut y).unwrap();
         for (row, (&g, &v)) in download(&hip, &y, rows).iter().zip(want).enumerate() {
-            assert!((g - v).abs() <= 2e-4 + 2e-5 * v.abs(), "group={group} row={row}: {g} != {v}");
+            assert!(
+                (g - v).abs() <= 2e-4 + 2e-5 * v.abs(),
+                "group={group} row={row}: {g} != {v}"
+            );
         }
     }
 }
@@ -378,17 +536,38 @@ fn q4k_decode_covers_all_six_bit_scales_and_minima() {
 fn bench_packed_decode_shapes() {
     let hip = HipBackend::new().unwrap();
     let mut gguf = GgufModel::open(fixture()).unwrap();
-    for name in ["blk.0.attn_q.weight", "blk.0.attn_k.weight", "blk.0.attn_v.weight", "blk.0.ffn_gate.weight", "blk.0.ffn_down.weight", "output.weight"] {
+    for name in [
+        "blk.0.attn_q.weight",
+        "blk.0.attn_k.weight",
+        "blk.0.attn_v.weight",
+        "blk.0.ffn_gate.weight",
+        "blk.0.ffn_down.weight",
+        "output.weight",
+    ] {
         let desc = gguf.tensor_desc(name).unwrap().clone();
-        let [n_out, n_in] = desc.shape[..] else { panic!("rank-2 tensor") };
+        let [n_out, n_in] = desc.shape[..] else {
+            panic!("rank-2 tensor")
+        };
         let raw = gguf.read_tensor_bytes(name).unwrap();
-        let w = QWeight { dtype: desc.dtype, shape: desc.shape, buf: upload(&hip, &raw) };
+        let w = QWeight {
+            dtype: desc.dtype,
+            shape: desc.shape,
+            buf: upload(&hip, &raw),
+        };
         let x: Vec<f32> = (0..n_in).map(|i| ((i % 13) as f32 - 6.0) * 0.1).collect();
         let x = upload(&hip, bytemuck::cast_slice(&x));
         let mut y = hip.alloc(n_out * 4, Pool::Scratch).unwrap();
         for trial in 1..=3 {
             let reference = time_launches(|| {
-                hip.launch_gemv(w.buf.as_device_ptr(), crate::backend::dtype_code::code(w.dtype).unwrap(), n_out as i32, n_in as i32, x.as_device_ptr(), y.as_device_ptr()).unwrap();
+                hip.launch_gemv(
+                    w.buf.as_device_ptr(),
+                    crate::backend::dtype_code::code(w.dtype).unwrap(),
+                    n_out as i32,
+                    n_in as i32,
+                    x.as_device_ptr(),
+                    y.as_device_ptr(),
+                )
+                .unwrap();
             });
             let uncached = time_launches(|| {
                 hip.q8_invalidate();
@@ -397,7 +576,10 @@ fn bench_packed_decode_shapes() {
             let cached = time_launches(|| hip.launch_gemv_i8(&w, &x, &mut y).unwrap());
             eprintln!(
                 "DECODE tensor={name} dtype={:?} rows={n_out} k={n_in} trial={trial} reference_ns={} uncached_ns={} cached_ns={}",
-                w.dtype, reference.as_nanos(), uncached.as_nanos(), cached.as_nanos()
+                w.dtype,
+                reference.as_nanos(),
+                uncached.as_nanos(),
+                cached.as_nanos()
             );
         }
     }

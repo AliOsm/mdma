@@ -12,20 +12,27 @@ mod tests {
 
     fn read<B: Backend>(b: &B, x: &B::Buf, n: usize) -> Vec<f32> {
         let mut data = vec![0f32; n];
-        b.download(x, 0, bytemuck::cast_slice_mut(&mut data)).unwrap();
+        b.download(x, 0, bytemuck::cast_slice_mut(&mut data))
+            .unwrap();
         data
     }
 
     fn kv_buffers<B: Backend>(b: &B, k: &[f32], v: &[f32]) -> (B::Buf, B::Buf) {
         let mut dk = b.alloc(k.len() * b.kv_elem_bytes(), Pool::Kv).unwrap();
         let mut dv = b.alloc(v.len() * b.kv_elem_bytes(), Pool::Kv).unwrap();
-        b.kv_write(&upload(b, k), &upload(b, v), &mut dk, &mut dv, 0, k.len()).unwrap();
+        b.kv_write(&upload(b, k), &upload(b, v), &mut dk, &mut dv, 0, k.len())
+            .unwrap();
         (dk, dv)
     }
 
     fn check<B: Backend>(b: &B) {
-        for operation in [Operation::Scale, Operation::GeluTanhMul, Operation::Softcap,
-            Operation::RopeSplitHalf, Operation::WindowedAttention] {
+        for operation in [
+            Operation::Scale,
+            Operation::GeluTanhMul,
+            Operation::Softcap,
+            Operation::RopeSplitHalf,
+            Operation::WindowedAttention,
+        ] {
             assert!(b.supports(operation));
         }
         let x = upload(b, &[-1.0, 0.0, 1.0]);
@@ -69,8 +76,22 @@ mod tests {
         // Split-half, not interleaved RoPE; infinity disables the second pair.
         let mut q = upload(b, &[1.0, 2.0, 3.0, 4.0]);
         let factors = upload(b, &[1.0, f32::INFINITY]);
-        b.rope_split_half(&mut q, 1, &RopeSpec { head_dim: 4, theta: 10000.0 }, &factors).unwrap();
-        let expected = [1f32.cos() - 3.0 * 1f32.sin(), 2.0, 1f32.sin() + 3.0 * 1f32.cos(), 4.0];
+        b.rope_split_half(
+            &mut q,
+            1,
+            &RopeSpec {
+                head_dim: 4,
+                theta: 10000.0,
+            },
+            &factors,
+        )
+        .unwrap();
+        let expected = [
+            1f32.cos() - 3.0 * 1f32.sin(),
+            2.0,
+            1f32.sin() + 3.0 * 1f32.cos(),
+            4.0,
+        ];
         for (got, want) in read(b, &q, 4).iter().zip(expected) {
             assert!((got - want).abs() < 1e-5);
         }
@@ -83,12 +104,32 @@ mod tests {
                 let (k, v) = kv_buffers(b, &vec![0.0; len * dim], &values);
                 let q = upload(b, &vec![0.0; dim]);
                 let mut out = b.alloc(dim * 4, Pool::Scratch).unwrap();
-                let spec = AttnSpec { head_dim: dim, n_q_heads: 1, n_kv_heads: 1 };
+                let spec = AttnSpec {
+                    head_dim: dim,
+                    n_q_heads: 1,
+                    n_kv_heads: 1,
+                };
                 for window in [0, 512] {
-                    b.attn_windowed(&q, &KvView { k: &k, v: &v, len }, &spec, 1.0, window, &mut out).unwrap();
-                    let start = if window == 0 { 0 } else { len.saturating_sub(window) };
+                    b.attn_windowed(
+                        &q,
+                        &KvView { k: &k, v: &v, len },
+                        &spec,
+                        1.0,
+                        window,
+                        &mut out,
+                    )
+                    .unwrap();
+                    let start = if window == 0 {
+                        0
+                    } else {
+                        len.saturating_sub(window)
+                    };
                     let expected = (start + len - 1) as f32 / 2.0;
-                    assert!(read(b, &out, dim).iter().all(|v| (v - expected).abs() < 2e-3));
+                    assert!(
+                        read(b, &out, dim)
+                            .iter()
+                            .all(|v| (v - expected).abs() < 2e-3)
+                    );
                 }
             }
         }
@@ -97,8 +138,16 @@ mod tests {
         let q = upload(b, &[1.0, 0.0]);
         let (k, v) = kv_buffers(b, &[0.0, 0.0, 1.0, 0.0], &[0.0, 0.0, 1.0, 1.0]);
         let mut out = b.alloc(8, Pool::Scratch).unwrap();
-        let spec = AttnSpec { head_dim: 2, n_q_heads: 1, n_kv_heads: 1 };
-        let kv = KvView { k: &k, v: &v, len: 2 };
+        let spec = AttnSpec {
+            head_dim: 2,
+            n_q_heads: 1,
+            n_kv_heads: 1,
+        };
+        let kv = KvView {
+            k: &k,
+            v: &v,
+            len: 2,
+        };
         for scale in [0.0f32, 0.5, 1.0, 2.0] {
             b.attn_windowed(&q, &kv, &spec, scale, 0, &mut out).unwrap();
             let expected = 1.0 / (1.0 + (-scale).exp());
@@ -111,7 +160,10 @@ mod tests {
             let mut rows = upload(b, &[1.0; 10]);
             let bias = upload(b, &[-2.0, -1.0, 0.0, 1.0, 2.0]);
             b.add_bias(&bias, &mut rows).unwrap();
-            assert_eq!(read(b, &rows, 10), [-1.0, 0.0, 1.0, 2.0, 3.0, -1.0, 0.0, 1.0, 2.0, 3.0]);
+            assert_eq!(
+                read(b, &rows, 10),
+                [-1.0, 0.0, 1.0, 2.0, 3.0, -1.0, 0.0, 1.0, 2.0, 3.0]
+            );
             let wrong = upload(b, &[0.0; 3]);
             assert!(b.add_bias(&wrong, &mut rows).is_err());
         }
@@ -119,31 +171,65 @@ mod tests {
             for hd in [8, 128] {
                 for rot in [2, hd / 2, hd] {
                     for heads in [1, 3, 9] {
-                        let values: Vec<_> = (0..heads * hd).map(|i| (i as f32 * 0.13).sin()).collect();
-                        let spec = RopeSpec { head_dim: hd, theta: 10000.0 };
+                        let values: Vec<_> =
+                            (0..heads * hd).map(|i| (i as f32 * 0.13).sin()).collect();
+                        let spec = RopeSpec {
+                            head_dim: hd,
+                            theta: 10000.0,
+                        };
                         let mut data = upload(b, &values);
-                        b.rope_partial_interleaved(&mut data, 7, &spec, rot).unwrap();
+                        b.rope_partial_interleaved(&mut data, 7, &spec, rot)
+                            .unwrap();
                         let got = read(b, &data, values.len());
                         for (before, after) in values.chunks_exact(hd).zip(got.chunks_exact(hd)) {
-                            assert_eq!(&before[rot..], &after[rot..], "unrotated suffix must be unchanged");
+                            assert_eq!(
+                                &before[rot..],
+                                &after[rot..],
+                                "unrotated suffix must be unchanged"
+                            );
                             for i in (0..rot).step_by(2) {
                                 let angle = 7.0 / 10000f32.powf(i as f32 / rot as f32);
                                 let (s, c) = angle.sin_cos();
-                                assert!((after[i] - (before[i] * c - before[i + 1] * s)).abs() < 1e-5);
-                                assert!((after[i + 1] - (before[i] * s + before[i + 1] * c)).abs() < 1e-5);
+                                assert!(
+                                    (after[i] - (before[i] * c - before[i + 1] * s)).abs() < 1e-5
+                                );
+                                assert!(
+                                    (after[i + 1] - (before[i] * s + before[i + 1] * c)).abs()
+                                        < 1e-5
+                                );
                             }
                         }
                     }
                 }
             }
-            let spec = RopeSpec { head_dim: 8, theta: 10000.0 };
+            let spec = RopeSpec {
+                head_dim: 8,
+                theta: 10000.0,
+            };
             for rot in [0, 1, 10] {
-                assert!(b.rope_partial_interleaved(&mut upload(b, &[1.0; 8]), 0, &spec, rot).is_err());
+                assert!(
+                    b.rope_partial_interleaved(&mut upload(b, &[1.0; 8]), 0, &spec, rot)
+                        .is_err()
+                );
             }
-            assert!(b.rope_partial_interleaved(&mut upload(b, &[1.0; 9]), 0, &spec, 4).is_err());
-            assert!(b.rope_partial_interleaved(&mut upload(b, &[]), 0, &spec, 4).is_err());
+            assert!(
+                b.rope_partial_interleaved(&mut upload(b, &[1.0; 9]), 0, &spec, 4)
+                    .is_err()
+            );
+            assert!(
+                b.rope_partial_interleaved(&mut upload(b, &[]), 0, &spec, 4)
+                    .is_err()
+            );
             for theta in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-                assert!(b.rope_partial_interleaved(&mut upload(b, &[1.0; 8]), 0, &RopeSpec { head_dim: 8, theta }, 4).is_err());
+                assert!(
+                    b.rope_partial_interleaved(
+                        &mut upload(b, &[1.0; 8]),
+                        0,
+                        &RopeSpec { head_dim: 8, theta },
+                        4
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -161,15 +247,21 @@ mod tests {
     }
 
     #[test]
-    fn cpu_decoder_ops_compat() { check(&CpuBackend); }
+    fn cpu_decoder_ops_compat() {
+        check(&CpuBackend);
+    }
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn cuda_decoder_ops_compat() { check_gpu(&crate::backend::cuda::CudaBackend::new().unwrap()); }
+    fn cuda_decoder_ops_compat() {
+        check_gpu(&crate::backend::cuda::CudaBackend::new().unwrap());
+    }
 
     #[cfg(feature = "vulkan")]
     #[test]
-    fn vulkan_decoder_ops_compat() { check_gpu(&crate::backend::vulkan::VulkanBackend::new().unwrap()); }
+    fn vulkan_decoder_ops_compat() {
+        check_gpu(&crate::backend::vulkan::VulkanBackend::new().unwrap());
+    }
 
     #[cfg(feature = "rocm")]
     #[test]
@@ -180,5 +272,7 @@ mod tests {
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
-    fn metal_decoder_ops_compat() { check(&crate::backend::metal::MetalBackend::new().unwrap()); }
+    fn metal_decoder_ops_compat() {
+        check(&crate::backend::metal::MetalBackend::new().unwrap());
+    }
 }

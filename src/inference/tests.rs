@@ -1,6 +1,6 @@
 use super::*;
-use crate::gguf::tests::Fixture;
 use crate::backend::cpu::CpuBackend;
+use crate::gguf::tests::Fixture;
 use std::assert_matches;
 
 #[test]
@@ -23,9 +23,21 @@ fn rejects_context_and_tokenizer_before_execution() {
     let file = Fixture::new(1, 8).with_tokenizer().write();
     let mut g = GgufModel::open(file.path()).unwrap();
     for (prompt, max) in [("", 4), ("hello", 0), ("hello", 64), ("hello", usize::MAX)] {
-        assert!(generate(&crate::backend::test_support::NoUpload, &mut g, prompt, max, None).is_err());
+        assert!(
+            generate(
+                &crate::backend::test_support::NoUpload,
+                &mut g,
+                prompt,
+                max,
+                None
+            )
+            .is_err()
+        );
     }
     let file = Fixture::new(1, 8).write();
     let mut g = GgufModel::open(file.path()).unwrap();
-    assert_matches!(generate(&CpuBackend, &mut g, "hello", 4, None), Err(Error::UnsupportedModel(_)));
+    assert_matches!(
+        generate(&CpuBackend, &mut g, "hello", 4, None),
+        Err(Error::UnsupportedModel(_))
+    );
 }

@@ -16,7 +16,9 @@ use std::sync::Arc;
 pub(super) type Event = Result<DatastarEvent, BoxError>;
 
 fn patch(html: impl IntoHtml) -> Result<PatchElements, BoxError> {
-    Ok(PatchElements::new(NonEmptyStr::try_from(html.into_string())?))
+    Ok(PatchElements::new(NonEmptyStr::try_from(
+        html.into_string(),
+    )?))
 }
 
 /// Morphs the rendered element(s) into the DOM by id.
@@ -25,7 +27,10 @@ pub(super) fn element(html: impl IntoHtml) -> Event {
 }
 
 pub(super) fn append(selector: &'static str, html: impl IntoHtml) -> Event {
-    Ok(patch(html)?.with_selector(NonEmptyStr::try_from(selector)?).with_mode(ElementPatchMode::Append).try_into_datastar_event()?)
+    Ok(patch(html)?
+        .with_selector(NonEmptyStr::try_from(selector)?)
+        .with_mode(ElementPatchMode::Append)
+        .try_into_datastar_event()?)
 }
 
 pub(super) fn signals(value: &serde_json::Value) -> Event {
@@ -38,7 +43,13 @@ pub(super) fn scene(status: &Status) -> serde_json::Value {
 }
 
 /// What one status change patches into a page showing `view`.
-pub(super) fn status_events(status: &Status, view: View, models_changed: bool, pin: &str, held: &[String]) -> Vec<Event> {
+pub(super) fn status_events(
+    status: &Status,
+    view: View,
+    models_changed: bool,
+    pin: &str,
+    held: &[String],
+) -> Vec<Event> {
     let mut events = vec![signals(&scene(status)), element(pages::status_pill(status))];
     match view {
         View::Memory => events.push(element(pages::models_panel(status))),
@@ -55,7 +66,10 @@ pub(super) struct StatusQuery {
     view: View,
 }
 
-pub(super) async fn status(State(upstream): State<Arc<Upstream>>, Query(query): Query<StatusQuery>) -> impl IntoResponse {
+pub(super) async fn status(
+    State(upstream): State<Arc<Upstream>>,
+    Query(query): Query<StatusQuery>,
+) -> impl IntoResponse {
     let mut rx = upstream.status.clone();
     Sse::new(stream_fn(move |mut yielder| async move {
         let mut names: Option<Vec<String>> = None;
@@ -64,7 +78,13 @@ pub(super) async fn status(State(upstream): State<Arc<Upstream>>, Query(query): 
             let current: Vec<String> = status.models.iter().map(|m| m.name.clone()).collect();
             let models_changed = names.as_ref() != Some(&current);
             names = Some(current);
-            for event in status_events(&status, query.view, models_changed, &upstream.pin, &upstream.leases.held()) {
+            for event in status_events(
+                &status,
+                query.view,
+                models_changed,
+                &upstream.pin,
+                &upstream.leases.held(),
+            ) {
                 yielder.yield_item(event).await;
             }
             if rx.changed().await.is_err() {

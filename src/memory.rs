@@ -2,12 +2,15 @@
 use crate::backend::{Error, Result};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-mod counter;
-#[cfg_attr(not(any(test, feature = "rocm", feature = "cuda", feature = "vulkan")), allow(dead_code))]
+#[cfg_attr(
+    not(any(test, feature = "rocm", feature = "cuda", feature = "vulkan")),
+    allow(dead_code)
+)]
 mod buffers;
-pub use buffers::{BufferBudget, MemoryDomain};
+mod counter;
 #[cfg(any(feature = "rocm", feature = "cuda", feature = "vulkan"))]
 pub(crate) use buffers::BufferCharge;
+pub use buffers::{BufferBudget, MemoryDomain};
 
 /// What a native reservation holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,7 +43,10 @@ pub struct NativeMemoryBudget {
 
 impl NativeMemoryBudget {
     pub fn new(limit: usize) -> Self {
-        Self { counter: counter::Counter::new(limit), categories: Arc::default() }
+        Self {
+            counter: counter::Counter::new(limit),
+            categories: Arc::default(),
+        }
     }
 
     pub fn limit(&self) -> usize {
@@ -53,9 +59,19 @@ impl NativeMemoryBudget {
     }
 
     pub fn snapshot(&self) -> BudgetSnapshot {
-        let [weights, kv, workspace] = [MemoryCategory::Weights, MemoryCategory::Kv, MemoryCategory::Workspace]
-            .map(|category| self.tally(category).load(Ordering::Relaxed));
-        BudgetSnapshot { limit: self.limit(), used: self.used(), weights, kv, workspace }
+        let [weights, kv, workspace] = [
+            MemoryCategory::Weights,
+            MemoryCategory::Kv,
+            MemoryCategory::Workspace,
+        ]
+        .map(|category| self.tally(category).load(Ordering::Relaxed));
+        BudgetSnapshot {
+            limit: self.limit(),
+            used: self.used(),
+            weights,
+            kv,
+            workspace,
+        }
     }
 
     fn tally(&self, category: MemoryCategory) -> &AtomicUsize {
@@ -63,10 +79,20 @@ impl NativeMemoryBudget {
     }
 
     pub(crate) fn reserve(&self, bytes: usize, category: MemoryCategory) -> Result<Reservation> {
-        let charge = self.counter.reserve(bytes)
-            .map_err(|used| Error::MemoryBudget { requested: bytes, used, limit: self.limit() })?;
+        let charge = self
+            .counter
+            .reserve(bytes)
+            .map_err(|used| Error::MemoryBudget {
+                requested: bytes,
+                used,
+                limit: self.limit(),
+            })?;
         self.tally(category).fetch_add(bytes, Ordering::Relaxed);
-        Ok(Reservation { budget: self.clone(), charge, category })
+        Ok(Reservation {
+            budget: self.clone(),
+            charge,
+            category,
+        })
     }
 }
 
@@ -82,10 +108,18 @@ impl Reservation {
     pub(crate) fn split_as(&mut self, bytes: usize, category: MemoryCategory) -> Self {
         let charge = self.charge.split(bytes);
         if category != self.category {
-            self.budget.tally(self.category).fetch_sub(bytes, Ordering::Relaxed);
-            self.budget.tally(category).fetch_add(bytes, Ordering::Relaxed);
+            self.budget
+                .tally(self.category)
+                .fetch_sub(bytes, Ordering::Relaxed);
+            self.budget
+                .tally(category)
+                .fetch_add(bytes, Ordering::Relaxed);
         }
-        Self { budget: self.budget.clone(), charge, category }
+        Self {
+            budget: self.budget.clone(),
+            charge,
+            category,
+        }
     }
 
     pub(crate) fn covers(&self, budget: &NativeMemoryBudget, bytes: usize) -> bool {
@@ -99,16 +133,24 @@ impl Reservation {
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        self.budget.tally(self.category).fetch_sub(self.charge.bytes(), Ordering::Relaxed);
+        self.budget
+            .tally(self.category)
+            .fetch_sub(self.charge.bytes(), Ordering::Relaxed);
     }
 }
 
 pub(crate) fn product(values: &[usize]) -> Result<usize> {
-    values.iter().try_fold(1usize, |n, &value| n.checked_mul(value)).ok_or(Error::SizeOverflow)
+    values
+        .iter()
+        .try_fold(1usize, |n, &value| n.checked_mul(value))
+        .ok_or(Error::SizeOverflow)
 }
 
 pub(crate) fn sum(values: impl IntoIterator<Item = usize>) -> Result<usize> {
-    values.into_iter().try_fold(0usize, usize::checked_add).ok_or(Error::SizeOverflow)
+    values
+        .into_iter()
+        .try_fold(0usize, usize::checked_add)
+        .ok_or(Error::SizeOverflow)
 }
 
 #[cfg(test)]

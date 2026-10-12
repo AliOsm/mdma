@@ -1,6 +1,6 @@
-use super::{greedy, Sampler, SamplerConfig};
-use rand::rngs::StdRng;
+use super::{Sampler, SamplerConfig, greedy};
 use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 #[test]
 fn greedy_picks_max_logit() {

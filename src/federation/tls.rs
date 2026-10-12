@@ -18,10 +18,10 @@ use x509_parser::prelude::*;
 
 mod binding;
 pub(crate) mod caller;
-pub use caller::BindCallerService;
-pub(crate) use caller::{Caller, ClientSpki, listener_expiry};
 pub use binding::utc_ms;
 pub use binding::{BindPeerService, Binding};
+pub use caller::BindCallerService;
+pub(crate) use caller::{Caller, ClientSpki, listener_expiry};
 
 const MAX_CERT_BYTES: usize = 64 * 1024;
 const MAX_CHAIN_CERTS: usize = 8;
@@ -163,9 +163,12 @@ fn eligible<'a>(
     if snapshot.tls_denied(&leaf.spki_sha256) {
         return Err(deny("revoked TLS public key"));
     }
-    if record.policy.signing_keys.iter().any(|k| {
-        k.bytes().is_ok_and(|k| k.as_slice() == leaf.public_key)
-    }) {
+    if record
+        .policy
+        .signing_keys
+        .iter()
+        .any(|k| k.bytes().is_ok_and(|k| k.as_slice() == leaf.public_key))
+    {
         return Err(deny("TLS and catalog signing keys must be different"));
     }
     let pin = record
@@ -302,7 +305,13 @@ pub fn reject_client_root_overlap(
     for cert in client_roots {
         // Compare key material, not SPKI encoding: an AlgorithmIdentifier
         // parameter/encoding variation must not disguise the same issuer key.
-        client_keys.push(sha256(parse(cert.as_ref())?.public_key().subject_public_key.data.as_ref()));
+        client_keys.push(sha256(
+            parse(cert.as_ref())?
+                .public_key()
+                .subject_public_key
+                .data
+                .as_ref(),
+        ));
     }
     for peer in peers {
         // Validity is checked at handshake; fingerprint/key comparison here must
@@ -320,7 +329,13 @@ pub fn reject_client_root_overlap(
             if sha256(cert.as_ref()) != root.certificate_sha256 {
                 return Err(deny("root fingerprint changed"));
             }
-            if client_keys.contains(&sha256(parse(cert.as_ref())?.public_key().subject_public_key.data.as_ref())) {
+            if client_keys.contains(&sha256(
+                parse(cert.as_ref())?
+                    .public_key()
+                    .subject_public_key
+                    .data
+                    .as_ref(),
+            )) {
                 return Err(deny("federation issuer overlaps unrestricted client trust"));
             }
         }
@@ -541,9 +556,7 @@ fn local_credential_expiry(
     now_ms: u64,
 ) -> Result<u64, Error> {
     policy.validate().map_err(super::trust::Error::from)?;
-    let expiry = binding::local_expiry(
-        chain, role, &policy.server_id, signing_key, now_ms,
-    )?;
+    let expiry = binding::local_expiry(chain, role, &policy.server_id, signing_key, now_ms)?;
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     for (root, _, root_expiry) in roots(policy, now_ms)? {
         let mut store = rustls::RootCertStore::empty();
@@ -552,19 +565,32 @@ fn local_credential_expiry(
         let valid = match role {
             TlsRole::ServerAuth => {
                 let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
-                    Arc::new(store), provider.clone(),
-                ).build().map_err(|_| deny("invalid local issuer"))?;
-                verifier.verify_server_cert(
-                    &chain[0], &chain[1..], &ServerName::try_from(policy.tls_name.as_str())
-                        .map_err(|_| deny("invalid local TLS reference name"))?,
-                    &[], now,
-                ).map(|_| ())
+                    Arc::new(store),
+                    provider.clone(),
+                )
+                .build()
+                .map_err(|_| deny("invalid local issuer"))?;
+                verifier
+                    .verify_server_cert(
+                        &chain[0],
+                        &chain[1..],
+                        &ServerName::try_from(policy.tls_name.as_str())
+                            .map_err(|_| deny("invalid local TLS reference name"))?,
+                        &[],
+                        now,
+                    )
+                    .map(|_| ())
             }
             TlsRole::ClientAuth => {
                 let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-                    Arc::new(store), provider.clone(),
-                ).build().map_err(|_| deny("invalid local issuer"))?;
-                verifier.verify_client_cert(&chain[0], &chain[1..], now).map(|_| ())
+                    Arc::new(store),
+                    provider.clone(),
+                )
+                .build()
+                .map_err(|_| deny("invalid local issuer"))?;
+                verifier
+                    .verify_client_cert(&chain[0], &chain[1..], now)
+                    .map(|_| ())
             }
         };
         if valid.is_ok() {
@@ -578,8 +604,15 @@ pub(crate) fn reject_shared_leaf_key(
     federation_leaf: &CertificateDer<'_>,
     client_leaf: &CertificateDer<'_>,
 ) -> Result<(), Error> {
-    if parse(federation_leaf.as_ref())?.public_key().subject_public_key.data
-        == parse(client_leaf.as_ref())?.public_key().subject_public_key.data {
+    if parse(federation_leaf.as_ref())?
+        .public_key()
+        .subject_public_key
+        .data
+        == parse(client_leaf.as_ref())?
+            .public_key()
+            .subject_public_key
+            .data
+    {
         return Err(deny("client and federation TLS credentials share a key"));
     }
     Ok(())

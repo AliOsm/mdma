@@ -3,10 +3,10 @@ use crate::gguf::GgufModel;
 use same_file::Handle;
 use std::fs::{File, Metadata};
 use std::io::{self, Seek};
-use std::path::Path;
-use std::time::SystemTime;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+use std::time::SystemTime;
 
 #[derive(Clone, PartialEq, Eq)]
 struct Snapshot {
@@ -19,7 +19,10 @@ struct Snapshot {
 impl Snapshot {
     fn read(metadata: &Metadata) -> io::Result<Self> {
         if !metadata.is_file() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "GGUF source must be a regular file"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "GGUF source must be a regular file",
+            ));
         }
         Ok(Self {
             len: metadata.len(),
@@ -31,7 +34,9 @@ impl Snapshot {
 }
 
 fn changed() -> io::Error {
-    io::Error::other("GGUF source changed since preflight; keep model files immutable while serving")
+    io::Error::other(
+        "GGUF source changed since preflight; keep model files immutable while serving",
+    )
 }
 
 pub(super) struct Pinned {

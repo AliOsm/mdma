@@ -14,7 +14,9 @@ impl Drop for Process {
 /// `binary` without the caller's MDMA_* environment.
 pub fn command(binary: &str) -> Command {
     let mut command = Command::new(binary);
-    for (key, _) in std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("MDMA_")) {
+    for (key, _) in
+        std::env::vars_os().filter(|(key, _)| key.to_string_lossy().starts_with("MDMA_"))
+    {
         command.env_remove(key);
     }
     command

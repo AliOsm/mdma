@@ -67,7 +67,12 @@ async fn backend_initialization_failure_is_returned() {
         guard,
     );
     let result = supervise(shutdown, server, Duration::from_secs(2)).await;
-    assert!(result.unwrap_err().to_string().contains("driver unavailable"));
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("driver unavailable")
+    );
 }
 
 #[cfg(unix)]

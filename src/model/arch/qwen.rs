@@ -1,10 +1,10 @@
 //! Dense Qwen2/Qwen3 and the text-only Qwen2-VL decoder.
+use super::Decoder;
 use crate::backend::{AttnSpec, Backend, Pool, QWeight, Result, RopeSpec};
 use crate::gguf::GgufModel;
 use crate::kv_cache::KvCache;
 use crate::memory::product;
 use crate::model::{Model, ModelConfig, load_norm, load_weight};
-use super::Decoder;
 
 mod preflight;
 pub(in crate::model) use preflight::config as preflight_config;
@@ -45,9 +45,15 @@ impl<B: Backend> Qwen<B> {
         let output_norm = load_norm(b, g, "output_norm.weight")?;
         let output = if g.tensor_desc("output.weight").is_some() {
             Some(load_weight(b, g, "output.weight")?)
-        } else { None };
+        } else {
+            None
+        };
         let mut factors = b.alloc(product(&[c.head_dim / 2, 4])?, Pool::Weights)?;
-        b.upload(&mut factors, 0, bytemuck::cast_slice(&vec![1f32; c.head_dim / 2]))?;
+        b.upload(
+            &mut factors,
+            0,
+            bytemuck::cast_slice(&vec![1f32; c.head_dim / 2]),
+        )?;
         let mut layers = Vec::with_capacity(c.n_layers);
         for i in 0..c.n_layers {
             let name = |s: &str| format!("blk.{i}.{s}.weight");
@@ -57,15 +63,23 @@ impl<B: Backend> Qwen<B> {
                 k: load_weight(b, g, &name("attn_k"))?,
                 v: load_weight(b, g, &name("attn_v"))?,
                 out: load_weight(b, g, &name("attn_output"))?,
-                biases: if qwen3 { None } else { Some([
-                    load_norm(b, g, &format!("blk.{i}.attn_q.bias"))?,
-                    load_norm(b, g, &format!("blk.{i}.attn_k.bias"))?,
-                    load_norm(b, g, &format!("blk.{i}.attn_v.bias"))?,
-                ]) },
-                head_norms: if qwen3 { Some([
-                    load_norm(b, g, &name("attn_q_norm"))?,
-                    load_norm(b, g, &name("attn_k_norm"))?,
-                ]) } else { None },
+                biases: if qwen3 {
+                    None
+                } else {
+                    Some([
+                        load_norm(b, g, &format!("blk.{i}.attn_q.bias"))?,
+                        load_norm(b, g, &format!("blk.{i}.attn_k.bias"))?,
+                        load_norm(b, g, &format!("blk.{i}.attn_v.bias"))?,
+                    ])
+                },
+                head_norms: if qwen3 {
+                    Some([
+                        load_norm(b, g, &name("attn_q_norm"))?,
+                        load_norm(b, g, &name("attn_k_norm"))?,
+                    ])
+                } else {
+                    None
+                },
                 ffn_norm: load_norm(b, g, &name("ffn_norm"))?,
                 gate: load_weight(b, g, &name("ffn_gate"))?,
                 up: load_weight(b, g, &name("ffn_up"))?,
@@ -73,8 +87,12 @@ impl<B: Backend> Qwen<B> {
             });
         }
         Ok(Model {
-            config: c, token_embd, output_norm, output,
-            architecture: Decoder::Qwen(Self { layers, factors }), memory: None,
+            config: c,
+            token_embd,
+            output_norm,
+            output,
+            architecture: Decoder::Qwen(Self { layers, factors }),
+            memory: None,
         })
     }
 
@@ -82,25 +100,48 @@ impl<B: Backend> Qwen<B> {
         product(&[c.n_kv_heads, c.head_dim, 4])
     }
 
-    #[expect(clippy::unused_self, reason = "architectures share one workspace signature")]
+    #[expect(
+        clippy::unused_self,
+        reason = "architectures share one workspace signature"
+    )]
     pub fn workspace(&self, b: &B, c: &ModelConfig) -> Result<Workspace<B>> {
-        Ok(Workspace { kn: b.alloc(Self::workspace_bytes(c)?, Pool::Scratch)? })
+        Ok(Workspace {
+            kn: b.alloc(Self::workspace_bytes(c)?, Pool::Scratch)?,
+        })
     }
 
-    pub fn run(&self, b: &B, model: &Model<B>, kv: &mut KvCache<B>,
-        ws: &mut crate::model::Workspace<B>, token: u32, pos: u32) -> Result<()> {
+    pub fn run(
+        &self,
+        b: &B,
+        model: &Model<B>,
+        kv: &mut KvCache<B>,
+        ws: &mut crate::model::Workspace<B>,
+        token: u32,
+        pos: u32,
+    ) -> Result<()> {
         let c = &model.config;
         let extra = ws.qwen.as_mut().expect("Qwen workspace was allocated");
-        let rope = RopeSpec { head_dim: c.head_dim, theta: c.rope_theta };
-        let attn = AttnSpec { head_dim: c.head_dim, n_q_heads: c.n_heads, n_kv_heads: c.n_kv_heads };
+        let rope = RopeSpec {
+            head_dim: c.head_dim,
+            theta: c.rope_theta,
+        };
+        let attn = AttnSpec {
+            head_dim: c.head_dim,
+            n_q_heads: c.n_heads,
+            n_kv_heads: c.n_kv_heads,
+        };
         b.embed(&model.token_embd, &[token], &mut ws.x)?;
         #[cfg(test)]
         tests::trace(b, &ws.x, c.n_embd, "inp_embd", 0, pos)?;
         for (i, l) in self.layers.iter().enumerate() {
             b.rmsnorm(&l.attn_norm, &ws.x, &mut ws.normed, c.rms_eps)?;
             #[cfg(test)]
-            if i <= 1 { tests::trace(b, &ws.normed, c.n_embd, "attn_norm", i, pos)?; }
-            b.qmatmul_qkv(&l.q, &l.k, &l.v, &ws.normed, &mut ws.q, &mut ws.k, &mut ws.v)?;
+            if i <= 1 {
+                tests::trace(b, &ws.normed, c.n_embd, "attn_norm", i, pos)?;
+            }
+            b.qmatmul_qkv(
+                &l.q, &l.k, &l.v, &ws.normed, &mut ws.q, &mut ws.k, &mut ws.v,
+            )?;
             #[cfg(test)]
             if i <= 1 {
                 tests::trace(b, &ws.q, c.n_heads * c.head_dim, "Qcur_raw", i, pos)?;
@@ -130,20 +171,40 @@ impl<B: Backend> Qwen<B> {
             b.attn(&ws.q, &kv.view(i), &attn, &mut ws.attn_out)?;
             b.qmatmul(&l.out, &ws.attn_out, &mut ws.proj)?;
             #[cfg(test)]
-            if i <= 1 { tests::trace(b, &ws.proj, c.n_embd, "attn_out", i, pos)?; }
-            b.add_rmsnorm(&l.ffn_norm, &ws.x, &ws.proj, &mut ws.x_alt, &mut ws.normed, c.rms_eps)?;
+            if i <= 1 {
+                tests::trace(b, &ws.proj, c.n_embd, "attn_out", i, pos)?;
+            }
+            b.add_rmsnorm(
+                &l.ffn_norm,
+                &ws.x,
+                &ws.proj,
+                &mut ws.x_alt,
+                &mut ws.normed,
+                c.rms_eps,
+            )?;
             std::mem::swap(&mut ws.x, &mut ws.x_alt);
             #[cfg(test)]
             if i <= 1 {
                 tests::trace(b, &ws.x, c.n_embd, "ffn_inp", i, pos)?;
                 tests::trace(b, &ws.normed, c.n_embd, "ffn_norm", i, pos)?;
             }
-            b.ffn_gate_up(&l.gate, &l.up, &ws.normed, &mut ws.gate, &mut ws.up, &mut ws.act)?;
+            b.ffn_gate_up(
+                &l.gate,
+                &l.up,
+                &ws.normed,
+                &mut ws.gate,
+                &mut ws.up,
+                &mut ws.act,
+            )?;
             #[cfg(test)]
-            if i <= 1 { tests::trace(b, &ws.act, c.n_ff, "ffn_swiglu", i, pos)?; }
+            if i <= 1 {
+                tests::trace(b, &ws.act, c.n_ff, "ffn_swiglu", i, pos)?;
+            }
             b.qmatmul(&l.down, &ws.act, &mut ws.proj)?;
             #[cfg(test)]
-            if i <= 1 { tests::trace(b, &ws.proj, c.n_embd, "ffn_out", i, pos)?; }
+            if i <= 1 {
+                tests::trace(b, &ws.proj, c.n_embd, "ffn_out", i, pos)?;
+            }
             b.add(&ws.x, &ws.proj, &mut ws.x_alt)?;
             std::mem::swap(&mut ws.x, &mut ws.x_alt);
             #[cfg(test)]

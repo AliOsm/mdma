@@ -68,7 +68,10 @@ pub(crate) fn hash_at(file: &File) -> io::Result<ArtifactId> {
         offset += n as u64;
     }
     stamp.check(file.metadata()?)?;
-    Ok(ArtifactId(format!("sha256:{}", hex::encode(hash.finalize()))))
+    Ok(ArtifactId(format!(
+        "sha256:{}",
+        hex::encode(hash.finalize())
+    )))
 }
 
 /// Logical paths are fixed by the consuming loader, never supplied by a

@@ -2,7 +2,9 @@
 // or a swapped nibble does not survive these shapes.
 use super::Level0Backend;
 use crate::backend::cpu::CpuBackend;
-use crate::backend::test_support::{close, generation::fixture_greedy_continuation, parity, real_tensor_qmatmul_matches_cpu};
+use crate::backend::test_support::{
+    close, generation::fixture_greedy_continuation, parity, real_tensor_qmatmul_matches_cpu,
+};
 use crate::backend::{Backend, Pool};
 use crate::gguf::GgmlDType;
 
@@ -75,16 +77,19 @@ fn byte_ranges_reject_overflow_before_touching_memory() {
     assert_eq!(actual, [2; 8]);
 }
 
-
 fn fbuf<B: Backend>(backend: &B, values: &[f32]) -> B::Buf {
     let mut buf = backend.alloc(values.len() * 4, Pool::Scratch).unwrap();
-    backend.upload(&mut buf, 0, bytemuck::cast_slice(values)).unwrap();
+    backend
+        .upload(&mut buf, 0, bytemuck::cast_slice(values))
+        .unwrap();
     buf
 }
 
 fn read<B: Backend>(backend: &B, buf: &B::Buf, n: usize) -> Vec<f32> {
     let mut out = vec![0f32; n];
-    backend.download(buf, 0, bytemuck::cast_slice_mut(&mut out)).unwrap();
+    backend
+        .download(buf, 0, bytemuck::cast_slice_mut(&mut out))
+        .unwrap();
     out
 }
 
@@ -99,16 +104,26 @@ fn tiny_model_prefill_matches_cpu_and_sequential_decode() {
         if batched {
             let mut prefill = model.alloc_workspace(backend, 3).unwrap();
             let mut decode = model.alloc_workspace(backend, 1).unwrap();
-            let mut outputs = vec![model.prefill(backend, &mut kv, &mut prefill, &tokens[..3], 0).unwrap()];
+            let mut outputs = vec![
+                model
+                    .prefill(backend, &mut kv, &mut prefill, &tokens[..3], 0)
+                    .unwrap(),
+            ];
             for (i, &token) in tokens[3..].iter().enumerate() {
-                outputs.push(model.forward(backend, &mut kv, &mut decode, token, (i + 3) as u32).unwrap());
+                outputs.push(
+                    model
+                        .forward(backend, &mut kv, &mut decode, token, (i + 3) as u32)
+                        .unwrap(),
+                );
             }
             outputs
         } else {
             let mut ws = model.alloc_workspace(backend, 1).unwrap();
             let mut logits = Vec::new();
             for (i, &token) in tokens.iter().enumerate() {
-                logits = model.forward(backend, &mut kv, &mut ws, token, i as u32).unwrap();
+                logits = model
+                    .forward(backend, &mut kv, &mut ws, token, i as u32)
+                    .unwrap();
             }
             vec![logits]
         }
@@ -120,7 +135,11 @@ fn tiny_model_prefill_matches_cpu_and_sequential_decode() {
         close(got, want, 2e-4);
         assert_eq!(crate::sampler::greedy(got), crate::sampler::greedy(want));
     }
-    close(run(&backend, &tokens, false).last().unwrap(), batched.last().unwrap(), 2e-4);
+    close(
+        run(&backend, &tokens, false).last().unwrap(),
+        batched.last().unwrap(),
+        2e-4,
+    );
 }
 
 #[test]
@@ -140,8 +159,10 @@ fn fused_add_rmsnorm_matches_cpu_and_rejects_bad_shapes() {
     let (wg, ag, bg) = (fbuf(&gpu, &w), fbuf(&gpu, &a), fbuf(&gpu, &b));
     let (mut sc, mut yc) = (fbuf(&cpu, &vec![123.0; n]), fbuf(&cpu, &vec![456.0; n]));
     let (mut sg, mut yg) = (fbuf(&gpu, &vec![123.0; n]), fbuf(&gpu, &vec![456.0; n]));
-    cpu.add_rmsnorm(&wc, &ac, &bc, &mut sc, &mut yc, 1e-5).unwrap();
-    gpu.add_rmsnorm(&wg, &ag, &bg, &mut sg, &mut yg, 1e-5).unwrap();
+    cpu.add_rmsnorm(&wc, &ac, &bc, &mut sc, &mut yc, 1e-5)
+        .unwrap();
+    gpu.add_rmsnorm(&wg, &ag, &bg, &mut sg, &mut yg, 1e-5)
+        .unwrap();
     close(&read(&gpu, &sg, n), &read(&cpu, &sc, n), 1e-4);
     close(&read(&gpu, &yg, n), &read(&cpu, &yc, n), 1e-5);
 
@@ -150,9 +171,18 @@ fn fused_add_rmsnorm_matches_cpu_and_rejects_bad_shapes() {
     let mut sum = fbuf(&gpu, &[123.0; WIDTH]);
     let mut y = fbuf(&gpu, &[456.0; WIDTH]);
     let weights = fbuf(&gpu, &[1.0; WIDTH]);
-    assert!(gpu.add_rmsnorm(&bad, &weights, &weights, &mut sum, &mut y, 1e-5).is_err());
-    assert!(gpu.add_rmsnorm(&weights, &short, &weights, &mut sum, &mut y, 1e-5).is_err());
-    assert!(gpu.add_rmsnorm(&weights, &weights, &weights, &mut sum, &mut y, 0.0).is_err());
+    assert!(
+        gpu.add_rmsnorm(&bad, &weights, &weights, &mut sum, &mut y, 1e-5)
+            .is_err()
+    );
+    assert!(
+        gpu.add_rmsnorm(&weights, &short, &weights, &mut sum, &mut y, 1e-5)
+            .is_err()
+    );
+    assert!(
+        gpu.add_rmsnorm(&weights, &weights, &weights, &mut sum, &mut y, 0.0)
+            .is_err()
+    );
     close(&read(&gpu, &sum, WIDTH), &[123.0; WIDTH], 1e-6);
     close(&read(&gpu, &y, WIDTH), &[456.0; WIDTH], 1e-6);
 }

@@ -8,18 +8,45 @@ fn fixture(pre: &str) -> Fixture {
     let mut alphabet: Vec<_> = ByteLevel::alphabet().into_iter().collect();
     alphabet.sort_unstable();
     let mut pieces: Vec<_> = alphabet.into_iter().map(|c| c.to_string()).collect();
-    pieces.extend(["ab", "bc", "abc", "12", "123", "1234", "<|endoftext|>", "<|im_start|>", "<|im_end|>"].map(str::to_owned));
+    pieces.extend(
+        [
+            "ab",
+            "bc",
+            "abc",
+            "12",
+            "123",
+            "1234",
+            "<|endoftext|>",
+            "<|im_start|>",
+            "<|im_end|>",
+        ]
+        .map(str::to_owned),
+    );
     let mut types = vec![Value::I32(1); pieces.len()];
-    for t in &mut types[262..] { *t = Value::I32(3); }
+    for t in &mut types[262..] {
+        *t = Value::I32(3);
+    }
     for (key, value) in [
         ("model", Value::String("gpt2".into())),
         ("pre", Value::String(pre.into())),
-        ("tokens", Value::Array(pieces.into_iter().map(Value::String).collect())),
+        (
+            "tokens",
+            Value::Array(pieces.into_iter().map(Value::String).collect()),
+        ),
         ("token_type", Value::Array(types)),
-        ("merges", Value::Array(["a b", "ab c", "b c", "1 2", "12 3", "123 4"].map(|s| Value::String(s.into())).into())),
+        (
+            "merges",
+            Value::Array(
+                ["a b", "ab c", "b c", "1 2", "12 3", "123 4"]
+                    .map(|s| Value::String(s.into()))
+                    .into(),
+            ),
+        ),
         ("bos_token_id", Value::U32(262)),
         ("eos_token_id", Value::U32(264)),
-    ] { f.metadata.insert(format!("tokenizer.ggml.{key}"), value); }
+    ] {
+        f.metadata.insert(format!("tokenizer.ggml.{key}"), value);
+    }
     f
 }
 
@@ -50,7 +77,8 @@ fn byte_bpe_special_tokens_keep_original_ids_without_added_spaces_or_bos() {
     assert!(tok.is_eos(264));
     assert!(tok.is_eos(262));
     assert!(!tok.is_eos(263));
-    f.metadata.insert("tokenizer.ggml.add_bos_token".into(), Value::Bool(true));
+    f.metadata
+        .insert("tokenizer.ggml.add_bos_token".into(), Value::Bool(true));
     assert_eq!(tokenizer(&f).unwrap().encode("abc"), [262, 258]);
 }
 
@@ -58,7 +86,13 @@ fn byte_bpe_special_tokens_keep_original_ids_without_added_spaces_or_bos() {
 fn byte_bpe_roundtrips_unicode_whitespace_contractions_and_all_bytes() {
     for pre in ["qwen2", "qwen35", "glm4"] {
         let tok = tokenizer(&fixture(pre)).unwrap();
-        for text in [" hello  world\r\n\n", "I'm WE'RE they'll", "é e\u{301} 中文 🦀", "\0\t\u{7f}", "1234567890"] {
+        for text in [
+            " hello  world\r\n\n",
+            "I'm WE'RE they'll",
+            "é e\u{301} 中文 🦀",
+            "\0\t\u{7f}",
+            "1234567890",
+        ] {
             assert_eq!(tok.decode(&tok.encode(text)), text, "{pre}: {text:?}");
         }
         let text: String = (0..=255).filter_map(char::from_u32).collect();
@@ -71,13 +105,20 @@ fn byte_bpe_streaming_defers_split_utf8_without_corrupting_text() {
     let tok = tokenizer(&fixture("qwen2")).unwrap();
     let text = "é 中文 🦀 <|im_start|>abc";
     let mut decode = tok.stream_decoder();
-    let chunks: Vec<_> = tok.try_encode(text).unwrap().into_iter().map(|id| decode(id).unwrap()).collect();
+    let chunks: Vec<_> = tok
+        .try_encode(text)
+        .unwrap()
+        .into_iter()
+        .map(|id| decode(id).unwrap())
+        .collect();
     assert!(chunks.iter().any(String::is_empty));
     assert_eq!(chunks.concat(), text);
     let mut decode = tok.stream_decoder();
     let ids = tok.encode("🦀");
     assert_eq!(ids.len(), 4);
-    for &id in &ids[..3] { assert_eq!(decode(id).unwrap(), ""); }
+    for &id in &ids[..3] {
+        assert_eq!(decode(id).unwrap(), "");
+    }
     assert_eq!(decode(ids[3]).unwrap(), "🦀");
 }
 
@@ -101,11 +142,15 @@ fn byte_bpe_rejects_unknown_pre_incomplete_alphabet_duplicates_and_bad_merges() 
     assert!(tokenizer(&f).is_none());
     for merge in ["bad", "a ", " a", "a b c", "a missing"] {
         let mut f = fixture("qwen2");
-        f.metadata.insert("tokenizer.ggml.merges".into(), Value::Array(vec![Value::String(merge.into())]));
+        f.metadata.insert(
+            "tokenizer.ggml.merges".into(),
+            Value::Array(vec![Value::String(merge.into())]),
+        );
         assert!(tokenizer(&f).is_none(), "{merge:?}");
     }
     let mut f = fixture("qwen2");
-    f.metadata.insert("tokenizer.ggml.eos_token_id".into(), Value::U32(1000));
+    f.metadata
+        .insert("tokenizer.ggml.eos_token_id".into(), Value::U32(1000));
     assert!(tokenizer(&f).is_none());
     f = fixture("qwen2");
     f.metadata.remove("tokenizer.ggml.token_type");
@@ -121,8 +166,14 @@ fn byte_bpe_real_qwen_metadata_and_roundtrip() {
     // llama-tokenize IDs for the Qwen3-8B and NuMarkdown-8B checkpoints.
     let cases: [(&str, &[u32]); 3] = [
         ("The capital of France is", &[785, 6722, 315, 9625, 374]),
-        ("中文 🦀 12345\n", &[104811, 11162, 99, 222, 220, 16, 17, 18, 19, 20, 198]),
-        ("<|im_start|>user\nHi<|im_end|>\n", &[151644, 872, 198, 13048, 151645, 198]),
+        (
+            "中文 🦀 12345\n",
+            &[104811, 11162, 99, 222, 220, 16, 17, 18, 19, 20, 198],
+        ),
+        (
+            "<|im_start|>user\nHi<|im_end|>\n",
+            &[151644, 872, 198, 13048, 151645, 198],
+        ),
     ];
     for (text, expected) in cases {
         let ids = tok.try_encode(text).unwrap();

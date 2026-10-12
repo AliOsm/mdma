@@ -18,7 +18,9 @@ fn download<B: Backend>(b: &B, buf: &B::Buf, n: usize) -> Vec<f32> {
 }
 
 fn ramp(n: usize, scale: f32, shift: f32) -> Vec<f32> {
-    (0..n).map(|i| ((i * 7 % 11) as f32 - 5.0) * scale + shift).collect()
+    (0..n)
+        .map(|i| ((i * 7 % 11) as f32 - 5.0) * scale + shift)
+        .collect()
 }
 
 pub(crate) fn encoder_ops_match_cpu<B: Backend>(gpu: &B, tol: f32) {
@@ -37,8 +39,10 @@ pub(crate) fn encoder_ops_match_cpu<B: Backend>(gpu: &B, tol: f32) {
         let (xg, wg, bg) = (upload(gpu, &x), upload(gpu, &w), upload(gpu, &bias));
         let mut yc = cpu.alloc(n * 4, Pool::Scratch).unwrap();
         let mut yg = gpu.alloc(n * 4, Pool::Scratch).unwrap();
-        cpu.layernorm(&wc, with_bias.then_some(&bc), &xc, &mut yc, 1e-5).unwrap();
-        gpu.layernorm(&wg, with_bias.then_some(&bg), &xg, &mut yg, 1e-5).unwrap();
+        cpu.layernorm(&wc, with_bias.then_some(&bc), &xc, &mut yc, 1e-5)
+            .unwrap();
+        gpu.layernorm(&wg, with_bias.then_some(&bg), &xg, &mut yg, 1e-5)
+            .unwrap();
         close(&download(gpu, &yg, n), &download(&cpu, &yc, n), tol);
     }
 
@@ -49,7 +53,12 @@ pub(crate) fn encoder_ops_match_cpu<B: Backend>(gpu: &B, tol: f32) {
     close(&download(gpu, &yg, n), &download(&cpu, &yc, n), tol);
 
     let gate = ramp(n, 0.5, -0.2);
-    let (xc, xg, gc, gg) = (upload(&cpu, &x), upload(gpu, &x), upload(&cpu, &gate), upload(gpu, &gate));
+    let (xc, xg, gc, gg) = (
+        upload(&cpu, &x),
+        upload(gpu, &x),
+        upload(&cpu, &gate),
+        upload(gpu, &gate),
+    );
     let mut yc = cpu.alloc(n * 4, Pool::Scratch).unwrap();
     let mut yg = gpu.alloc(n * 4, Pool::Scratch).unwrap();
     cpu.gelu(&xc, &mut yc).unwrap();
@@ -66,7 +75,12 @@ pub(crate) fn encoder_ops_match_cpu<B: Backend>(gpu: &B, tol: f32) {
     let k = ramp(n, 0.29, 0.4);
     let v = ramp(n, 0.41, -0.6);
     for (theta, window) in [(160000.0f32, None), (10000.0, Some(1usize))] {
-        let spec = EncoderSpec { seq_len, n_heads, head_dim, window };
+        let spec = EncoderSpec {
+            seq_len,
+            n_heads,
+            head_dim,
+            window,
+        };
         let (mut qc, mut kc) = (upload(&cpu, &x), upload(&cpu, &k));
         let (mut qg, mut kg) = (upload(gpu, &x), upload(gpu, &k));
         cpu.rope_neox(&mut qc, &mut kc, &spec, theta).unwrap();
@@ -77,8 +91,10 @@ pub(crate) fn encoder_ops_match_cpu<B: Backend>(gpu: &B, tol: f32) {
         let (vc, vg) = (upload(&cpu, &v), upload(gpu, &v));
         let mut oc = cpu.alloc(n * 4, Pool::Scratch).unwrap();
         let mut og = gpu.alloc(n * 4, Pool::Scratch).unwrap();
-        cpu.attn_bidir(&qc, &kc, &vc, &lens, &spec, &mut oc).unwrap();
-        gpu.attn_bidir(&qg, &kg, &vg, &lens, &spec, &mut og).unwrap();
+        cpu.attn_bidir(&qc, &kc, &vc, &lens, &spec, &mut oc)
+            .unwrap();
+        gpu.attn_bidir(&qg, &kg, &vg, &lens, &spec, &mut og)
+            .unwrap();
         // Padded query rows are unspecified; compare the valid rows only.
         let (got, want) = (download(gpu, &og, n), download(&cpu, &oc, n));
         for (b, &len) in lens.iter().enumerate() {

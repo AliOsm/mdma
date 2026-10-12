@@ -1,12 +1,12 @@
 //! Private native synthesis admission/streaming and execution foundations.
 //! Runtime activation requires a separate explicit native execution switch.
 
+mod admission;
 pub(crate) mod deadline;
+mod decision;
 mod ledger;
 mod native;
-mod admission;
 mod synthesis;
-mod decision;
 pub(crate) use decision::ResponseLease;
 pub(crate) mod ingress;
 

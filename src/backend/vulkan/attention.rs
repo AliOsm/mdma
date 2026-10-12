@@ -14,24 +14,33 @@ pub(super) fn probe(instance: &ash::Instance, pdev: vk::PhysicalDevice) -> Resul
     if !extensions.iter().any(|e| {
         // SAFETY: extensionName is NUL-terminated within its fixed array per the spec, and `e`
         // outlives the comparison.
-        (unsafe { CStr::from_ptr(e.extension_name.as_ptr()) }) == ash::ext::subgroup_size_control::NAME
+        (unsafe { CStr::from_ptr(e.extension_name.as_ptr()) })
+            == ash::ext::subgroup_size_control::NAME
     }) {
         return Ok(false);
     }
     let mut sizes = vk::PhysicalDeviceSubgroupSizeControlProperties::default();
     let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
     let mut props = vk::PhysicalDeviceProperties2::default()
-        .push_next(&mut sizes).push_next(&mut subgroup);
+        .push_next(&mut sizes)
+        .push_next(&mut subgroup);
     // SAFETY: `pdev` belongs to the live `instance`; `sizes` is chained only after the
     // VK_EXT_subgroup_size_control check above, `subgroup` is core 1.1, and both outlive
     // the call.
     unsafe { instance.get_physical_device_properties2(pdev, &mut props) };
     let limits = props.properties.limits;
-    if sizes.min_subgroup_size > 32 || sizes.max_subgroup_size < 32
+    if sizes.min_subgroup_size > 32
+        || sizes.max_subgroup_size < 32
         || sizes.max_compute_workgroup_subgroups < 4
-        || !sizes.required_subgroup_size_stages.contains(vk::ShaderStageFlags::COMPUTE)
-        || !subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
-        || !subgroup.supported_operations.contains(vk::SubgroupFeatureFlags::ARITHMETIC)
+        || !sizes
+            .required_subgroup_size_stages
+            .contains(vk::ShaderStageFlags::COMPUTE)
+        || !subgroup
+            .supported_stages
+            .contains(vk::ShaderStageFlags::COMPUTE)
+        || !subgroup
+            .supported_operations
+            .contains(vk::SubgroupFeatureFlags::ARITHMETIC)
         || limits.max_compute_shared_memory_size < 17920
         || limits.max_compute_work_group_invocations < 128
         || limits.max_compute_work_group_size[0] < 128
@@ -53,7 +62,10 @@ impl VulkanBackend {
     }
 
     pub fn set_tiled_attention(&self, on: bool) {
-        self.modes.change(|| self.tiled_attention.store(on && self.tiled_attention_available(), Ordering::Relaxed));
+        self.modes.change(|| {
+            self.tiled_attention
+                .store(on && self.tiled_attention_available(), Ordering::Relaxed)
+        });
     }
 
     pub fn tiled_attention_available(&self) -> bool {

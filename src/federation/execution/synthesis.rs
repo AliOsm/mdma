@@ -15,10 +15,7 @@ use crate::{
         },
         tls::Binding,
     },
-    session::{
-        tracked::Tokens,
-        worker::WorkerEnd,
-    },
+    session::{tracked::Tokens, worker::WorkerEnd},
 };
 use rama::http::grpc::Status;
 use std::{
@@ -307,7 +304,10 @@ impl Synthesis {
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "assembles one joined stream from admission outputs")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "assembles one joined stream from admission outputs"
+)]
 pub(super) fn stream(
     service: Service,
     binding: Binding,

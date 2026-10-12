@@ -1,5 +1,14 @@
-use super::{device::{self, Result, Task}, plan};
-use mdma::{backend::Backend, gguf::GgufModel, inference::{self, Generated}, model::planning, tokenizer::Tokenizer};
+use super::{
+    device::{self, Result, Task},
+    plan,
+};
+use mdma::{
+    backend::Backend,
+    gguf::GgufModel,
+    inference::{self, Generated},
+    model::planning,
+    tokenizer::Tokenizer,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, usage_rs::Args)]
@@ -30,16 +39,28 @@ impl Task for &Args {
         let mut g = GgufModel::open(&self.model)?;
         let tokenizer = Tokenizer::from_gguf(&g).ok_or("unsupported or invalid tokenizer")?;
         let prompt = tokenizer.try_encode(&self.prompt)?.len();
-        let context = prompt.checked_add(self.max_tokens).ok_or("context overflow")?;
-        if self.max_tokens == 0 { return Err("--max-tokens must be positive".into()); }
+        let context = prompt
+            .checked_add(self.max_tokens)
+            .ok_or("context overflow")?;
+        if self.max_tokens == 0 {
+            return Err("--max-tokens must be positive".into());
+        }
         let ram = plan::host_budget(self.ram_bytes)?;
         let reserve = device::mib(self.reserve_mib)?;
         let cpu = self.backend == "cpu";
-        let vram = if cpu || self.gpu_layers.as_deref() == Some("0") { 0 } else { plan::device_budget(&b, self.vram_bytes, ram)? };
+        let vram = if cpu || self.gpu_layers.as_deref() == Some("0") {
+            0
+        } else {
+            plan::device_budget(&b, self.vram_bytes, ram)?
+        };
         let count = if let Some(count) = &self.gpu_layers {
-            if cpu && count != "0" { return Err("--gpu-layers needs a GPU backend; CPU requires zero".into()); }
+            if cpu && count != "0" {
+                return Err("--gpu-layers needs a GPU backend; CPU requires zero".into());
+            }
             let p = plan::placement(&b, &g, count, context, prompt, ram, vram, reserve)?;
-            if !p.fits(ram, vram, reserve)? { return Err("layer placement does not fit RAM/device budgets".into()); }
+            if !p.fits(ram, vram, reserve)? {
+                return Err("layer placement does not fit RAM/device budgets".into());
+            }
             Some(p.gpu_layers)
         } else {
             let e = planning::estimate(&b, &g, context, prompt)?;
@@ -49,13 +70,17 @@ impl Task for &Args {
             }
             None
         };
-        inference::generate_raw(&b, &mut g, &self.prompt, self.max_tokens, count).map_err(Into::into)
+        inference::generate_raw(&b, &mut g, &self.prompt, self.max_tokens, count)
+            .map_err(Into::into)
     }
 }
 
 pub(super) fn run(args: &Args) -> Result<()> {
     let generated = device::dispatch(&args.backend, args)?;
-    if args.json { println!("{}", serde_json::to_string(&generated)?); }
-    else { println!("{}", generated.text); }
+    if args.json {
+        println!("{}", serde_json::to_string(&generated)?);
+    } else {
+        println!("{}", generated.text);
+    }
     Ok(())
 }

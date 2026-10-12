@@ -7,7 +7,11 @@ pub const TEMP_MAX: f32 = 5.0;
 
 /// Clamp to [0.5, 5.0]; non-finite values fall back to 1.0.
 pub fn clamp_temperature(t: f32) -> f32 {
-    if t.is_finite() { t.clamp(TEMP_MIN, TEMP_MAX) } else { 1.0 }
+    if t.is_finite() {
+        t.clamp(TEMP_MIN, TEMP_MAX)
+    } else {
+        1.0
+    }
 }
 
 pub fn temp_bucket(kind: Kind, k: usize) -> String {
@@ -33,7 +37,13 @@ pub fn confidence(p: &[f32]) -> f32 {
     if k < 2 {
         return 1.0;
     }
-    let ent: f64 = -p.iter().map(|&v| { let v = f64::from(v).clamp(1e-12, 1.0); v * v.ln() }).sum::<f64>();
+    let ent: f64 = -p
+        .iter()
+        .map(|&v| {
+            let v = f64::from(v).clamp(1e-12, 1.0);
+            v * v.ln()
+        })
+        .sum::<f64>();
     (1.0 - ent / (k as f64).ln()).clamp(0.0, 1.0) as f32
 }
 
@@ -48,19 +58,45 @@ pub fn answer(q: &Question, p: &[f32], act_probability: f32) -> Value {
     let mut out = Map::new();
     out.insert("type".into(), json!(q.kind.name()));
     out.insert("confidence".into(), json!(round4(confidence(p))));
-    out.insert("action".into(), json!({ "act_probability": round4(act_probability) }));
+    out.insert(
+        "action".into(),
+        json!({ "act_probability": round4(act_probability) }),
+    );
     match q.kind {
         Kind::Choice => {
             let best = (0..k).max_by(|&a, &b| p[a].total_cmp(&p[b])).unwrap_or(0);
             let best = (0..k).find(|&i| p[i] == p[best]).unwrap_or(best);
             out.insert("choice".into(), json!(q.labels[best]));
-            out.insert("probabilities".into(), q.labels.iter().zip(p).map(|(l, &v)| (l.clone(), json!(round4(v)))).collect::<Map<_, _>>().into());
+            out.insert(
+                "probabilities".into(),
+                q.labels
+                    .iter()
+                    .zip(p)
+                    .map(|(l, &v)| (l.clone(), json!(round4(v))))
+                    .collect::<Map<_, _>>()
+                    .into(),
+            );
         }
         Kind::Score => {
             let score: f32 = p.iter().enumerate().map(|(i, &v)| i as f32 * v).sum();
             out.insert("score".into(), json!(round4(score)));
-            out.insert("legend".into(), q.legend.iter().enumerate().map(|(i, l)| (i.to_string(), l.clone())).collect::<Map<_, _>>().into());
-            out.insert("probabilities".into(), p.iter().enumerate().map(|(i, &v)| (i.to_string(), json!(round4(v)))).collect::<Map<_, _>>().into());
+            out.insert(
+                "legend".into(),
+                q.legend
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| (i.to_string(), l.clone()))
+                    .collect::<Map<_, _>>()
+                    .into(),
+            );
+            out.insert(
+                "probabilities".into(),
+                p.iter()
+                    .enumerate()
+                    .map(|(i, &v)| (i.to_string(), json!(round4(v))))
+                    .collect::<Map<_, _>>()
+                    .into(),
+            );
         }
         Kind::Noul => {
             let p_true = p.get(1).copied().unwrap_or(0.0);

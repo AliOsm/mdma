@@ -1,6 +1,9 @@
 // Connection to mdma-serve: the Watch stream and playground runs.
 use mdma::grpc::client::Client;
-use mdma::grpc::{FederationTopology, Host, IntrospectResponse, MemorySnapshot, ModelStatus, ServerSnapshot, WatchRequest};
+use mdma::grpc::{
+    FederationTopology, Host, IntrospectResponse, MemorySnapshot, ModelStatus, ServerSnapshot,
+    WatchRequest,
+};
 use rama::graceful::{ShutdownGuard, WeakShutdownGuard};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -11,7 +14,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-const RECONNECT: std::ops::RangeInclusive<Duration> = Duration::from_secs(1)..=Duration::from_secs(10);
+const RECONNECT: std::ops::RangeInclusive<Duration> =
+    Duration::from_secs(1)..=Duration::from_secs(10);
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub(super) struct Status {
@@ -66,11 +70,21 @@ impl From<ServerSnapshot> for Status {
 
 impl Status {
     fn unreachable(&self, error: String) -> Self {
-        Self { connected: false, error: Some(error), ready: false, state: "unreachable".into(), ..self.clone() }
+        Self {
+            connected: false,
+            error: Some(error),
+            ready: false,
+            state: "unreachable".into(),
+            ..self.clone()
+        }
     }
 
     pub fn model(&self, name: &str) -> Option<&ModelStatus> {
-        let name = if name.is_empty() { self.default_model.as_str() } else { name };
+        let name = if name.is_empty() {
+            self.default_model.as_str()
+        } else {
+            name
+        };
         self.models.iter().find(|m| m.name == name)
     }
 }
@@ -98,21 +112,43 @@ pub(super) struct Run {
 
 impl Drop for Run {
     fn drop(&mut self) {
-        self.upstream.runs.lock().expect("run registry lock").remove(&self.id);
+        self.upstream
+            .runs
+            .lock()
+            .expect("run registry lock")
+            .remove(&self.id);
     }
 }
 
 impl Upstream {
-    pub fn start(client: Client, pin: String, rpc_timeout: Option<Duration>, max_streams: usize, watch_interval: Duration, guard: &ShutdownGuard) -> Arc<Self> {
-        let (tx, rx) = watch::channel(Arc::new(Status { state: "connecting".into(), ..Status::default() }));
+    pub fn start(
+        client: Client,
+        pin: String,
+        rpc_timeout: Option<Duration>,
+        max_streams: usize,
+        watch_interval: Duration,
+        guard: &ShutdownGuard,
+    ) -> Arc<Self> {
+        let (tx, rx) = watch::channel(Arc::new(Status {
+            state: "connecting".into(),
+            ..Status::default()
+        }));
         let upstream = Arc::new(Self {
-            client, pin, rpc_timeout, status: rx,
+            client,
+            pin,
+            rpc_timeout,
+            status: rx,
             leases: super::leases::Leases::default(),
             streams: Arc::new(Semaphore::new(max_streams)),
             runs: Mutex::new(HashMap::new()),
             next_run: AtomicU64::new(1),
         });
-        guard.spawn_task(follow_status(upstream.clone(), tx, watch_interval, guard.clone_weak()));
+        guard.spawn_task(follow_status(
+            upstream.clone(),
+            tx,
+            watch_interval,
+            guard.clone_weak(),
+        ));
         let (keeper, weak) = (upstream.clone(), guard.clone_weak());
         guard.spawn_task(async move { keeper.leases.keep(&keeper.client, weak).await });
         upstream
@@ -123,13 +159,26 @@ impl Upstream {
         let permit = self.streams.clone().try_acquire_owned().ok()?;
         let id = self.next_run.fetch_add(1, Ordering::Relaxed);
         let cancel = CancellationToken::new();
-        self.runs.lock().expect("run registry lock").insert(id, cancel.clone());
-        Some(Run { id, cancel, upstream: self.clone(), _permit: permit })
+        self.runs
+            .lock()
+            .expect("run registry lock")
+            .insert(id, cancel.clone());
+        Some(Run {
+            id,
+            cancel,
+            upstream: self.clone(),
+            _permit: permit,
+        })
     }
 
     /// Returns whether the run was still active.
     pub fn stop(&self, id: u64) -> bool {
-        self.runs.lock().expect("run registry lock").get(&id).inspect(|c| c.cancel()).is_some()
+        self.runs
+            .lock()
+            .expect("run registry lock")
+            .get(&id)
+            .inspect(|c| c.cancel())
+            .is_some()
     }
 
     pub fn snapshot(&self) -> Arc<Status> {
@@ -143,12 +192,18 @@ fn publish(tx: &watch::Sender<Arc<Status>>, next: Status) {
     if next.connected != last.connected || next.error != last.error {
         match &next.error {
             Some(error) => eprintln!("mdma-web: server unreachable: {error}"),
-            None => eprintln!("mdma-web: connected to server (state={}, {} models)", next.state, next.models.len()),
+            None => eprintln!(
+                "mdma-web: connected to server (state={}, {} models)",
+                next.state,
+                next.models.len()
+            ),
         }
     }
     tx.send_if_modified(|current| {
         let changed = **current != next;
-        if changed { *current = Arc::new(next); }
+        if changed {
+            *current = Arc::new(next);
+        }
         changed
     });
 }
@@ -163,7 +218,12 @@ pub(super) fn describe(status: &rama::http::grpc::Status) -> String {
 }
 
 /// Follows `Watch`, reconnecting with backoff.
-async fn follow_status(upstream: Arc<Upstream>, tx: watch::Sender<Arc<Status>>, every: Duration, guard: WeakShutdownGuard) {
+async fn follow_status(
+    upstream: Arc<Upstream>,
+    tx: watch::Sender<Arc<Status>>,
+    every: Duration,
+    guard: WeakShutdownGuard,
+) {
     let interval_ms = u32::try_from(every.as_millis()).unwrap_or(u32::MAX);
     let mut backoff = *RECONNECT.start();
     loop {

@@ -15,7 +15,13 @@ pub struct KvCache<B: Backend> {
 }
 
 impl<B: Backend> KvCache<B> {
-    pub fn new(backend: &B, n_layers: usize, n_kv_heads: usize, n_ctx: usize, head_dim: usize) -> Result<Self> {
+    pub fn new(
+        backend: &B,
+        n_layers: usize,
+        n_kv_heads: usize,
+        n_ctx: usize,
+        head_dim: usize,
+    ) -> Result<Self> {
         let width = product(&[n_kv_heads, head_dim])?;
         Self::with_geometry(backend, &vec![width; n_layers], n_ctx)
     }
@@ -26,15 +32,27 @@ impl<B: Backend> KvCache<B> {
     }
 
     pub(crate) fn allocation_bytes(backend: &B, widths: &[usize], n_ctx: usize) -> Result<usize> {
-        product(&[sum(widths.iter().copied())?, backend.kv_elem_bytes(), n_ctx, 2])
+        product(&[
+            sum(widths.iter().copied())?,
+            backend.kv_elem_bytes(),
+            n_ctx,
+            2,
+        ])
     }
 
-    pub(crate) fn with_geometry_reserved(backend: &B, widths: &[usize], n_ctx: usize, memory: Option<Reservation>) -> Result<Self> {
+    pub(crate) fn with_geometry_reserved(
+        backend: &B,
+        widths: &[usize],
+        n_ctx: usize,
+        memory: Option<Reservation>,
+    ) -> Result<Self> {
         let elem_bytes = backend.kv_elem_bytes();
         let mut k = Vec::with_capacity(widths.len());
         let mut v = Vec::with_capacity(widths.len());
         if widths.is_empty() || widths.contains(&0) {
-            return Err(crate::backend::Error::ShapeMismatch("KV layer geometry must be nonempty".into()));
+            return Err(crate::backend::Error::ShapeMismatch(
+                "KV layer geometry must be nonempty".into(),
+            ));
         }
         Self::allocation_bytes(backend, widths, n_ctx)?;
         for &width in widths {
@@ -42,7 +60,15 @@ impl<B: Backend> KvCache<B> {
             k.push(backend.alloc(layer_bytes, Pool::Kv)?);
             v.push(backend.alloc(layer_bytes, Pool::Kv)?);
         }
-        Ok(Self { k, v, row_elems: widths.to_vec(), n_ctx, elem_bytes, len: 0, _memory: memory })
+        Ok(Self {
+            k,
+            v,
+            row_elems: widths.to_vec(),
+            n_ctx,
+            elem_bytes,
+            len: 0,
+            _memory: memory,
+        })
     }
 
     pub fn len(&self) -> usize {
@@ -73,18 +99,54 @@ impl<B: Backend> KvCache<B> {
     /// without a host round trip. Caller drives layer order and calls
     /// `set_len` once after every layer has been written for this
     /// position range. `n_rows == 1` is decode; prefill passes more.
-    pub fn write(&mut self, backend: &B, layer: usize, pos: usize, k: &B::Buf, v: &B::Buf, n_rows: usize) -> Result<()> {
+    pub fn write(
+        &mut self,
+        backend: &B,
+        layer: usize,
+        pos: usize,
+        k: &B::Buf,
+        v: &B::Buf,
+        n_rows: usize,
+    ) -> Result<()> {
         let row_elems = self.row_elems[layer];
-        backend.kv_write(k, v, &mut self.k[layer], &mut self.v[layer], pos * row_elems, n_rows * row_elems)
+        backend.kv_write(
+            k,
+            v,
+            &mut self.k[layer],
+            &mut self.v[layer],
+            pos * row_elems,
+            n_rows * row_elems,
+        )
     }
 
     /// `write` with the RoPE rotation of `q`/`k` folded in: rotates `q` in
     /// place and stores the rotated `k` and `v` rows at `pos`. `k` may not
     /// hold the rotated rows afterwards.
     #[allow(clippy::too_many_arguments)]
-    pub fn rope_write(&mut self, backend: &B, layer: usize, pos: usize, q: &mut B::Buf, k: &mut B::Buf, v: &B::Buf, n_rows: usize, spec: &RopeSpec) -> Result<()> {
+    pub fn rope_write(
+        &mut self,
+        backend: &B,
+        layer: usize,
+        pos: usize,
+        q: &mut B::Buf,
+        k: &mut B::Buf,
+        v: &B::Buf,
+        n_rows: usize,
+        spec: &RopeSpec,
+    ) -> Result<()> {
         let row_elems = self.row_elems[layer];
-        backend.rope_kv_write(q, k, v, &mut self.k[layer], &mut self.v[layer], pos * row_elems, pos as u32, n_rows, spec, n_rows * row_elems)
+        backend.rope_kv_write(
+            q,
+            k,
+            v,
+            &mut self.k[layer],
+            &mut self.v[layer],
+            pos * row_elems,
+            pos as u32,
+            n_rows,
+            spec,
+            n_rows * row_elems,
+        )
     }
 
     pub fn set_len(&mut self, len: usize) {
@@ -92,7 +154,11 @@ impl<B: Backend> KvCache<B> {
     }
 
     pub fn view(&self, layer: usize) -> KvView<'_, B::Buf> {
-        KvView { k: &self.k[layer], v: &self.v[layer], len: self.len }
+        KvView {
+            k: &self.k[layer],
+            v: &self.v[layer],
+            len: self.len,
+        }
     }
 }
 

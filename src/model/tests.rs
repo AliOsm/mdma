@@ -19,13 +19,17 @@ fn matches_llama_cpp_greedy_continuation() {
     let backend = CpuBackend;
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Model::load(&backend, &mut gguf).expect("load model");
-    let mut kv = model.new_kv_cache(&backend, model.config().n_ctx).expect("new kv cache");
+    let mut kv = model
+        .new_kv_cache(&backend, model.config().n_ctx)
+        .expect("new kv cache");
     let mut ws = model.alloc_workspace(&backend, 1).expect("alloc workspace");
 
     let mut pos: u32 = 0;
     let mut logits = Vec::new();
     for &tok in PROMPT {
-        logits = model.forward(&backend, &mut kv, &mut ws, tok, pos).expect("forward");
+        logits = model
+            .forward(&backend, &mut kv, &mut ws, tok, pos)
+            .expect("forward");
         pos += 1;
     }
 
@@ -33,7 +37,9 @@ fn matches_llama_cpp_greedy_continuation() {
     let mut next = greedy(&logits);
     for _ in 0..EXPECTED.len() {
         generated.push(next);
-        logits = model.forward(&backend, &mut kv, &mut ws, next, pos).expect("forward");
+        logits = model
+            .forward(&backend, &mut kv, &mut ws, next, pos)
+            .expect("forward");
         pos += 1;
         next = greedy(&logits);
     }
@@ -47,16 +53,26 @@ fn prefill_matches_llama_cpp_greedy_continuation() {
     let backend = CpuBackend;
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Model::load(&backend, &mut gguf).expect("load model");
-    let mut kv = model.new_kv_cache(&backend, model.config().n_ctx).expect("new kv cache");
-    let mut prefill_ws = model.alloc_workspace(&backend, PROMPT.len()).expect("alloc prefill workspace");
-    let mut ws = model.alloc_workspace(&backend, 1).expect("alloc decode workspace");
+    let mut kv = model
+        .new_kv_cache(&backend, model.config().n_ctx)
+        .expect("new kv cache");
+    let mut prefill_ws = model
+        .alloc_workspace(&backend, PROMPT.len())
+        .expect("alloc prefill workspace");
+    let mut ws = model
+        .alloc_workspace(&backend, 1)
+        .expect("alloc decode workspace");
 
-    let mut logits = model.prefill(&backend, &mut kv, &mut prefill_ws, PROMPT, 0).expect("prefill");
+    let mut logits = model
+        .prefill(&backend, &mut kv, &mut prefill_ws, PROMPT, 0)
+        .expect("prefill");
     let mut generated = Vec::new();
     let mut next = greedy(&logits);
     for pos in (PROMPT.len() as u32..).take(EXPECTED.len()) {
         generated.push(next);
-        logits = model.forward(&backend, &mut kv, &mut ws, next, pos).expect("forward");
+        logits = model
+            .forward(&backend, &mut kv, &mut ws, next, pos)
+            .expect("forward");
         next = greedy(&logits);
     }
 

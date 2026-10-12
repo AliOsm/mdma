@@ -1,4 +1,7 @@
-use super::{device::{self, Result, Task}, plan};
+use super::{
+    device::{self, Result, Task},
+    plan,
+};
 use mdma::{backend::Backend, memory_bench};
 
 #[derive(Debug, usage_rs::Args)]
@@ -28,18 +31,34 @@ impl Task for &Args {
         memory_bench::validate(bytes, self.iterations)?;
         let ram = plan::host_budget(self.ram_bytes)?;
         let cpu = self.backend == "cpu";
-        let reserve = if cpu { 0 } else { device::mib(self.reserve_mib)? };
+        let reserve = if cpu {
+            0
+        } else {
+            device::mib(self.reserve_mib)?
+        };
         // Reserve one possible staging buffer in each domain. Backends choose
         // where staging lives; unified memory intentionally stays conservative.
         let host = plan::sum([bytes, bytes, if cpu { 0 } else { bytes }])?;
-        let gpu = if cpu { 0 } else { plan::sum([bytes, bytes, bytes])? };
-        let host_need = if b.unified_memory() { plan::sum([host, gpu, reserve])? } else { host };
-        if host_need > ram { return Err("memory bench buffers exceed available RAM budget".into()); }
+        let gpu = if cpu {
+            0
+        } else {
+            plan::sum([bytes, bytes, bytes])?
+        };
+        let host_need = if b.unified_memory() {
+            plan::sum([host, gpu, reserve])?
+        } else {
+            host
+        };
+        if host_need > ram {
+            return Err("memory bench buffers exceed available RAM budget".into());
+        }
         if !cpu && plan::sum([gpu, reserve])? > plan::device_budget(&b, self.vram_bytes, ram)? {
             return Err("memory bench buffers exceed live device budget".into());
         }
         let mut measurements = vec![memory_bench::host(bytes, self.iterations)?];
-        if !cpu { measurements.extend(memory_bench::device(&b, bytes, self.iterations)?); }
+        if !cpu {
+            measurements.extend(memory_bench::device(&b, bytes, self.iterations)?);
+        }
         Ok(serde_json::json!({
             "schema_version": 1, "backend": self.backend, "device": b.device_label(),
             "unified_memory": b.unified_memory(), "measurements": measurements,
@@ -52,12 +71,20 @@ impl Task for &Args {
 
 pub(super) fn run(args: &Args) -> Result<()> {
     let report = device::dispatch(&args.backend, args)?;
-    if args.json { println!("{}", serde_json::to_string_pretty(&report)?); }
-    else {
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
         println!("{}: {}", args.backend, report["device"]);
-        for row in report["measurements"].as_array().ok_or("bench report has no measurements")? {
-            let operation = row["operation"].as_str().ok_or("measurement without an operation")?;
-            let rate = row["payload_gb_per_second"].as_f64().ok_or("measurement without a payload rate")?;
+        for row in report["measurements"]
+            .as_array()
+            .ok_or("bench report has no measurements")?
+        {
+            let operation = row["operation"]
+                .as_str()
+                .ok_or("measurement without an operation")?;
+            let rate = row["payload_gb_per_second"]
+                .as_f64()
+                .ok_or("measurement without a payload rate")?;
             println!("{operation}: {rate:.2} GB/s (payload)");
         }
         println!("Cache effects and staging are included; unified GPU memory is shared RAM.");

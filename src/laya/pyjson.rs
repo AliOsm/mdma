@@ -46,7 +46,9 @@ fn write_number(out: &mut String, n: &serde_json::Number) {
         // Number cannot hold NaN/infinity. Python needs a sign on exponents.
         let s = n.to_string();
         match s.split_once('e') {
-            Some((m, e)) if !e.starts_with(['-', '+']) => write!(out, "{m}e+{e}").expect("writing to a String cannot fail"),
+            Some((m, e)) if !e.starts_with(['-', '+']) => {
+                write!(out, "{m}e+{e}").expect("writing to a String cannot fail");
+            }
             _ => out.push_str(&s),
         }
     } else {
@@ -65,7 +67,9 @@ fn write_str(out: &mut String, s: &str, ensure_ascii: bool) {
             '\t' => out.push_str("\\t"),
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail"),
+            c if (c as u32) < 0x20 => {
+                write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
+            }
             c if ensure_ascii && !c.is_ascii() => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {

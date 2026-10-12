@@ -16,34 +16,72 @@ fn jitter_and_failure_backoff_are_bounded_and_reset_after_success() {
         }
         entry.finish(true, now).unwrap();
         assert_eq!(entry.failures, 0);
-        assert!((Duration::from_secs(18)..=Duration::from_secs(22)).contains(&entry.due.duration_since(now)));
+        assert!(
+            (Duration::from_secs(18)..=Duration::from_secs(22))
+                .contains(&entry.due.duration_since(now))
+        );
     }
 }
 
 #[test]
 fn synchronize_never_enrolls_staged_suspended_or_revoked_peers() {
     let fixture = Fixture::new();
-    let mut staged = fixture.store.snapshot().unwrap().peer("remote.mdma.test").unwrap().policy.clone();
+    let mut staged = fixture
+        .store
+        .snapshot()
+        .unwrap()
+        .peer("remote.mdma.test")
+        .unwrap()
+        .policy
+        .clone();
     staged.server_id = "staged.mdma.test".into();
     fixture.store.stage(staged).unwrap();
     let mut schedule = BTreeMap::new();
-    synchronize(&mut schedule, &fixture.store.snapshot().unwrap(), Instant::now()).unwrap();
-    assert_eq!(schedule.keys().cloned().collect::<Vec<_>>(), ["remote.mdma.test"]);
+    synchronize(
+        &mut schedule,
+        &fixture.store.snapshot().unwrap(),
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        schedule.keys().cloned().collect::<Vec<_>>(),
+        ["remote.mdma.test"]
+    );
     let due = schedule["remote.mdma.test"].due;
-    synchronize(&mut schedule, &fixture.store.snapshot().unwrap(), Instant::now()).unwrap();
+    synchronize(
+        &mut schedule,
+        &fixture.store.snapshot().unwrap(),
+        Instant::now(),
+    )
+    .unwrap();
     assert_eq!(schedule["remote.mdma.test"].due, due);
     fixture.store.suspend("remote.mdma.test").unwrap();
-    synchronize(&mut schedule, &fixture.store.snapshot().unwrap(), Instant::now()).unwrap();
+    synchronize(
+        &mut schedule,
+        &fixture.store.snapshot().unwrap(),
+        Instant::now(),
+    )
+    .unwrap();
     assert!(schedule.is_empty());
 }
 
 #[test]
 fn scheduling_is_global_bounded_single_flight_and_earliest_due_first() {
     let now = Instant::now();
-    let mut schedule: BTreeMap<_, _> = (0..128).map(|i| (
-        format!("peer-{i:03}.mdma.test"),
-        Schedule { due: now.checked_sub(Duration::from_millis(i)).expect("clock past test offsets"), failures: 0, running: false },
-    )).collect();
+    let mut schedule: BTreeMap<_, _> = (0..128)
+        .map(|i| {
+            (
+                format!("peer-{i:03}.mdma.test"),
+                Schedule {
+                    due: now
+                        .checked_sub(Duration::from_millis(i))
+                        .expect("clock past test offsets"),
+                    failures: 0,
+                    running: false,
+                },
+            )
+        })
+        .collect();
     assert!(due_peers(&mut schedule, now, 0).is_empty());
     let first = due_peers(&mut schedule, now, 8);
     assert_eq!(first.len(), MAX_INFLIGHT);
@@ -53,5 +91,8 @@ fn scheduling_is_global_bounded_single_flight_and_earliest_due_first() {
     assert_eq!(next.len(), 3);
     assert!(next.iter().all(|id| !first.contains(id)));
     // Even a caller supplying an oversized budget cannot exceed the ceiling.
-    assert_eq!(due_peers(&mut schedule, now, usize::MAX).len(), MAX_INFLIGHT);
+    assert_eq!(
+        due_peers(&mut schedule, now, usize::MAX).len(),
+        MAX_INFLIGHT
+    );
 }

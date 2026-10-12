@@ -12,7 +12,13 @@ pub struct SamplerConfig {
 
 impl Default for SamplerConfig {
     fn default() -> Self {
-        Self { temperature: 0.8, top_p: 0.95, min_p: 0.05, repetition_penalty: 1.1, repetition_window: 64 }
+        Self {
+            temperature: 0.8,
+            top_p: 0.95,
+            min_p: 0.05,
+            repetition_penalty: 1.1,
+            repetition_window: 64,
+        }
     }
 }
 
@@ -27,7 +33,12 @@ impl Sampler {
 
     pub fn sample(&self, logits: &[f32], history: &[u32], rng: &mut impl RngExt) -> u32 {
         let mut adjusted = logits.to_vec();
-        apply_repetition_penalty(&mut adjusted, history, self.config.repetition_penalty, self.config.repetition_window);
+        apply_repetition_penalty(
+            &mut adjusted,
+            history,
+            self.config.repetition_penalty,
+            self.config.repetition_window,
+        );
 
         if self.config.temperature <= 0.0 {
             return argmax(&adjusted);
@@ -36,8 +47,11 @@ impl Sampler {
             *l /= self.config.temperature;
         }
 
-        let mut ranked: Vec<(u32, f32)> =
-            softmax(&adjusted).into_iter().enumerate().map(|(i, p)| (i as u32, p)).collect();
+        let mut ranked: Vec<(u32, f32)> = softmax(&adjusted)
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, p))
+            .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         apply_min_p(&mut ranked, self.config.min_p);

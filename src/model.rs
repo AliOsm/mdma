@@ -5,12 +5,12 @@ use crate::kv_cache::KvCache;
 use crate::memory::{MemoryCategory, NativeMemoryBudget, Reservation};
 use std::sync::Arc;
 
-pub mod decoder;
 pub mod arch;
-pub mod weights;
-pub mod planning;
+pub mod decoder;
 pub mod hybrid;
 pub(crate) mod layers;
+pub mod planning;
+pub mod weights;
 use arch::{Decoder, gemma4, glm4, llama, qwen};
 pub(crate) mod memory;
 mod preflight;
@@ -69,14 +69,24 @@ pub struct Model<B: Backend> {
     memory: Option<Reservation>,
 }
 
-fn load_weight<B: Backend>(backend: &B, gguf: &mut GgufModel, name: &str) -> Result<QWeight<B::Buf>> {
+fn load_weight<B: Backend>(
+    backend: &B,
+    gguf: &mut GgufModel,
+    name: &str,
+) -> Result<QWeight<B::Buf>> {
     let desc = gguf
         .tensor_desc(name)
         .ok_or_else(|| Error::ShapeMismatch(format!("missing tensor {name}")))?
         .clone();
-    let (raw, layout) = gguf.read_weight_bytes(name).map_err(|e| Error::ShapeMismatch(e.to_string()))?;
+    let (raw, layout) = gguf
+        .read_weight_bytes(name)
+        .map_err(|e| Error::ShapeMismatch(e.to_string()))?;
     let buf = backend.upload_weight(&raw, layout)?;
-    Ok(QWeight { dtype: desc.dtype, shape: desc.shape, buf })
+    Ok(QWeight {
+        dtype: desc.dtype,
+        shape: desc.shape,
+        buf,
+    })
 }
 
 fn load_norm<B: Backend>(backend: &B, gguf: &mut GgufModel, name: &str) -> Result<B::Buf> {
@@ -85,9 +95,14 @@ fn load_norm<B: Backend>(backend: &B, gguf: &mut GgufModel, name: &str) -> Resul
         .ok_or_else(|| Error::ShapeMismatch(format!("missing tensor {name}")))?
         .clone();
     if desc.dtype != GgmlDType::F32 {
-        return Err(Error::ShapeMismatch(format!("{name}: expected F32 norm weight, got {:?}", desc.dtype)));
+        return Err(Error::ShapeMismatch(format!(
+            "{name}: expected F32 norm weight, got {:?}",
+            desc.dtype
+        )));
     }
-    let raw = gguf.read_tensor_bytes(name).map_err(|e| Error::ShapeMismatch(e.to_string()))?;
+    let raw = gguf
+        .read_tensor_bytes(name)
+        .map_err(|e| Error::ShapeMismatch(e.to_string()))?;
     let mut buf = backend.alloc(raw.len(), Pool::Weights)?;
     backend.upload(&mut buf, 0, &raw)?;
     Ok(buf)
@@ -111,20 +126,32 @@ impl<B: Backend> Model<B> {
     }
 
     /// Reserve native weight bytes before materializing/uploading tensors (after cache lookup).
-    pub fn load_with_budget(backend: &B, gguf: &mut GgufModel, budget: &NativeMemoryBudget) -> Result<Self> {
+    pub fn load_with_budget(
+        backend: &B,
+        gguf: &mut GgufModel,
+        budget: &NativeMemoryBudget,
+    ) -> Result<Self> {
         Self::prepare_source(backend, gguf)?;
         let memory = budget.reserve(memory::weight_bytes(gguf)?, MemoryCategory::Weights)?;
         Self::load_reserved(backend, gguf, Some(memory))
     }
 
-    pub(crate) fn load_reserved(backend: &B, gguf: &mut GgufModel, memory: Option<Reservation>) -> Result<Self> {
+    pub(crate) fn load_reserved(
+        backend: &B,
+        gguf: &mut GgufModel,
+        memory: Option<Reservation>,
+    ) -> Result<Self> {
         let config = Self::validate(backend, gguf)?;
         let mut model = match gguf.metadata_str("general.architecture") {
             Some("llama" | llama::ARCH) => llama::Llama::load(backend, gguf, config)?,
             Some("gemma4") => gemma4::Gemma::load(backend, gguf)?,
             Some("glm4") => glm4::Glm4::load(backend, gguf, config)?,
             Some(arch) if qwen::is_arch(arch) => qwen::Qwen::load(backend, gguf, config)?,
-            _ => return Err(Error::UnsupportedModel("unvalidated decoder architecture".into())),
+            _ => {
+                return Err(Error::UnsupportedModel(
+                    "unvalidated decoder architecture".into(),
+                ));
+            }
         };
         model.memory = memory;
         gguf.check_cache_source()?;
@@ -153,11 +180,22 @@ impl<B: Backend> Model<B> {
         self.new_kv_cache_reserved(backend, n_ctx, None)
     }
 
-    pub(crate) fn new_kv_cache_reserved(&self, backend: &B, n_ctx: usize, memory: Option<Reservation>) -> Result<KvCache<B>> {
+    pub(crate) fn new_kv_cache_reserved(
+        &self,
+        backend: &B,
+        n_ctx: usize,
+        memory: Option<Reservation>,
+    ) -> Result<KvCache<B>> {
         let n_ctx = n_ctx.min(self.config.n_ctx);
         let memory = match (memory, self.memory_budget()) {
-            (Some(memory), Some(budget)) if memory.covers(budget, self.kv_bytes(backend, n_ctx)?) => Some(memory),
-            (None, Some(budget)) => Some(budget.reserve(self.kv_bytes(backend, n_ctx)?, MemoryCategory::Kv)?),
+            (Some(memory), Some(budget))
+                if memory.covers(budget, self.kv_bytes(backend, n_ctx)?) =>
+            {
+                Some(memory)
+            }
+            (None, Some(budget)) => {
+                Some(budget.reserve(self.kv_bytes(backend, n_ctx)?, MemoryCategory::Kv)?)
+            }
             (None, None) => None,
             _ => return Err(Error::ShapeMismatch("invalid KV reservation".into())),
         };
@@ -171,13 +209,24 @@ impl<B: Backend> Model<B> {
         self.alloc_workspace_reserved(backend, n_tokens, None)
     }
 
-    pub(crate) fn alloc_workspace_reserved(&self, backend: &B, n_tokens: usize, memory: Option<&Arc<Reservation>>) -> Result<Workspace<B>> {
+    pub(crate) fn alloc_workspace_reserved(
+        &self,
+        backend: &B,
+        n_tokens: usize,
+        memory: Option<&Arc<Reservation>>,
+    ) -> Result<Workspace<B>> {
         let bytes = self.workspace_bytes(n_tokens)?;
-        let batch = if self.sequential_prefill() { 1 } else { n_tokens };
+        let batch = if self.sequential_prefill() {
+            1
+        } else {
+            n_tokens
+        };
         let sizes = self.common_workspace_sizes(batch)?;
         let memory = match (memory, self.memory_budget()) {
             (Some(memory), Some(budget)) if memory.covers(budget, bytes) => Some(memory.clone()),
-            (None, Some(budget)) => Some(Arc::new(budget.reserve(bytes, MemoryCategory::Workspace)?)),
+            (None, Some(budget)) => {
+                Some(Arc::new(budget.reserve(bytes, MemoryCategory::Workspace)?))
+            }
             (None, None) => None,
             _ => return Err(Error::ShapeMismatch("invalid workspace reservation".into())),
         };
@@ -194,8 +243,13 @@ impl<B: Backend> Model<B> {
             Decoder::Glm4(g) => Some(g.workspace(backend, &self.config)?),
             _ => None,
         };
-        #[expect(clippy::used_underscore_binding, reason = "the reservation is held for its Drop")]
-        { workspace._memory = memory; }
+        #[expect(
+            clippy::used_underscore_binding,
+            reason = "the reservation is held for its Drop"
+        )]
+        {
+            workspace._memory = memory;
+        }
         Ok(workspace)
     }
 
@@ -203,19 +257,43 @@ impl<B: Backend> Model<B> {
     /// place. Returns vocab-sized logits for the next token. Every
     /// intermediate buffer comes from `ws` - this never calls
     /// `backend.alloc()` itself.
-    pub fn forward(&self, backend: &B, kv: &mut KvCache<B>, ws: &mut Workspace<B>, token_id: u32, pos: u32) -> Result<Vec<f32>> {
+    pub fn forward(
+        &self,
+        backend: &B,
+        kv: &mut KvCache<B>,
+        ws: &mut Workspace<B>,
+        token_id: u32,
+        pos: u32,
+    ) -> Result<Vec<f32>> {
         self.forward_device(backend, kv, ws, token_id, pos)?;
         self.download_logits(backend, ws)
     }
 
-    pub(crate) fn validate_decode(&self, kv: &KvCache<B>, ws: &Workspace<B>, token: u32, pos: u32) -> Result<()> {
-        if ws.n_tokens != 1 || token as usize >= self.token_embd.shape[0] || pos as usize >= kv.capacity() || pos as usize > kv.len() {
+    pub(crate) fn validate_decode(
+        &self,
+        kv: &KvCache<B>,
+        ws: &Workspace<B>,
+        token: u32,
+        pos: u32,
+    ) -> Result<()> {
+        if ws.n_tokens != 1
+            || token as usize >= self.token_embd.shape[0]
+            || pos as usize >= kv.capacity()
+            || pos as usize > kv.len()
+        {
             return Err(Error::ShapeMismatch("decode requires a T=1 workspace, valid token and initialized KV prefix within capacity".into()));
         }
         Ok(())
     }
 
-    pub(crate) fn forward_device(&self, backend: &B, kv: &mut KvCache<B>, ws: &mut Workspace<B>, token_id: u32, pos: u32) -> Result<()> {
+    pub(crate) fn forward_device(
+        &self,
+        backend: &B,
+        kv: &mut KvCache<B>,
+        ws: &mut Workspace<B>,
+        token_id: u32,
+        pos: u32,
+    ) -> Result<()> {
         self.validate_decode(kv, ws, token_id, pos)?;
         match &self.architecture {
             Decoder::Gemma4(gemma) => {
@@ -247,16 +325,36 @@ impl<B: Backend> Model<B> {
     /// Process a nonempty batch at `pos`, updating every layer's KV rows.
     /// `ws` must be sized for `tokens.len()` and the preceding KV prefix initialized.
     /// Returns only the last position's logits.
-    pub fn prefill(&self, backend: &B, kv: &mut KvCache<B>, ws: &mut Workspace<B>, tokens: &[u32], pos: u32) -> Result<Vec<f32>> {
+    pub fn prefill(
+        &self,
+        backend: &B,
+        kv: &mut KvCache<B>,
+        ws: &mut Workspace<B>,
+        tokens: &[u32],
+        pos: u32,
+    ) -> Result<Vec<f32>> {
         let n_tokens = tokens.len();
         if n_tokens == 0 {
-            return Err(Error::ShapeMismatch("prefill: tokens must be non-empty".into()));
+            return Err(Error::ShapeMismatch(
+                "prefill: tokens must be non-empty".into(),
+            ));
         }
-        if ws.n_tokens != n_tokens || pos as usize > kv.len() || n_tokens > kv.capacity().saturating_sub(pos as usize) {
-            return Err(Error::ShapeMismatch("prefill requires a matching workspace and initialized KV prefix within capacity".into()));
+        if ws.n_tokens != n_tokens
+            || pos as usize > kv.len()
+            || n_tokens > kv.capacity().saturating_sub(pos as usize)
+        {
+            return Err(Error::ShapeMismatch(
+                "prefill requires a matching workspace and initialized KV prefix within capacity"
+                    .into(),
+            ));
         }
-        if tokens.iter().any(|&id| id as usize >= self.token_embd.shape[0]) {
-            return Err(Error::ShapeMismatch("prefill token outside vocabulary".into()));
+        if tokens
+            .iter()
+            .any(|&id| id as usize >= self.token_embd.shape[0])
+        {
+            return Err(Error::ShapeMismatch(
+                "prefill token outside vocabulary".into(),
+            ));
         }
         match &self.architecture {
             Decoder::Gemma4(gemma) => {
@@ -310,16 +408,19 @@ impl<B: Backend> Workspace<B> {
             act: backend.alloc(sizes[10], Pool::Scratch)?,
             last_row: backend.alloc(sizes[11], Pool::Scratch)?,
             logits: backend.alloc(sizes[12], Pool::Scratch)?,
-            gemma: None, qwen: None, glm: None, _memory: None,
+            gemma: None,
+            qwen: None,
+            glm: None,
+            _memory: None,
         })
     }
 }
 
 #[cfg(test)]
-pub(crate) mod tests;
+mod checkpoint_tests;
 #[cfg(test)]
 pub(crate) mod compat_tests;
 #[cfg(test)]
-mod checkpoint_tests;
-#[cfg(test)]
 mod long_context_tests;
+#[cfg(test)]
+pub(crate) mod tests;

@@ -117,7 +117,9 @@ where
         if io.extensions().contains::<Caller>() || io.extensions().contains::<ClientSpki>() {
             return Err("preexisting local routing principal".into());
         }
-        if let Some(spki) = connection.peer_certificates().and_then(<[_]>::first)
+        if let Some(spki) = connection
+            .peer_certificates()
+            .and_then(<[_]>::first)
             .and_then(|leaf| certificate_spki_sha256(leaf).ok())
         {
             io.extensions().insert(ClientSpki(spki));

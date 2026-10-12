@@ -8,7 +8,11 @@ fn published_crate_keeps_runtime_files_without_test_payloads() {
         .args(["package", "--list", "--allow-dirty", "--offline"])
         .output()
         .expect("run cargo package --list");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 package paths");
     let files: Vec<_> = stdout.lines().collect();
     for required in [
@@ -61,19 +65,27 @@ fn published_crate_keeps_runtime_files_without_test_payloads() {
         "src/backend/vulkan/kernels/attn_tile.comp",
         "LICENSE-llama.cpp",
     ] {
-        assert!(files.contains(&required), "missing runtime file: {required}");
+        assert!(
+            files.contains(&required),
+            "missing runtime file: {required}"
+        );
     }
     for file in files {
         assert!(
-            !file.split('/').any(|part| matches!(part, ".tmp" | "tests" | "benches" | "fixtures" | "test_support" | "tools"))
-                && !file.ends_with("/tests.rs")
+            !file.split('/').any(|part| matches!(
+                part,
+                ".tmp" | "tests" | "benches" | "fixtures" | "test_support" | "tools"
+            )) && !file.ends_with("/tests.rs")
                 && !file.ends_with("_tests.rs")
                 && !file.ends_with("/test_support.rs")
                 && !file.starts_with("doc/")
                 && !file.starts_with("deploy/"),
             "test/development file packaged: {file}"
         );
-        if Path::new(file).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs")) {
+        if Path::new(file)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+        {
             let source = std::fs::read_to_string(root.join(file)).expect("read packaged source");
             assert!(
                 !source.contains("#[test]") && !source.contains("#[tokio::test"),

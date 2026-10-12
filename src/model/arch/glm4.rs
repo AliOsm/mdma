@@ -39,7 +39,9 @@ impl<B: Backend> Glm4<B> {
         let output_norm = load_norm(b, g, "output_norm.weight")?;
         let output = if g.tensor_desc("output.weight").is_some() {
             Some(load_weight(b, g, "output.weight")?)
-        } else { None };
+        } else {
+            None
+        };
         let mut layers = Vec::with_capacity(c.n_layers);
         for i in 0..c.n_layers {
             let name = |s: &str| format!("blk.{i}.{s}.weight");
@@ -57,8 +59,12 @@ impl<B: Backend> Glm4<B> {
             });
         }
         Ok(Model {
-            config: c, token_embd, output_norm, output,
-            architecture: Decoder::Glm4(Self { layers, rotary_dim }), memory: None,
+            config: c,
+            token_embd,
+            output_norm,
+            output,
+            architecture: Decoder::Glm4(Self { layers, rotary_dim }),
+            memory: None,
         })
     }
 
@@ -66,21 +72,42 @@ impl<B: Backend> Glm4<B> {
         product(&[2, c.n_ff, size_of::<f32>()])
     }
 
-    #[expect(clippy::unused_self, reason = "architectures share one workspace signature")]
+    #[expect(
+        clippy::unused_self,
+        reason = "architectures share one workspace signature"
+    )]
     pub fn workspace(&self, b: &B, c: &ModelConfig) -> Result<Workspace<B>> {
-        Ok(Workspace { packed_ffn: b.alloc(Self::workspace_bytes(c)?, Pool::Scratch)? })
+        Ok(Workspace {
+            packed_ffn: b.alloc(Self::workspace_bytes(c)?, Pool::Scratch)?,
+        })
     }
 
-    pub fn run(&self, b: &B, model: &Model<B>, kv: &mut KvCache<B>,
-        ws: &mut crate::model::Workspace<B>, token: u32, pos: u32) -> Result<()> {
+    pub fn run(
+        &self,
+        b: &B,
+        model: &Model<B>,
+        kv: &mut KvCache<B>,
+        ws: &mut crate::model::Workspace<B>,
+        token: u32,
+        pos: u32,
+    ) -> Result<()> {
         let c = &model.config;
         let extra = ws.glm.as_mut().expect("GLM workspace was allocated");
-        let rope = RopeSpec { head_dim: c.head_dim, theta: c.rope_theta };
-        let attn = AttnSpec { head_dim: c.head_dim, n_q_heads: c.n_heads, n_kv_heads: c.n_kv_heads };
+        let rope = RopeSpec {
+            head_dim: c.head_dim,
+            theta: c.rope_theta,
+        };
+        let attn = AttnSpec {
+            head_dim: c.head_dim,
+            n_q_heads: c.n_heads,
+            n_kv_heads: c.n_kv_heads,
+        };
         b.embed(&model.token_embd, &[token], &mut ws.x)?;
         for (i, l) in self.layers.iter().enumerate() {
             b.rmsnorm(&l.attn_norm, &ws.x, &mut ws.normed, c.rms_eps)?;
-            b.qmatmul_qkv(&l.q, &l.k, &l.v, &ws.normed, &mut ws.q, &mut ws.k, &mut ws.v)?;
+            b.qmatmul_qkv(
+                &l.q, &l.k, &l.v, &ws.normed, &mut ws.q, &mut ws.k, &mut ws.v,
+            )?;
             b.rope_partial_interleaved(&mut ws.q, pos, &rope, self.rotary_dim)?;
             b.rope_partial_interleaved(&mut ws.k, pos, &rope, self.rotary_dim)?;
             kv.write(b, i, pos as usize, &ws.k, &ws.v, 1)?;

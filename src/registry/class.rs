@@ -14,7 +14,12 @@ pub enum Class {
 }
 
 impl Class {
-    pub const ALL: [Self; 4] = [Self::Generative, Self::Decision, Self::Embedding, Self::Reranker];
+    pub const ALL: [Self; 4] = [
+        Self::Generative,
+        Self::Decision,
+        Self::Embedding,
+        Self::Reranker,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -31,12 +36,14 @@ impl Class {
 
     /// From the task tags a GGUF carries in `general.tags`.
     pub fn from_tags(tags: &[String]) -> Self {
-        tags.iter().find_map(|tag| match tag.as_str() {
-            "text-classification" | "zero-shot-classification" => Some(Self::Decision),
-            "feature-extraction" | "sentence-similarity" => Some(Self::Embedding),
-            "text-ranking" => Some(Self::Reranker),
-            _ => None,
-        }).unwrap_or_default()
+        tags.iter()
+            .find_map(|tag| match tag.as_str() {
+                "text-classification" | "zero-shot-classification" => Some(Self::Decision),
+                "feature-extraction" | "sentence-similarity" => Some(Self::Embedding),
+                "text-ranking" => Some(Self::Reranker),
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -61,7 +68,9 @@ impl Capability {
     }
 
     pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|capability| capability.as_str() == name)
+        Self::ALL
+            .into_iter()
+            .find(|capability| capability.as_str() == name)
     }
 
     pub fn names(capabilities: &[Self]) -> Vec<String> {
@@ -70,14 +79,25 @@ impl Capability {
 
     /// What the model does through `Synthesize`: thinking before answering.
     pub fn from_template(template: &str) -> Vec<Self> {
-        if template.contains("<think>") { vec![Self::Reasoning] } else { Vec::new() }
+        if template.contains("<think>") {
+            vec![Self::Reasoning]
+        } else {
+            Vec::new()
+        }
     }
 }
 
 /// A native GGUF's class and capabilities.
 pub fn detect(gguf: &GgufModel) -> (Class, Vec<Capability>) {
-    let class = Class::from_tags(&gguf.metadata_string_array("general.tags").unwrap_or_default());
-    let capabilities = gguf.metadata_str("tokenizer.chat_template").map(Capability::from_template).unwrap_or_default();
+    let class = Class::from_tags(
+        &gguf
+            .metadata_string_array("general.tags")
+            .unwrap_or_default(),
+    );
+    let capabilities = gguf
+        .metadata_str("tokenizer.chat_template")
+        .map(Capability::from_template)
+        .unwrap_or_default();
     (class, capabilities)
 }
 

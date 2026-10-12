@@ -2,7 +2,12 @@ use super::*;
 use crate::backend::cpu::CpuBackend;
 use crate::model::tests::tiny_model;
 
-fn acquire(backend: &CpuBackend, model: &Model<CpuBackend>, n_ctx: usize, slot: Option<SharedPrefix<CpuBackend>>) -> Result<PromptLease<CpuBackend>> {
+fn acquire(
+    backend: &CpuBackend,
+    model: &Model<CpuBackend>,
+    n_ctx: usize,
+    slot: Option<SharedPrefix<CpuBackend>>,
+) -> Result<PromptLease<CpuBackend>> {
     let mut lease = PromptLease::reserve(slot);
     lease.allocate(backend, model, n_ctx)?;
     Ok(lease)
@@ -25,12 +30,22 @@ fn exact_extended_branched_shortened_and_unrelated_prompts_match_fresh() {
         let (got, reused) = cached.prefill(&backend, &model, tokens).unwrap();
         let mut kv = model.new_kv_cache(&backend, 64).unwrap();
         let mut ws = model.alloc_workspace(&backend, tokens.len()).unwrap();
-        let want = model.prefill(&backend, &mut kv, &mut ws, tokens, 0).unwrap();
+        let want = model
+            .prefill(&backend, &mut kv, &mut ws, tokens, 0)
+            .unwrap();
         assert_eq!(reused, expected_reuse);
         assert_eq!(got, want);
         // Appended generation must not contaminate later prompt hits.
         let mut decode_ws = model.alloc_workspace(&backend, 1).unwrap();
-        model.forward(&backend, &mut cached.kv, &mut decode_ws, 97, tokens.len() as u32).unwrap();
+        model
+            .forward(
+                &backend,
+                &mut cached.kv,
+                &mut decode_ws,
+                97,
+                tokens.len() as u32,
+            )
+            .unwrap();
         let (hit, reused) = cached.prefill(&backend, &model, tokens).unwrap();
         assert_eq!(hit, want);
         assert_eq!(reused, tokens.len());
@@ -46,14 +61,24 @@ fn leases_are_exclusive_and_clear_prevents_inflight_repopulation() {
     let model = tiny_model(&backend);
     let slot = Arc::new(Mutex::new(PrefixSlot::new()));
     let mut first = acquire(&backend, &model, 64, Some(slot.clone())).unwrap();
-    first.state.as_mut().unwrap().prefill(&backend, &model, &[1, 3, 5]).unwrap();
+    first
+        .state
+        .as_mut()
+        .unwrap()
+        .prefill(&backend, &model, &[1, 3, 5])
+        .unwrap();
     drop(first);
     assert!(slot.lock().unwrap().state.is_some());
     let first = acquire(&backend, &model, 64, Some(slot.clone())).unwrap();
     let mut second = acquire(&backend, &model, 64, Some(slot.clone())).unwrap();
     assert_eq!(first.state.as_ref().unwrap().tokens, [1, 3, 5]);
     assert!(second.state.as_ref().unwrap().tokens.is_empty());
-    second.state.as_mut().unwrap().prefill(&backend, &model, &[7, 11]).unwrap();
+    second
+        .state
+        .as_mut()
+        .unwrap()
+        .prefill(&backend, &model, &[7, 11])
+        .unwrap();
     assert_eq!(first.state.as_ref().unwrap().tokens, [1, 3, 5]);
     slot.lock().unwrap().clear();
     drop(first);
@@ -68,13 +93,27 @@ fn failed_prefill_is_not_cached_and_idle_storage_is_bounded() {
     let slot = Arc::new(Mutex::new(PrefixSlot::new()));
     let mut a = acquire(&backend, &model, 64, Some(slot.clone())).unwrap();
     let mut b = acquire(&backend, &model, 64, Some(slot.clone())).unwrap();
-    a.state.as_mut().unwrap().prefill(&backend, &model, &[1, 3]).unwrap();
-    b.state.as_mut().unwrap().prefill(&backend, &model, &[5, 7]).unwrap();
+    a.state
+        .as_mut()
+        .unwrap()
+        .prefill(&backend, &model, &[1, 3])
+        .unwrap();
+    b.state
+        .as_mut()
+        .unwrap()
+        .prefill(&backend, &model, &[5, 7])
+        .unwrap();
     drop(a);
     drop(b);
     assert_eq!(slot.lock().unwrap().state.as_ref().unwrap().tokens, [5, 7]);
     let mut bad = acquire(&backend, &model, 64, Some(slot.clone())).unwrap();
-    assert!(bad.state.as_mut().unwrap().prefill(&backend, &model, &[5, u32::MAX]).is_err());
+    assert!(
+        bad.state
+            .as_mut()
+            .unwrap()
+            .prefill(&backend, &model, &[5, u32::MAX])
+            .is_err()
+    );
     drop(bad);
     assert!(slot.lock().unwrap().state.is_none());
 }
@@ -85,7 +124,12 @@ fn request_sized_leases_reuse_larger_caches_and_replace_smaller_ones() {
     let model = tiny_model(&backend);
     let slot = Arc::new(Mutex::new(PrefixSlot::new()));
     let mut small = acquire(&backend, &model, 4, Some(slot.clone())).unwrap();
-    small.state.as_mut().unwrap().prefill(&backend, &model, &[1, 3, 5]).unwrap();
+    small
+        .state
+        .as_mut()
+        .unwrap()
+        .prefill(&backend, &model, &[1, 3, 5])
+        .unwrap();
     drop(small);
     let mut hit = acquire(&backend, &model, 3, Some(slot.clone())).unwrap();
     let state = hit.state.as_mut().unwrap();
@@ -111,7 +155,12 @@ fn clearing_a_reserved_lease_prevents_repopulation_before_allocation() {
     assert!(queued.state.is_none());
     slot.lock().unwrap().clear();
     queued.allocate(&backend, &model, 4).unwrap();
-    queued.state.as_mut().unwrap().prefill(&backend, &model, &[1, 3, 5]).unwrap();
+    queued
+        .state
+        .as_mut()
+        .unwrap()
+        .prefill(&backend, &model, &[1, 3, 5])
+        .unwrap();
     drop(queued);
     assert!(slot.lock().unwrap().state.is_none());
 }
@@ -122,15 +171,24 @@ fn clearing_a_reserved_lease_prevents_repopulation_before_allocation() {
 fn gpu_reuse_matches_explicit_chunked_prefill_after_graph_decode() {
     use crate::backend::rocm::HipBackend;
     use crate::gguf::GgufModel;
-    let _guard = crate::backend::rocm::tests::GPU_MODEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::backend::rocm::tests::GPU_MODEL_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let backend = HipBackend::new().unwrap();
-    let model = Model::load(&backend, &mut GgufModel::open(crate::backend::test_support::fixture()).unwrap()).unwrap();
+    let model = Model::load(
+        &backend,
+        &mut GgufModel::open(crate::backend::test_support::fixture()).unwrap(),
+    )
+    .unwrap();
     let mut cached = PromptState::new(model.new_kv_cache(&backend, 64).unwrap());
     let mut reference = model.new_kv_cache(&backend, 64).unwrap();
     let cases: Vec<(Vec<u32>, usize)> = vec![
-        ((1..=17).collect(), 0), ((1..=17).collect(), 17),
-        ((1..=20).collect(), 17), (vec![1, 2, 3, 4, 5, 51, 52], 5),
-        (vec![1, 2, 3, 4], 3), (vec![47, 59, 61], 0),
+        ((1..=17).collect(), 0),
+        ((1..=17).collect(), 17),
+        ((1..=20).collect(), 17),
+        (vec![1, 2, 3, 4, 5, 51, 52], 5),
+        (vec![1, 2, 3, 4], 3),
+        (vec![47, 59, 61], 0),
     ];
     let mut previous = Vec::new();
     for (tokens, reuse) in cases {
@@ -140,8 +198,18 @@ fn gpu_reuse_matches_explicit_chunked_prefill_after_graph_decode() {
             previous.clone()
         } else {
             reference.set_len(reuse);
-            let mut pw = model.alloc_workspace(&backend, tokens.len() - reuse).unwrap();
-            model.prefill(&backend, &mut reference, &mut pw, &tokens[reuse..], reuse as u32).unwrap()
+            let mut pw = model
+                .alloc_workspace(&backend, tokens.len() - reuse)
+                .unwrap();
+            model
+                .prefill(
+                    &backend,
+                    &mut reference,
+                    &mut pw,
+                    &tokens[reuse..],
+                    reuse as u32,
+                )
+                .unwrap()
         };
         assert_eq!(got, want);
         previous = want;
@@ -159,16 +227,26 @@ fn bench_prefix_reuse() {
     use crate::backend::rocm::HipBackend;
     use crate::gguf::GgufModel;
     use std::time::Instant;
-    let _guard = crate::backend::rocm::tests::GPU_MODEL_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = crate::backend::rocm::tests::GPU_MODEL_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let backend = HipBackend::new().unwrap();
-    let model = Model::load(&backend, &mut GgufModel::open(crate::backend::test_support::fixture()).unwrap()).unwrap();
+    let model = Model::load(
+        &backend,
+        &mut GgufModel::open(crate::backend::test_support::fixture()).unwrap(),
+    )
+    .unwrap();
     let base: Vec<u32> = (1..=128).collect();
     let a: Vec<u32> = base.iter().copied().chain(129..=144).collect();
     let b: Vec<u32> = base.iter().copied().chain(145..=160).collect();
     let mut cached = PromptState::new(model.new_kv_cache(&backend, 256).unwrap());
     cached.prefill(&backend, &model, &a).unwrap();
     for trial in 0..5 {
-        for mode in if trial % 2 == 0 { ["cold", "suffix", "exact"] } else { ["exact", "suffix", "cold"] } {
+        for mode in if trial % 2 == 0 {
+            ["cold", "suffix", "exact"]
+        } else {
+            ["exact", "suffix", "cold"]
+        } {
             let tokens = if cached.tokens == a { &b } else { &a };
             let mut fresh = PromptState::new(model.new_kv_cache(&backend, 256).unwrap());
             let start = Instant::now();
@@ -182,13 +260,21 @@ fn bench_prefix_reuse() {
             };
             let elapsed = start.elapsed();
             assert!(logits.iter().all(|x| x.is_finite()));
-            eprintln!("PREFIX mode={mode} prompt=144 reused={reused} trial={trial} elapsed_ns={}", elapsed.as_nanos());
+            eprintln!(
+                "PREFIX mode={mode} prompt=144 reused={reused} trial={trial} elapsed_ns={}",
+                elapsed.as_nanos()
+            );
         }
     }
 }
 
 impl<B: Backend> PromptState<B> {
-    pub fn prefill(&mut self, backend: &B, model: &Model<B>, tokens: &[u32]) -> Result<(Vec<f32>, usize)> {
+    pub fn prefill(
+        &mut self,
+        backend: &B,
+        model: &Model<B>,
+        tokens: &[u32],
+    ) -> Result<(Vec<f32>, usize)> {
         self.prefill_reserved(backend, model, tokens, None)
     }
 }

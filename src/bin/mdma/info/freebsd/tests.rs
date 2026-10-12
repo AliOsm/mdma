@@ -83,9 +83,19 @@ fn coral_records_report_driver_node_and_link_whatever_their_class() {
     assert_eq!(bound.address.as_deref(), Some("0000:02:00.0"));
     assert_eq!(bound.driver.as_deref(), Some("apex"));
     assert_eq!(bound.device_node.as_deref(), Some("/dev/apex0"));
-    assert_eq!((bound.current_link.width, bound.current_link.speed_gt_s), (Some(1), Some(5.0)));
+    assert_eq!(
+        (bound.current_link.width, bound.current_link.speed_gt_s),
+        (Some(1), Some(5.0))
+    );
     let unbound = &found[1];
-    assert_eq!((unbound.address.as_deref(), unbound.driver.as_deref(), unbound.device_node.as_deref()), (Some("0000:05:00.0"), None, None));
+    assert_eq!(
+        (
+            unbound.address.as_deref(),
+            unbound.driver.as_deref(),
+            unbound.device_node.as_deref()
+        ),
+        (Some("0000:05:00.0"), None, None)
+    );
 }
 
 #[test]

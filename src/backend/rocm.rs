@@ -1,10 +1,12 @@
 // HIP backend: RDNA4 uses packed-integer decode and int8 WMMA prefill;
 // other build targets use portable GEMV and f32 activations/KV.
-use super::{dtype_code, shape, AttnSpec, Backend, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec};
+use super::{
+    AttnSpec, Backend, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec, dtype_code, shape,
+};
 use crate::gguf::GgmlDType;
 use crate::memory::{BufferBudget, product, sum};
-use rocm_rs::hip::{calculate_grid_1d, ffi, Device, Dim3, Module, Stream};
 use memory::DeviceMemory;
+use rocm_rs::hip::{Device, Dim3, Module, Stream, calculate_grid_1d, ffi};
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
@@ -52,12 +54,18 @@ fn gemm_token_tile(kernel: &str, requested: u32, tokens: u32) -> u32 {
         // These kernels lay out LDS using compile-time NT, including tail tiles.
         requested
     } else {
-        requested.min(tokens.div_ceil(TOKEN_SUBTILE) * TOKEN_SUBTILE).max(TOKEN_SUBTILE)
+        requested
+            .min(tokens.div_ceil(TOKEN_SUBTILE) * TOKEN_SUBTILE)
+            .max(TOKEN_SUBTILE)
     }
 }
 
 fn hip_err(e: rocm_rs::hip::error::Error) -> Error {
-    if e.is_out_of_memory() { Error::OutOfMemory(e.to_string()) } else { Error::Backend(e.to_string()) }
+    if e.is_out_of_memory() {
+        Error::OutOfMemory(e.to_string())
+    } else {
+        Error::Backend(e.to_string())
+    }
 }
 
 pub struct HipBuf {
@@ -181,10 +189,16 @@ impl HipBackend {
         // and the zeroed init leaves a terminator in the array for any shorter write; the
         // CStr borrows `raw`, which outlives its use in this function.
         let arch = unsafe { std::ffi::CStr::from_ptr(raw.gcnArchName.as_ptr()) }.to_string_lossy();
-        let device_identity = format!("{arch}/pci-{}:{}:{}/uuid-{:?}",
-            raw.pciDomainID, raw.pciBusID, raw.pciDeviceID, raw.uuid.bytes);
+        let device_identity = format!(
+            "{arch}/pci-{}:{}:{}/uuid-{:?}",
+            raw.pciDomainID, raw.pciBusID, raw.pciDeviceID, raw.uuid.bytes
+        );
         let module = Module::load_data(HSACO).map_err(hip_err)?;
-        let stream = Some(device.get_stream_with_flags(rocm_rs::hip::bindings::hipStreamNonBlocking).map_err(hip_err)?);
+        let stream = Some(
+            device
+                .get_stream_with_flags(rocm_rs::hip::bindings::hipStreamNonBlocking)
+                .map_err(hip_err)?,
+        );
         Ok(Self {
             device_name: properties.name,
             unified_memory: properties.integrated != 0,
@@ -192,7 +206,11 @@ impl HipBackend {
             stream,
             replay: None,
             lock: Mutex::new(()),
-            q8_scratch: Mutex::new(Q8Scratch { mem: None, cap: 0, cached: None }),
+            q8_scratch: Mutex::new(Q8Scratch {
+                mem: None,
+                cap: 0,
+                cached: None,
+            }),
             attn_scratch: Mutex::new(AttnScratch { mem: None, cap: 0 }),
             buffers: BufferBudget::default(),
             f32_compute,
@@ -204,7 +222,9 @@ impl HipBackend {
         })
     }
 
-    pub(crate) fn federation_profile(&self) -> std::io::Result<crate::federation::profile::gpu::Gpu> {
+    pub(crate) fn federation_profile(
+        &self,
+    ) -> std::io::Result<crate::federation::profile::gpu::Gpu> {
         use crate::federation::profile::gpu::{Gpu, fields};
         use sha2::{Digest, Sha256};
         let mut runtime = 0;
@@ -215,43 +235,77 @@ impl HipBackend {
             unsafe { ffi::hipRuntimeGetVersion(&mut runtime) },
             unsafe { ffi::hipDriverGetVersion(&mut driver) },
         ] {
-            rocm_rs::hip::error::Error::from_hip_error::<()>(status).map_err(std::io::Error::other)?;
+            rocm_rs::hip::error::Error::from_hip_error::<()>(status)
+                .map_err(std::io::Error::other)?;
         }
         if runtime <= 0 || driver <= 0 {
             return Err(std::io::Error::other("unverifiable HIP runtime"));
         }
-        Ok(Gpu::immutable("rocm", "f32",
-            if self.f32_compute { "f32" } else { "f16" }, fields([
-            ("vocabulary", "mdma.rocm.v1".into()),
-            ("workload", "decoder".into()),
-            ("device_name", self.device_name.clone()),
-            ("device_identity", self.device_identity.clone()),
-            ("runtime_version", runtime.to_string()),
-            ("driver_version", driver.to_string()),
-            ("kernel_target", env!("MDMA_HIP_ARCH_BUILT").into()),
-            ("kernel_id", format!("sha256:{}", hex::encode(Sha256::digest(HSACO)))),
-            ("weights", "gguf-raw-matrices-f32-norms".into()),
-            ("compute", if self.f32_compute { "f32-reference" } else { "rdna4-wmma-q8_1-f16" }.into()),
-            ("execution", if self.graphs_enabled && !self.f32_compute {
-                "eligible-request-graph-with-eager-fallback"
-            } else { "eager" }.into()),
-            ("attention", "geometry-selected-flash-or-generic".into()),
-            ("target_arch", std::env::consts::ARCH.into()),
-            ("target_os", std::env::consts::OS.into()),
-        ]), self.health.clone()))
+        Ok(Gpu::immutable(
+            "rocm",
+            "f32",
+            if self.f32_compute { "f32" } else { "f16" },
+            fields([
+                ("vocabulary", "mdma.rocm.v1".into()),
+                ("workload", "decoder".into()),
+                ("device_name", self.device_name.clone()),
+                ("device_identity", self.device_identity.clone()),
+                ("runtime_version", runtime.to_string()),
+                ("driver_version", driver.to_string()),
+                ("kernel_target", env!("MDMA_HIP_ARCH_BUILT").into()),
+                (
+                    "kernel_id",
+                    format!("sha256:{}", hex::encode(Sha256::digest(HSACO))),
+                ),
+                ("weights", "gguf-raw-matrices-f32-norms".into()),
+                (
+                    "compute",
+                    if self.f32_compute {
+                        "f32-reference"
+                    } else {
+                        "rdna4-wmma-q8_1-f16"
+                    }
+                    .into(),
+                ),
+                (
+                    "execution",
+                    if self.graphs_enabled && !self.f32_compute {
+                        "eligible-request-graph-with-eager-fallback"
+                    } else {
+                        "eager"
+                    }
+                    .into(),
+                ),
+                ("attention", "geometry-selected-flash-or-generic".into()),
+                ("target_arch", std::env::consts::ARCH.into()),
+                ("target_os", std::env::consts::OS.into()),
+            ]),
+            self.health.clone(),
+        ))
     }
 
     /// Bytes of flash-decoding partials for `n_q_heads` heads over a KV
     /// length of `kv_len`.
     fn attn_partials_bytes(n_q_heads: usize, kv_len: usize) -> Result<usize> {
-        product(&[n_q_heads, kv_len.max(1).div_ceil(ATT_DC as usize), ATT_DPART as usize, F32_BYTES as usize])
+        product(&[
+            n_q_heads,
+            kv_len.max(1).div_ceil(ATT_DC as usize),
+            ATT_DPART as usize,
+            F32_BYTES as usize,
+        ])
     }
 
     /// Ensure the partials buffer holds `bytes`; caller holds `self.lock`
     /// (or is single-threaded setup before a graph capture).
-    pub(super) fn reserve_attn_scratch(&self, partial_bytes: usize, n_kv_heads: usize) -> Result<*mut c_void> {
+    pub(super) fn reserve_attn_scratch(
+        &self,
+        partial_bytes: usize,
+        n_kv_heads: usize,
+    ) -> Result<*mut c_void> {
         if n_kv_heads > ATT_COUNTERS_BYTES / F32_BYTES as usize {
-            return Err(Error::ShapeMismatch(format!("attn: {n_kv_heads} KV heads exceed the arrival-counter block")));
+            return Err(Error::ShapeMismatch(format!(
+                "attn: {n_kv_heads} KV heads exceed the arrival-counter block"
+            )));
         }
         let bytes = sum([ATT_COUNTERS_BYTES, partial_bytes])?;
         let mut scratch = self.attn_scratch.lock().unwrap();
@@ -284,7 +338,8 @@ impl HipBackend {
         let func = self.module.get_function(name).map_err(hip_err)?;
         let block = 256u32;
         let grid = calculate_grid_1d(n as u32, block);
-        func.launch(grid, Dim3::new_1d(block), 0, self.stream.as_ref(), args).map_err(hip_err)?;
+        func.launch(grid, Dim3::new_1d(block), 0, self.stream.as_ref(), args)
+            .map_err(hip_err)?;
         Ok(())
     }
 }
@@ -300,17 +355,28 @@ mod decoder_ops;
 impl Backend for HipBackend {
     type Buf = HipBuf;
 
-    fn execution_identity(&self) -> Option<Arc<()>> { Some(self.identity.clone()) }
+    fn execution_identity(&self) -> Option<Arc<()>> {
+        Some(self.identity.clone())
+    }
 
     fn join_execution(&self) -> Result<()> {
         self.health.check((|| {
-            let _lock = self.lock.lock().map_err(|_| Error::Backend("HIP launch lock poisoned".into()))?;
-            Device::new(0).and_then(|device| device.synchronize()).map_err(hip_err)
+            let _lock = self
+                .lock
+                .lock()
+                .map_err(|_| Error::Backend("HIP launch lock poisoned".into()))?;
+            Device::new(0)
+                .and_then(|device| device.synchronize())
+                .map_err(hip_err)
         })())
     }
 
-    fn device_label(&self) -> Option<String> { Some(self.device_name.clone()) }
-    fn unified_memory(&self) -> bool { self.unified_memory }
+    fn device_label(&self) -> Option<String> {
+        Some(self.device_name.clone())
+    }
+    fn unified_memory(&self) -> bool {
+        self.unified_memory
+    }
 
     fn available_device_bytes(&self) -> Result<Option<usize>> {
         memory_info().map(|(free, _)| Some(free))
@@ -323,14 +389,22 @@ impl Backend for HipBackend {
     fn weight_cache_profile(&self) -> Option<&str> {
         use sha2::{Digest, Sha256};
         static PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        Some(PROFILE.get_or_init(|| format!(
-            "rocm/{}/q4k-scales-v3/{}", env!("MDMA_HIP_ARCH_BUILT"), hex::encode(Sha256::digest(HSACO)),
-        )))
+        Some(PROFILE.get_or_init(|| {
+            format!(
+                "rocm/{}/q4k-scales-v3/{}",
+                env!("MDMA_HIP_ARCH_BUILT"),
+                hex::encode(Sha256::digest(HSACO)),
+            )
+        }))
     }
 
     fn upload_weight(&self, bytes: &[u8], layout: crate::cache::WeightLayout) -> Result<Self::Buf> {
         let packed_q4 = layout == crate::cache::WeightLayout::RocmQ4kV3;
-        if packed_q4 && !bytes.len().is_multiple_of(crate::cache::layout::Q4K_BLOCK_BYTES) {
+        if packed_q4
+            && !bytes
+                .len()
+                .is_multiple_of(crate::cache::layout::Q4K_BLOCK_BYTES)
+        {
             return Err(Error::ShapeMismatch("partial packed Q4_K block".into()));
         }
         let mut buf = self.alloc(bytes.len(), Pool::Weights)?;
@@ -342,16 +416,25 @@ impl Backend for HipBackend {
     super::delegate_decoder!(graph::decoder);
 
     fn supports(&self, op: Operation) -> bool {
-        matches!(op, Operation::Scale | Operation::GeluTanhMul | Operation::Softcap
-            | Operation::RopeSplitHalf | Operation::WindowedAttention | Operation::AddBias
-            | Operation::RopePartialInterleaved)
+        matches!(
+            op,
+            Operation::Scale
+                | Operation::GeluTanhMul
+                | Operation::Softcap
+                | Operation::RopeSplitHalf
+                | Operation::WindowedAttention
+                | Operation::AddBias
+                | Operation::RopePartialInterleaved
+        )
     }
 
     fn supports_weight_dtype(&self, dtype: GgmlDType) -> bool {
         dtype_code::decoder_code(dtype).is_ok()
     }
 
-    fn max_head_dim(&self) -> Option<usize> { Some(512) }
+    fn max_head_dim(&self) -> Option<usize> {
+        Some(512)
+    }
 
     fn scale(&self, x: &mut HipBuf, factor: f32) -> Result<()> {
         if !factor.is_finite() {
@@ -366,19 +449,44 @@ impl Backend for HipBackend {
     }
 
     fn gelu_tanh_mul(&self, a: &HipBuf, b: &HipBuf, y: &mut HipBuf) -> Result<()> {
-        let n = shape::elementwise("gelu_tanh_mul", &[shape::elems("gelu", a.len)?,
-            shape::elems("gelu", b.len)?], &[shape::elems("gelu", y.len)?])?;
-        if n == 0 { return Ok(()); }
+        let n = shape::elementwise(
+            "gelu_tanh_mul",
+            &[shape::elems("gelu", a.len)?, shape::elems("gelu", b.len)?],
+            &[shape::elems("gelu", y.len)?],
+        )?;
+        if n == 0 {
+            return Ok(());
+        }
         let mut n_i = n as i32;
-        self.launch1d("gelu_tanh_mul_kernel", n, &mut [
-            arg!(a.as_device_ptr()), arg!(b.as_device_ptr()), arg!(y.as_device_ptr()), arg!(n_i)])
+        self.launch1d(
+            "gelu_tanh_mul_kernel",
+            n,
+            &mut [
+                arg!(a.as_device_ptr()),
+                arg!(b.as_device_ptr()),
+                arg!(y.as_device_ptr()),
+                arg!(n_i),
+            ],
+        )
     }
 
-    fn rope_split_half(&self, x: &mut HipBuf, pos: u32, spec: &RopeSpec, factors: &HipBuf) -> Result<()> {
+    fn rope_split_half(
+        &self,
+        x: &mut HipBuf,
+        pos: u32,
+        spec: &RopeSpec,
+        factors: &HipBuf,
+    ) -> Result<()> {
         self.split_rope(x, pos, spec, factors)
     }
 
-    fn rope_partial_interleaved(&self, x: &mut HipBuf, pos: u32, spec: &RopeSpec, rotary_dim: usize) -> Result<()> {
+    fn rope_partial_interleaved(
+        &self,
+        x: &mut HipBuf,
+        pos: u32,
+        spec: &RopeSpec,
+        rotary_dim: usize,
+    ) -> Result<()> {
         self.partial_rope(x, pos, spec, rotary_dim)
     }
 
@@ -386,15 +494,32 @@ impl Backend for HipBackend {
         let width = shape::elems("add_bias", b.len)?;
         let n = shape::elems("add_bias", y.len)?;
         shape::rows("add_bias", width, n, n)?;
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            return Ok(());
+        }
         let mut width = i32::try_from(width).map_err(|_| Error::SizeOverflow)?;
         let mut n_i = i32::try_from(n).map_err(|_| Error::SizeOverflow)?;
-        self.launch1d("add_bias_kernel", n, &mut [
-            arg!(b.as_device_ptr()), arg!(y.as_device_ptr()), arg!(width), arg!(n_i)])
+        self.launch1d(
+            "add_bias_kernel",
+            n,
+            &mut [
+                arg!(b.as_device_ptr()),
+                arg!(y.as_device_ptr()),
+                arg!(width),
+                arg!(n_i),
+            ],
+        )
     }
 
-    fn attn_windowed(&self, q: &HipBuf, kv: &KvView<HipBuf>, spec: &AttnSpec,
-        scale: f32, window: usize, o: &mut HipBuf) -> Result<()> {
+    fn attn_windowed(
+        &self,
+        q: &HipBuf,
+        kv: &KvView<HipBuf>,
+        spec: &AttnSpec,
+        scale: f32,
+        window: usize,
+        o: &mut HipBuf,
+    ) -> Result<()> {
         self.attention_generic(q, kv, spec, scale, window, o)
     }
 
@@ -408,7 +533,11 @@ impl Backend for HipBackend {
 
     fn alloc(&self, bytes: usize, _pool: Pool) -> Result<Self::Buf> {
         let mem = DeviceMemory::<u8>::new(bytes.max(1), &self.buffers)?;
-        Ok(HipBuf { mem, len: bytes, packed_q4: false })
+        Ok(HipBuf {
+            mem,
+            len: bytes,
+            packed_q4: false,
+        })
     }
 
     fn upload(&self, dst: &mut Self::Buf, offset: usize, src: &[u8]) -> Result<()> {
@@ -433,7 +562,11 @@ impl Backend for HipBackend {
         if status != ffi::hipError_t_hipSuccess {
             return Err(Error::Backend(format!("hipMemcpy H2D failed: {status:?}")));
         }
-        self.stream.as_ref().unwrap().synchronize().map_err(hip_err)?;
+        self.stream
+            .as_ref()
+            .unwrap()
+            .synchronize()
+            .map_err(hip_err)?;
         Ok(())
     }
 
@@ -457,11 +590,22 @@ impl Backend for HipBackend {
         if status != ffi::hipError_t_hipSuccess {
             return Err(Error::Backend(format!("hipMemcpy D2H failed: {status:?}")));
         }
-        self.stream.as_ref().unwrap().synchronize().map_err(hip_err)?;
+        self.stream
+            .as_ref()
+            .unwrap()
+            .synchronize()
+            .map_err(hip_err)?;
         Ok(())
     }
 
-    fn copy(&self, src: &Self::Buf, src_off: usize, dst: &mut Self::Buf, dst_off: usize, len: usize) -> Result<()> {
+    fn copy(
+        &self,
+        src: &Self::Buf,
+        src_off: usize,
+        dst: &mut Self::Buf,
+        dst_off: usize,
+        len: usize,
+    ) -> Result<()> {
         self.q8_invalidate();
         shape::range("copy", src_off, len, src.len)?;
         shape::range("copy", dst_off, len, dst.len)?;
@@ -488,10 +632,18 @@ impl Backend for HipBackend {
 
     /// Decode fuses the three projections into one packed-int8 launch.
     fn qmatmul_qkv(
-        &self, wq: &QWeight<Self::Buf>, wk: &QWeight<Self::Buf>, wv: &QWeight<Self::Buf>, x: &Self::Buf,
-        q: &mut Self::Buf, k: &mut Self::Buf, v: &mut Self::Buf,
+        &self,
+        wq: &QWeight<Self::Buf>,
+        wk: &QWeight<Self::Buf>,
+        wv: &QWeight<Self::Buf>,
+        x: &Self::Buf,
+        q: &mut Self::Buf,
+        k: &mut Self::Buf,
+        v: &mut Self::Buf,
     ) -> Result<()> {
-        let kquant = |w: &QWeight<Self::Buf>| matches!(w.dtype, GgmlDType::Q4K | GgmlDType::Q6K) && w.shape.len() == 2;
+        let kquant = |w: &QWeight<Self::Buf>| {
+            matches!(w.dtype, GgmlDType::Q4K | GgmlDType::Q6K) && w.shape.len() == 2
+        };
         let one_token = wq.shape.len() == 2 && x.len == wq.shape[1] * F32_BYTES as usize;
         if !self.f32_compute && one_token && kquant(wq) && kquant(wk) && kquant(wv) {
             return self.launch_gemv_i8_x3([wq, wk, wv], x, [q, k, v]);
@@ -503,8 +655,17 @@ impl Backend for HipBackend {
 
     #[allow(clippy::too_many_arguments)]
     fn rope_kv_write(
-        &self, q: &mut Self::Buf, k: &mut Self::Buf, v: &Self::Buf, dst_k: &mut Self::Buf, dst_v: &mut Self::Buf,
-        elem_offset: usize, pos: u32, n_tokens: usize, spec: &RopeSpec, n_elems: usize,
+        &self,
+        q: &mut Self::Buf,
+        k: &mut Self::Buf,
+        v: &Self::Buf,
+        dst_k: &mut Self::Buf,
+        dst_v: &mut Self::Buf,
+        elem_offset: usize,
+        pos: u32,
+        n_tokens: usize,
+        spec: &RopeSpec,
+        n_elems: usize,
     ) -> Result<()> {
         if self.f32_compute {
             self.rope(q, k, pos, n_tokens, spec)?;
@@ -527,7 +688,9 @@ impl Backend for HipBackend {
             || (k_elems / n_tokens) % spec.head_dim != 0
             || (q_elems / n_tokens) % spec.head_dim != 0
         {
-            return Err(Error::ShapeMismatch("rope_kv_write: q/k/v/cache shapes disagree".into()));
+            return Err(Error::ShapeMismatch(
+                "rope_kv_write: q/k/v/cache shapes disagree".into(),
+            ));
         }
         let q_stride = q_elems / n_tokens;
         let k_stride = k_elems / n_tokens;
@@ -535,13 +698,22 @@ impl Backend for HipBackend {
         let n_kv_heads = k_stride / spec.head_dim;
         if let Some(replay) = &self.replay {
             if k_stride * replay.capacity * F16_BYTES as usize > dst_k.len {
-                return Err(Error::ShapeMismatch("graph KV buffers do not match capacity".into()));
+                return Err(Error::ShapeMismatch(
+                    "graph KV buffers do not match capacity".into(),
+                ));
             }
         }
         let total = (n_q_heads + n_kv_heads) * half;
         let _guard = self.lock.lock().unwrap();
         let graph = self.replay.is_some();
-        let func = self.module.get_function(if graph { "rope_kv_graph" } else { "rope_kv_kernel" }).map_err(hip_err)?;
+        let func = self
+            .module
+            .get_function(if graph {
+                "rope_kv_graph"
+            } else {
+                "rope_kv_kernel"
+            })
+            .map_err(hip_err)?;
         let mut off_i = elem_offset as i32;
         let mut pos_mut = pos;
         let mut head_dim_i = spec.head_dim as i32;
@@ -550,28 +722,64 @@ impl Backend for HipBackend {
         let mut theta = spec.theta;
         let mut q_stride_i = q_stride as i32;
         let mut k_stride_i = k_stride as i32;
-        let mut params = self.replay.as_ref().map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
+        let mut params = self
+            .replay
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
         let mut args = [
-            arg!(q.as_device_ptr()), arg!(k.as_device_ptr()), arg!(v.as_device_ptr()), arg!(dst_k.as_device_ptr()), arg!(dst_v.as_device_ptr()),
-            arg!(off_i), arg!(pos_mut), arg!(head_dim_i), arg!(n_q_i), arg!(n_kv_i), arg!(theta), arg!(q_stride_i), arg!(k_stride_i), arg!(params),
+            arg!(q.as_device_ptr()),
+            arg!(k.as_device_ptr()),
+            arg!(v.as_device_ptr()),
+            arg!(dst_k.as_device_ptr()),
+            arg!(dst_v.as_device_ptr()),
+            arg!(off_i),
+            arg!(pos_mut),
+            arg!(head_dim_i),
+            arg!(n_q_i),
+            arg!(n_kv_i),
+            arg!(theta),
+            arg!(q_stride_i),
+            arg!(k_stride_i),
+            arg!(params),
         ];
         let n_args = if graph { 14 } else { 13 };
         let block = 256u32;
-        func.launch(Dim3::new_2d((total as u32).div_ceil(block), n_tokens as u32), Dim3::new_1d(block), 0, self.stream.as_ref(), &mut args[..n_args])
-            .map_err(hip_err)?;
+        func.launch(
+            Dim3::new_2d((total as u32).div_ceil(block), n_tokens as u32),
+            Dim3::new_1d(block),
+            0,
+            self.stream.as_ref(),
+            &mut args[..n_args],
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
     /// The fast path rounds KV to f16; reference mode keeps f32.
     fn kv_elem_bytes(&self) -> usize {
-        if self.f32_compute { F32_BYTES as usize } else { F16_BYTES as usize }
+        if self.f32_compute {
+            F32_BYTES as usize
+        } else {
+            F16_BYTES as usize
+        }
     }
 
-    fn kv_write(&self, k: &Self::Buf, v: &Self::Buf, dst_k: &mut Self::Buf, dst_v: &mut Self::Buf, elem_offset: usize, n_elems: usize) -> Result<()> {
+    fn kv_write(
+        &self,
+        k: &Self::Buf,
+        v: &Self::Buf,
+        dst_k: &mut Self::Buf,
+        dst_v: &mut Self::Buf,
+        elem_offset: usize,
+        n_elems: usize,
+    ) -> Result<()> {
         let src_bytes = n_elems * F32_BYTES as usize;
         let dst_bytes = (elem_offset + n_elems) * self.kv_elem_bytes();
-        if src_bytes > k.len || src_bytes > v.len || dst_bytes > dst_k.len || dst_bytes > dst_v.len {
-            return Err(Error::ShapeMismatch("kv_write: rows exceed the source or cache buffers".into()));
+        if src_bytes > k.len || src_bytes > v.len || dst_bytes > dst_k.len || dst_bytes > dst_v.len
+        {
+            return Err(Error::ShapeMismatch(
+                "kv_write: rows exceed the source or cache buffers".into(),
+            ));
         }
         if self.f32_compute {
             self.copy(k, 0, dst_k, elem_offset * 4, src_bytes)?;
@@ -580,25 +788,47 @@ impl Backend for HipBackend {
         let mut n = n_elems as i32;
         if let Some(replay) = &self.replay {
             if n_elems * replay.capacity * F16_BYTES as usize > dst_k.len {
-                return Err(Error::ShapeMismatch("graph KV buffers do not match capacity".into()));
+                return Err(Error::ShapeMismatch(
+                    "graph KV buffers do not match capacity".into(),
+                ));
             }
             let mut params = replay.mem.as_ptr();
-            self.launch1d("kv_write_graph", n_elems, &mut [
-                arg!(k.as_device_ptr()), arg!(v.as_device_ptr()), arg!(dst_k.as_device_ptr()),
-                arg!(dst_v.as_device_ptr()), arg!(n), arg!(params),
-            ])
+            self.launch1d(
+                "kv_write_graph",
+                n_elems,
+                &mut [
+                    arg!(k.as_device_ptr()),
+                    arg!(v.as_device_ptr()),
+                    arg!(dst_k.as_device_ptr()),
+                    arg!(dst_v.as_device_ptr()),
+                    arg!(n),
+                    arg!(params),
+                ],
+            )
         } else {
             let mut offset = elem_offset as i32;
-            self.launch1d("kv_write_f16", n_elems, &mut [
-                arg!(k.as_device_ptr()), arg!(v.as_device_ptr()), arg!(dst_k.as_device_ptr()),
-                arg!(dst_v.as_device_ptr()), arg!(n), arg!(offset),
-            ])
+            self.launch1d(
+                "kv_write_f16",
+                n_elems,
+                &mut [
+                    arg!(k.as_device_ptr()),
+                    arg!(v.as_device_ptr()),
+                    arg!(dst_k.as_device_ptr()),
+                    arg!(dst_v.as_device_ptr()),
+                    arg!(n),
+                    arg!(offset),
+                ],
+            )
         }
     }
 
     /// K-quants use packed int8 GEMV for decode and int8 WMMA for prefill.
     fn qmatmul(&self, w: &QWeight<Self::Buf>, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
-        let shape::Matmul { n_out, n_in, n_tokens } = shape::matmul(&w.shape, x.len / 4, y.len / 4)?;
+        let shape::Matmul {
+            n_out,
+            n_in,
+            n_tokens,
+        } = shape::matmul(&w.shape, x.len / 4, y.len / 4)?;
         shape::kquant_aligned("qmatmul", w.dtype, n_in)?;
         let dtype = prepared::dtype(w)?;
         let n_out_i = n_out as i32;
@@ -620,7 +850,14 @@ impl Backend for HipBackend {
             (GgmlDType::Q4K | GgmlDType::Q6K, 1) => self.launch_gemv_i8(w, x, y),
             (_, 1) => {
                 self.q8_invalidate();
-                self.launch_gemv(w.buf.as_device_ptr(), dtype, n_out_i, n_in_i, x.as_device_ptr(), y.as_device_ptr())
+                self.launch_gemv(
+                    w.buf.as_device_ptr(),
+                    dtype,
+                    n_out_i,
+                    n_in_i,
+                    x.as_device_ptr(),
+                    y.as_device_ptr(),
+                )
             }
             (GgmlDType::Q4K | GgmlDType::Q6K, _) => {
                 let nt = match (n_tokens as u32).div_ceil(TOKEN_SUBTILE) {
@@ -631,10 +868,18 @@ impl Backend for HipBackend {
                 };
                 let n_tile = nt * TOKEN_SUBTILE;
                 let kernel = match (w.dtype, nt) {
-                    (GgmlDType::Q4K, 1) if w.buf.packed_q4 => "qmatmul_gemm_wmma_i8_k256_packed_nt1",
-                    (GgmlDType::Q4K, 2) if w.buf.packed_q4 => "qmatmul_gemm_wmma_i8_k256_packed_nt2",
-                    (GgmlDType::Q4K, 4) if w.buf.packed_q4 => "qmatmul_gemm_wmma_i8_k256_packed_nt4",
-                    (GgmlDType::Q4K, _) if w.buf.packed_q4 => "qmatmul_gemm_wmma_i8_k256_packed_nt8",
+                    (GgmlDType::Q4K, 1) if w.buf.packed_q4 => {
+                        "qmatmul_gemm_wmma_i8_k256_packed_nt1"
+                    }
+                    (GgmlDType::Q4K, 2) if w.buf.packed_q4 => {
+                        "qmatmul_gemm_wmma_i8_k256_packed_nt2"
+                    }
+                    (GgmlDType::Q4K, 4) if w.buf.packed_q4 => {
+                        "qmatmul_gemm_wmma_i8_k256_packed_nt4"
+                    }
+                    (GgmlDType::Q4K, _) if w.buf.packed_q4 => {
+                        "qmatmul_gemm_wmma_i8_k256_packed_nt8"
+                    }
                     (GgmlDType::Q4K, 1) => "qmatmul_gemm_wmma_i8_k256_nt1",
                     (GgmlDType::Q4K, 2) => "qmatmul_gemm_wmma_i8_k256_nt2",
                     (GgmlDType::Q4K, 4) => "qmatmul_gemm_wmma_i8_k256_nt4",
@@ -644,9 +889,26 @@ impl Backend for HipBackend {
                     (_, 4) => "qmatmul_gemm_wmma_i8_q6k_k256_nt4",
                     (_, _) => "qmatmul_gemm_wmma_i8_q6k_k256_nt8",
                 };
-                self.qmatmul_i8(kernel, n_tile, w.buf.as_device_ptr(), n_out_i, n_in_i, n_tokens as i32, x.as_device_ptr(), y.as_device_ptr())
+                self.qmatmul_i8(
+                    kernel,
+                    n_tile,
+                    w.buf.as_device_ptr(),
+                    n_out_i,
+                    n_in_i,
+                    n_tokens as i32,
+                    x.as_device_ptr(),
+                    y.as_device_ptr(),
+                )
             }
-            _ => self.qmatmul_wmma(w.buf.as_device_ptr(), dtype, n_out_i, n_in_i, n_tokens as i32, x.as_device_ptr(), y.as_device_ptr()),
+            _ => self.qmatmul_wmma(
+                w.buf.as_device_ptr(),
+                dtype,
+                n_out_i,
+                n_in_i,
+                n_tokens as i32,
+                x.as_device_ptr(),
+                y.as_device_ptr(),
+            ),
         }
     }
 
@@ -660,9 +922,12 @@ impl Backend for HipBackend {
         y: &mut Self::Buf,
     ) -> Result<()> {
         if gate.shape != up.shape {
-            return Err(Error::ShapeMismatch("ffn gate/up weight shapes must match".into()));
+            return Err(Error::ShapeMismatch(
+                "ffn gate/up weight shapes must match".into(),
+            ));
         }
-        if !self.f32_compute && matches!(gate.dtype, GgmlDType::Q4K | GgmlDType::Q6K)
+        if !self.f32_compute
+            && matches!(gate.dtype, GgmlDType::Q4K | GgmlDType::Q6K)
             && gate.dtype == up.dtype
             && gate.buf.packed_q4 == up.buf.packed_q4
             && let [_, n_in] = gate.shape[..]
@@ -675,7 +940,12 @@ impl Backend for HipBackend {
         self.silu_mul(gate_scratch, up_scratch, y)
     }
 
-    fn embed(&self, table: &QWeight<Self::Buf>, token_ids: &[u32], out: &mut Self::Buf) -> Result<()> {
+    fn embed(
+        &self,
+        table: &QWeight<Self::Buf>,
+        token_ids: &[u32],
+        out: &mut Self::Buf,
+    ) -> Result<()> {
         let shape::Embed { n_embd, .. } = shape::embed(&table.shape, token_ids, out.len / 4)?;
         shape::kquant_aligned("embed", table.dtype, n_embd)?;
         let mut dtype = prepared::dtype(table)?;
@@ -685,10 +955,24 @@ impl Backend for HipBackend {
             // SAFETY: shape::embed gives out.len / 4 >= token_ids.len() * n_embd and
             // t < token_ids.len(), so the offset stays inside out's hipMalloc range.
             let mut out_ptr = unsafe { out.as_device_ptr().add(t * n_embd * 4) };
-            let mut params = self.replay.as_ref().map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
-            let mut args = [arg!(table.buf.as_device_ptr()), arg!(dtype), arg!(n_embd_i), arg!(token_id_mut), arg!(out_ptr), arg!(params)];
+            let mut params = self
+                .replay
+                .as_ref()
+                .map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
+            let mut args = [
+                arg!(table.buf.as_device_ptr()),
+                arg!(dtype),
+                arg!(n_embd_i),
+                arg!(token_id_mut),
+                arg!(out_ptr),
+                arg!(params),
+            ];
             self.launch1d(
-                if self.replay.is_some() { "embed_gather_graph" } else { "embed_gather" },
+                if self.replay.is_some() {
+                    "embed_gather_graph"
+                } else {
+                    "embed_gather"
+                },
                 n_embd,
                 &mut args[..if self.replay.is_some() { 6 } else { 5 }],
             )?;
@@ -710,21 +994,64 @@ impl Backend for HipBackend {
             // their quantize launch.
             let mut scratch = self.q8_scratch.lock().unwrap();
             let (mut q8_ptr, mut ys_ptr) = self.q8_row_ptrs(&mut scratch, dim)?;
-            let func = self.module.get_function("rmsnorm_q8_kernel").map_err(hip_err)?;
-            let mut args = [arg!(w.as_device_ptr()), arg!(x.as_device_ptr()), arg!(y.as_device_ptr()), arg!(dim_i), arg!(eps_mut), arg!(q8_ptr), arg!(ys_ptr)];
-            func.launch(Dim3::new_1d(1), Dim3::new_1d(block), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+            let func = self
+                .module
+                .get_function("rmsnorm_q8_kernel")
+                .map_err(hip_err)?;
+            let mut args = [
+                arg!(w.as_device_ptr()),
+                arg!(x.as_device_ptr()),
+                arg!(y.as_device_ptr()),
+                arg!(dim_i),
+                arg!(eps_mut),
+                arg!(q8_ptr),
+                arg!(ys_ptr),
+            ];
+            func.launch(
+                Dim3::new_1d(1),
+                Dim3::new_1d(block),
+                0,
+                self.stream.as_ref(),
+                &mut args,
+            )
+            .map_err(hip_err)?;
             scratch.cached = Some((y.as_device_ptr() as usize, 1, dim as i32));
             return Ok(());
         }
-        let func = self.module.get_function("rmsnorm_kernel").map_err(hip_err)?;
-        let mut args = [arg!(w.as_device_ptr()), arg!(x.as_device_ptr()), arg!(y.as_device_ptr()), arg!(dim_i), arg!(eps_mut)];
-        func.launch(Dim3::new_1d(n_tokens as u32), Dim3::new_1d(block), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        let func = self
+            .module
+            .get_function("rmsnorm_kernel")
+            .map_err(hip_err)?;
+        let mut args = [
+            arg!(w.as_device_ptr()),
+            arg!(x.as_device_ptr()),
+            arg!(y.as_device_ptr()),
+            arg!(dim_i),
+            arg!(eps_mut),
+        ];
+        func.launch(
+            Dim3::new_1d(n_tokens as u32),
+            Dim3::new_1d(block),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
-    fn add_rmsnorm(&self, w: &Self::Buf, a: &Self::Buf, b: &Self::Buf, sum: &mut Self::Buf, y: &mut Self::Buf, eps: f32) -> Result<()> {
+    fn add_rmsnorm(
+        &self,
+        w: &Self::Buf,
+        a: &Self::Buf,
+        b: &Self::Buf,
+        sum: &mut Self::Buf,
+        y: &mut Self::Buf,
+        eps: f32,
+    ) -> Result<()> {
         let dim = w.len / F32_BYTES as usize;
-        let n = shape::elementwise("add_rmsnorm", &[a.len, b.len], &[sum.len, y.len])? / F32_BYTES as usize;
+        let n = shape::elementwise("add_rmsnorm", &[a.len, b.len], &[sum.len, y.len])?
+            / F32_BYTES as usize;
         if self.f32_compute || dim == 0 || dim % 4 != 0 || n % dim != 0 {
             self.add(a, b, sum)?;
             return self.rmsnorm(w, sum, y, eps);
@@ -738,38 +1065,99 @@ impl Backend for HipBackend {
         if n_tokens == 1 && dim % QK_K as usize == 0 {
             let mut scratch = self.q8_scratch.lock().unwrap();
             let (mut q8_ptr, mut ys_ptr) = self.q8_row_ptrs(&mut scratch, dim)?;
-            let func = self.module.get_function("add_rmsnorm_q8_kernel").map_err(hip_err)?;
+            let func = self
+                .module
+                .get_function("add_rmsnorm_q8_kernel")
+                .map_err(hip_err)?;
             let mut args = [
-                arg!(w.as_device_ptr()), arg!(a.as_device_ptr()), arg!(b.as_device_ptr()), arg!(sum.as_device_ptr()), arg!(y.as_device_ptr()),
-                arg!(dim_i), arg!(eps_mut), arg!(q8_ptr), arg!(ys_ptr),
+                arg!(w.as_device_ptr()),
+                arg!(a.as_device_ptr()),
+                arg!(b.as_device_ptr()),
+                arg!(sum.as_device_ptr()),
+                arg!(y.as_device_ptr()),
+                arg!(dim_i),
+                arg!(eps_mut),
+                arg!(q8_ptr),
+                arg!(ys_ptr),
             ];
-            func.launch(Dim3::new_1d(1), Dim3::new_1d(block), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+            func.launch(
+                Dim3::new_1d(1),
+                Dim3::new_1d(block),
+                0,
+                self.stream.as_ref(),
+                &mut args,
+            )
+            .map_err(hip_err)?;
             scratch.cached = Some((y.as_device_ptr() as usize, 1, dim as i32));
             return Ok(());
         }
-        let func = self.module.get_function("add_rmsnorm_kernel").map_err(hip_err)?;
-        let mut args = [arg!(w.as_device_ptr()), arg!(a.as_device_ptr()), arg!(b.as_device_ptr()), arg!(sum.as_device_ptr()), arg!(y.as_device_ptr()), arg!(dim_i), arg!(eps_mut)];
-        func.launch(Dim3::new_1d(n_tokens as u32), Dim3::new_1d(block), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        let func = self
+            .module
+            .get_function("add_rmsnorm_kernel")
+            .map_err(hip_err)?;
+        let mut args = [
+            arg!(w.as_device_ptr()),
+            arg!(a.as_device_ptr()),
+            arg!(b.as_device_ptr()),
+            arg!(sum.as_device_ptr()),
+            arg!(y.as_device_ptr()),
+            arg!(dim_i),
+            arg!(eps_mut),
+        ];
+        func.launch(
+            Dim3::new_1d(n_tokens as u32),
+            Dim3::new_1d(block),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
     fn add(&self, a: &Self::Buf, b: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
         let n = shape::elementwise("add", &[a.len, b.len], &[y.len])? / 4;
         let mut n_i = n as i32;
-        self.launch1d("add_kernel", n, &mut [arg!(a.as_device_ptr()), arg!(b.as_device_ptr()), arg!(y.as_device_ptr()), arg!(n_i)])
+        self.launch1d(
+            "add_kernel",
+            n,
+            &mut [
+                arg!(a.as_device_ptr()),
+                arg!(b.as_device_ptr()),
+                arg!(y.as_device_ptr()),
+                arg!(n_i),
+            ],
+        )
     }
 
-    fn rope(&self, q: &mut Self::Buf, k: &mut Self::Buf, pos: u32, n_tokens: usize, spec: &RopeSpec) -> Result<()> {
+    fn rope(
+        &self,
+        q: &mut Self::Buf,
+        k: &mut Self::Buf,
+        pos: u32,
+        n_tokens: usize,
+        spec: &RopeSpec,
+    ) -> Result<()> {
         self.q8_invalidate();
         let half = spec.head_dim / 2;
-        let shape::Rope { n_q_heads, n_kv_heads } = shape::rope(spec, q.len / 4, k.len / 4, n_tokens)?;
+        let shape::Rope {
+            n_q_heads,
+            n_kv_heads,
+        } = shape::rope(spec, q.len / 4, k.len / 4, n_tokens)?;
         let q_stride = n_q_heads * spec.head_dim;
         let k_stride = n_kv_heads * spec.head_dim;
         let total = n_q_heads * half + n_kv_heads * half;
 
         // x selects (head, pair); y selects the token and its RoPE position.
         let _guard = self.lock.lock().unwrap();
-        let func = self.module.get_function(if self.replay.is_some() { "rope_graph" } else { "rope_kernel" }).map_err(hip_err)?;
+        let func = self
+            .module
+            .get_function(if self.replay.is_some() {
+                "rope_graph"
+            } else {
+                "rope_kernel"
+            })
+            .map_err(hip_err)?;
         let mut pos_mut = pos;
         let mut head_dim_i = spec.head_dim as i32;
         let mut n_q_i = n_q_heads as i32;
@@ -777,7 +1165,10 @@ impl Backend for HipBackend {
         let mut theta = spec.theta;
         let mut q_stride_i = q_stride as i32;
         let mut k_stride_i = k_stride as i32;
-        let mut params = self.replay.as_ref().map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
+        let mut params = self
+            .replay
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
         let mut args = [
             arg!(q.as_device_ptr()),
             arg!(k.as_device_ptr()),
@@ -793,17 +1184,37 @@ impl Backend for HipBackend {
         let block = 256u32;
         let grid_x = (total as u32).div_ceil(block);
         let n_args = if self.replay.is_some() { 10 } else { 9 };
-        func.launch(Dim3::new_2d(grid_x, n_tokens as u32), Dim3::new_1d(block), 0, self.stream.as_ref(), &mut args[..n_args]).map_err(hip_err)?;
+        func.launch(
+            Dim3::new_2d(grid_x, n_tokens as u32),
+            Dim3::new_1d(block),
+            0,
+            self.stream.as_ref(),
+            &mut args[..n_args],
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
-    fn attn(&self, q: &Self::Buf, kv: &KvView<Self::Buf>, spec: &AttnSpec, o: &mut Self::Buf) -> Result<()> {
+    fn attn(
+        &self,
+        q: &Self::Buf,
+        kv: &KvView<Self::Buf>,
+        spec: &AttnSpec,
+        o: &mut Self::Buf,
+    ) -> Result<()> {
         if self.f32_compute || spec.head_dim > ATT_MAX_HEAD_DIM {
             return self.attention_generic(q, kv, spec, 1.0 / (spec.head_dim as f32).sqrt(), 0, o);
         }
         self.q8_invalidate();
         let kv_elems = |b: &HipBuf| b.len / self.kv_elem_bytes();
-        let shape::Attn { n_q, .. } = shape::attn(spec, q.len / 4, kv.len, kv_elems(kv.k), kv_elems(kv.v), o.len / 4)?;
+        let shape::Attn { n_q, .. } = shape::attn(
+            spec,
+            q.len / 4,
+            kv.len,
+            kv_elems(kv.k),
+            kv_elems(kv.v),
+            o.len / 4,
+        )?;
         let per_token = spec.n_q_heads * spec.head_dim;
 
         let _guard = self.lock.lock().unwrap();
@@ -826,28 +1237,59 @@ impl Backend for HipBackend {
                 // zeroed arrival counters (a fixed ATT_COUNTERS_BYTES) followed
                 // by the partials -- fixed offsets, so a shorter call after a
                 // longer one never reads stale partial data as a counter.
-                let mut part = unsafe { counters.cast::<u8>().add(ATT_COUNTERS_BYTES).cast::<c_void>() };
+                let mut part = unsafe {
+                    counters
+                        .cast::<u8>()
+                        .add(ATT_COUNTERS_BYTES)
+                        .cast::<c_void>()
+                };
                 let mut n_kv_i = spec.n_kv_heads as i32;
                 let mut kv_len_i = kv.len as i32;
-                let mut params = self.replay.as_ref().map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
+                let mut params = self
+                    .replay
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
                 let graph = self.replay.is_some();
-                let split = self.module.get_function(if graph { "attn_decode_split_hd128_g4_graph" } else { "attn_decode_split_hd128_g4" }).map_err(hip_err)?;
+                let split = self
+                    .module
+                    .get_function(if graph {
+                        "attn_decode_split_hd128_g4_graph"
+                    } else {
+                        "attn_decode_split_hd128_g4"
+                    })
+                    .map_err(hip_err)?;
                 // The merge also emits the output row's Q8_1 so the output
                 // projection skips its quantize launch.
                 let mut scratch = self.q8_scratch.lock().unwrap();
                 let (mut q8_ptr, mut ys_ptr) = self.q8_row_ptrs(&mut scratch, per_token)?;
                 let mut sargs = [
-                    arg!(q.as_device_ptr()), arg!(kv.k.as_device_ptr()), arg!(kv.v.as_device_ptr()), arg!(part), arg!(counters),
-                    arg!(o.as_device_ptr()), arg!(q8_ptr), arg!(ys_ptr), arg!(n_kv_i), arg!(kv_len_i), arg!(params),
+                    arg!(q.as_device_ptr()),
+                    arg!(kv.k.as_device_ptr()),
+                    arg!(kv.v.as_device_ptr()),
+                    arg!(part),
+                    arg!(counters),
+                    arg!(o.as_device_ptr()),
+                    arg!(q8_ptr),
+                    arg!(ys_ptr),
+                    arg!(n_kv_i),
+                    arg!(kv_len_i),
+                    arg!(params),
                 ];
                 let n_sargs = if graph { 11 } else { 10 };
                 split
-                    .launch(Dim3::new_2d(spec.n_kv_heads as u32, chunks), Dim3::new_1d(group as u32 * WARP), 0, self.stream.as_ref(), &mut sargs[..n_sargs])
+                    .launch(
+                        Dim3::new_2d(spec.n_kv_heads as u32, chunks),
+                        Dim3::new_1d(group as u32 * WARP),
+                        0,
+                        self.stream.as_ref(),
+                        &mut sargs[..n_sargs],
+                    )
                     .map_err(hip_err)?;
                 scratch.cached = Some((o.as_device_ptr() as usize, 1, per_token as i32));
             }
             1 => {
-                let cooperative = spec.head_dim == ATT_DECODE_HEAD_DIM && kv.len <= ATT_DECODE_MAX_KV;
+                let cooperative =
+                    spec.head_dim == ATT_DECODE_HEAD_DIM && kv.len <= ATT_DECODE_MAX_KV;
                 let kernel = match (cooperative, self.replay.is_some()) {
                     (true, true) => "attn_decode_hd128_graph",
                     (true, false) => "attn_decode_hd128",
@@ -859,7 +1301,10 @@ impl Backend for HipBackend {
                 let mut n_q_i = spec.n_q_heads as i32;
                 let mut n_kv_i = spec.n_kv_heads as i32;
                 let mut kv_len_i = kv.len as i32;
-                let mut params = self.replay.as_ref().map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
+                let mut params = self
+                    .replay
+                    .as_ref()
+                    .map_or(std::ptr::null_mut(), |p| p.mem.as_ptr());
                 let mut args = [
                     arg!(q.as_device_ptr()),
                     arg!(kv.k.as_device_ptr()),
@@ -871,10 +1316,22 @@ impl Backend for HipBackend {
                     arg!(kv_len_i),
                     arg!(params),
                 ];
-                let block = if cooperative { ATT_DECODE_THREADS } else { ATT_GENERIC_THREADS.min((spec.head_dim.max(kv.len).max(1)) as u32) };
-                let shared = (self.replay.as_ref().map_or(kv.len.max(1), |p| p.capacity) * 4) as u32;
+                let block = if cooperative {
+                    ATT_DECODE_THREADS
+                } else {
+                    ATT_GENERIC_THREADS.min((spec.head_dim.max(kv.len).max(1)) as u32)
+                };
+                let shared =
+                    (self.replay.as_ref().map_or(kv.len.max(1), |p| p.capacity) * 4) as u32;
                 let n_args = if self.replay.is_some() { 9 } else { 8 };
-                func.launch(Dim3::new_1d(spec.n_q_heads as u32), Dim3::new_1d(block), shared, self.stream.as_ref(), &mut args[..n_args]).map_err(hip_err)?;
+                func.launch(
+                    Dim3::new_1d(spec.n_q_heads as u32),
+                    Dim3::new_1d(block),
+                    shared,
+                    self.stream.as_ref(),
+                    &mut args[..n_args],
+                )
+                .map_err(hip_err)?;
             }
             _ => {
                 let prefix = kv.len - n_q;
@@ -899,31 +1356,77 @@ impl Backend for HipBackend {
                     (ATT_WMMA_HEAD_DIM, true) => {
                         // Flash attention on f16 WMMA, block per (KV head,
                         // 16 queries), one warp per q-head of the group. Static LDS.
-                        let func = self.module.get_function("attn_prefill_wmma_hd128").map_err(hip_err)?;
-                        let grid = Dim3::new_2d(spec.n_kv_heads as u32, (n_q as u32).div_ceil(TOKEN_SUBTILE));
-                        let mut wargs = [args[0], args[1], args[2], args[3], args[5], args[6], args[7], args[8]];
-                        func.launch(grid, Dim3::new_1d(group as u32 * WARP), 0, self.stream.as_ref(), &mut wargs).map_err(hip_err)?;
+                        let func = self
+                            .module
+                            .get_function("attn_prefill_wmma_hd128")
+                            .map_err(hip_err)?;
+                        let grid = Dim3::new_2d(
+                            spec.n_kv_heads as u32,
+                            (n_q as u32).div_ceil(TOKEN_SUBTILE),
+                        );
+                        let mut wargs = [
+                            args[0], args[1], args[2], args[3], args[5], args[6], args[7], args[8],
+                        ];
+                        func.launch(
+                            grid,
+                            Dim3::new_1d(group as u32 * WARP),
+                            0,
+                            self.stream.as_ref(),
+                            &mut wargs,
+                        )
+                        .map_err(hip_err)?;
                     }
                     (_, true) => {
                         // Larger heads already use attention_generic above.
                         // K/V are staged per 16-key tile; aim for ~256 blocks.
-                        let mut qt = ((n_q * spec.n_kv_heads) as u32 / TARGET_BLOCKS).clamp(1, ATT_QT) as i32;
-                        let func = self.module.get_function("attn_prefill_tiled_kernel").map_err(hip_err)?;
-                        let grid = Dim3::new_2d(spec.n_kv_heads as u32, (n_q as u32).div_ceil(qt as u32));
+                        let mut qt = ((n_q * spec.n_kv_heads) as u32 / TARGET_BLOCKS)
+                            .clamp(1, ATT_QT) as i32;
+                        let func = self
+                            .module
+                            .get_function("attn_prefill_tiled_kernel")
+                            .map_err(hip_err)?;
+                        let grid =
+                            Dim3::new_2d(spec.n_kv_heads as u32, (n_q as u32).div_ceil(qt as u32));
                         let shared = 2 * ATT_KT * spec.head_dim as u32 * F32_BYTES; // Ks + Vs
                         let mut targs = [
-                            args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], args[8],
+                            args[0],
+                            args[1],
+                            args[2],
+                            args[3],
+                            args[4],
+                            args[5],
+                            args[6],
+                            args[7],
+                            args[8],
                             arg!(qt),
                         ];
-                        func.launch(grid, Dim3::new_1d(group as u32 * WARP), shared, self.stream.as_ref(), &mut targs).map_err(hip_err)?;
+                        func.launch(
+                            grid,
+                            Dim3::new_1d(group as u32 * WARP),
+                            shared,
+                            self.stream.as_ref(),
+                            &mut targs,
+                        )
+                        .map_err(hip_err)?;
                     }
                     (_, false) => {
-                        let func = self.module.get_function("attn_prefill_kernel").map_err(hip_err)?;
+                        let func = self
+                            .module
+                            .get_function("attn_prefill_kernel")
+                            .map_err(hip_err)?;
                         let max_visible = kv.len;
-                        let block = ATT_GENERIC_THREADS.min((spec.head_dim.max(max_visible).max(1)) as u32);
+                        let block =
+                            ATT_GENERIC_THREADS.min((spec.head_dim.max(max_visible).max(1)) as u32);
                         let shared = (max_visible.max(1) * 4) as u32;
                         let grid = (n_q * spec.n_q_heads) as u32;
-                        func.launch(Dim3::new_1d(grid), Dim3::new_1d(block), shared, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+                        func.launch(
+                            Dim3::new_1d(grid),
+                            Dim3::new_1d(block),
+                            shared,
+                            self.stream.as_ref(),
+                            &mut args,
+                        )
+                        .map_err(hip_err)?;
                     }
                 }
             }
@@ -937,7 +1440,12 @@ impl Backend for HipBackend {
         self.launch1d(
             "silu_mul_kernel",
             n,
-            &mut [arg!(gate.as_device_ptr()), arg!(up.as_device_ptr()), arg!(y.as_device_ptr()), arg!(n_i)],
+            &mut [
+                arg!(gate.as_device_ptr()),
+                arg!(up.as_device_ptr()),
+                arg!(y.as_device_ptr()),
+                arg!(n_i),
+            ],
         )
     }
 }
@@ -947,9 +1455,23 @@ impl HipBackend {
     #[cfg(test)]
     fn wmma_probe(&self, a: &HipBuf, b: &HipBuf, d: &mut HipBuf) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
-        let func = self.module.get_function("wmma_probe_kernel").map_err(hip_err)?;
-        let mut args = [arg!(a.as_device_ptr()), arg!(b.as_device_ptr()), arg!(d.as_device_ptr())];
-        func.launch(Dim3::new_1d(1), Dim3::new_1d(32), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        let func = self
+            .module
+            .get_function("wmma_probe_kernel")
+            .map_err(hip_err)?;
+        let mut args = [
+            arg!(a.as_device_ptr()),
+            arg!(b.as_device_ptr()),
+            arg!(d.as_device_ptr()),
+        ];
+        func.launch(
+            Dim3::new_1d(1),
+            Dim3::new_1d(32),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         rocm_rs::hip::device_synchronize().map_err(hip_err)?;
         Ok(())
     }
@@ -957,14 +1479,37 @@ impl HipBackend {
     /// GEMV memory-traffic probe with reduced dequantization arithmetic.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    fn launch_gemv_membound_probe(&self, mut w_ptr: *mut c_void, mut n_out: i32, mut n_in: i32, mut x_ptr: *mut c_void, mut y_ptr: *mut c_void) -> Result<()> {
+    fn launch_gemv_membound_probe(
+        &self,
+        mut w_ptr: *mut c_void,
+        mut n_out: i32,
+        mut n_in: i32,
+        mut x_ptr: *mut c_void,
+        mut y_ptr: *mut c_void,
+    ) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
-        let func = self.module.get_function("qmatmul_gemv_membound_probe").map_err(hip_err)?;
-        let mut args = [arg!(w_ptr), arg!(n_out), arg!(n_in), arg!(x_ptr), arg!(y_ptr)];
+        let func = self
+            .module
+            .get_function("qmatmul_gemv_membound_probe")
+            .map_err(hip_err)?;
+        let mut args = [
+            arg!(w_ptr),
+            arg!(n_out),
+            arg!(n_in),
+            arg!(x_ptr),
+            arg!(y_ptr),
+        ];
         const ROWS_PER_BLOCK: u32 = 8;
         const THREADS_PER_ROW: u32 = 32;
         let grid = (n_out as u32).div_ceil(ROWS_PER_BLOCK);
-        func.launch(Dim3::new_1d(grid), Dim3::new_1d(ROWS_PER_BLOCK * THREADS_PER_ROW), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        func.launch(
+            Dim3::new_1d(grid),
+            Dim3::new_1d(ROWS_PER_BLOCK * THREADS_PER_ROW),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         rocm_rs::hip::device_synchronize().map_err(hip_err)?;
         Ok(())
     }
@@ -972,26 +1517,71 @@ impl HipBackend {
     /// Launch GEMV with a caller-selected number of rows per block.
     #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    fn launch_gemv_rows_per_block(&self, mut w_ptr: *mut c_void, mut dtype: i32, mut n_out: i32, mut n_in: i32, mut x_ptr: *mut c_void, mut y_ptr: *mut c_void, rows_per_block: u32) -> Result<()> {
+    fn launch_gemv_rows_per_block(
+        &self,
+        mut w_ptr: *mut c_void,
+        mut dtype: i32,
+        mut n_out: i32,
+        mut n_in: i32,
+        mut x_ptr: *mut c_void,
+        mut y_ptr: *mut c_void,
+        rows_per_block: u32,
+    ) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
         let func = self.module.get_function("qmatmul_gemv").map_err(hip_err)?;
-        let mut args = [arg!(w_ptr), arg!(dtype), arg!(n_out), arg!(n_in), arg!(x_ptr), arg!(y_ptr)];
+        let mut args = [
+            arg!(w_ptr),
+            arg!(dtype),
+            arg!(n_out),
+            arg!(n_in),
+            arg!(x_ptr),
+            arg!(y_ptr),
+        ];
         const THREADS_PER_ROW: u32 = 32;
         let grid = (n_out as u32).div_ceil(rows_per_block);
-        func.launch(Dim3::new_1d(grid), Dim3::new_1d(rows_per_block * THREADS_PER_ROW), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        func.launch(
+            Dim3::new_1d(grid),
+            Dim3::new_1d(rows_per_block * THREADS_PER_ROW),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
     /// One warp per output row, eight rows per block.
     #[allow(clippy::too_many_arguments)]
-    fn launch_gemv(&self, mut w_ptr: *mut c_void, mut dtype: i32, mut n_out: i32, mut n_in: i32, mut x_ptr: *mut c_void, mut y_ptr: *mut c_void) -> Result<()> {
+    fn launch_gemv(
+        &self,
+        mut w_ptr: *mut c_void,
+        mut dtype: i32,
+        mut n_out: i32,
+        mut n_in: i32,
+        mut x_ptr: *mut c_void,
+        mut y_ptr: *mut c_void,
+    ) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
         let func = self.module.get_function("qmatmul_gemv").map_err(hip_err)?;
-        let mut args = [arg!(w_ptr), arg!(dtype), arg!(n_out), arg!(n_in), arg!(x_ptr), arg!(y_ptr)];
+        let mut args = [
+            arg!(w_ptr),
+            arg!(dtype),
+            arg!(n_out),
+            arg!(n_in),
+            arg!(x_ptr),
+            arg!(y_ptr),
+        ];
         const ROWS_PER_BLOCK: u32 = 8;
         const THREADS_PER_ROW: u32 = 32;
         let grid = (n_out as u32).div_ceil(ROWS_PER_BLOCK);
-        func.launch(Dim3::new_1d(grid), Dim3::new_1d(ROWS_PER_BLOCK * THREADS_PER_ROW), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        func.launch(
+            Dim3::new_1d(grid),
+            Dim3::new_1d(ROWS_PER_BLOCK * THREADS_PER_ROW),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
@@ -1010,12 +1600,30 @@ impl HipBackend {
         // as a matmul target): a stale hit here would multiply old data.
         self.q8_invalidate();
         let _guard = self.lock.lock().unwrap();
-        let func = self.module.get_function("qmatmul_gemm_wmma").map_err(hip_err)?;
-        let mut args = [arg!(w_ptr), arg!(dtype), arg!(n_out), arg!(n_in), arg!(n_tokens), arg!(x_ptr), arg!(y_ptr)];
+        let func = self
+            .module
+            .get_function("qmatmul_gemm_wmma")
+            .map_err(hip_err)?;
+        let mut args = [
+            arg!(w_ptr),
+            arg!(dtype),
+            arg!(n_out),
+            arg!(n_in),
+            arg!(n_tokens),
+            arg!(x_ptr),
+            arg!(y_ptr),
+        ];
         // All LDS is static; the dynamic shared-memory argument must be zero.
         let grid_x = (n_out as u32).div_ceil(M_TILE);
         let grid_y = (n_tokens as u32).div_ceil(TOKEN_SUBTILE);
-        func.launch(Dim3::new_2d(grid_x, grid_y), Dim3::new_1d(GEMM_THREADS), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        func.launch(
+            Dim3::new_2d(grid_x, grid_y),
+            Dim3::new_1d(GEMM_THREADS),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
@@ -1032,12 +1640,29 @@ impl HipBackend {
         mut y_ptr: *mut c_void,
     ) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
-        let func = self.module.get_function("qmatmul_gemm_wmma_membound_probe").map_err(hip_err)?;
-        let mut args = [arg!(w_ptr), arg!(n_out), arg!(n_in), arg!(n_tokens), arg!(x_ptr), arg!(y_ptr)];
+        let func = self
+            .module
+            .get_function("qmatmul_gemm_wmma_membound_probe")
+            .map_err(hip_err)?;
+        let mut args = [
+            arg!(w_ptr),
+            arg!(n_out),
+            arg!(n_in),
+            arg!(n_tokens),
+            arg!(x_ptr),
+            arg!(y_ptr),
+        ];
         let grid_x = (n_out as u32).div_ceil(M_TILE);
         let grid_y = (n_tokens as u32).div_ceil(TOKEN_SUBTILE);
         let shared = (M_TILE + TOKEN_SUBTILE) * TOKEN_SUBTILE * F16_BYTES; // As[64][16] + Bs[16][16]
-        func.launch(Dim3::new_2d(grid_x, grid_y), Dim3::new_1d(GEMM_THREADS), shared, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        func.launch(
+            Dim3::new_2d(grid_x, grid_y),
+            Dim3::new_1d(GEMM_THREADS),
+            shared,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
@@ -1045,9 +1670,24 @@ impl HipBackend {
     #[cfg(test)]
     fn wmma_i8_probe(&self, a: &HipBuf, b: &HipBuf, c: &HipBuf, d: &mut HipBuf) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
-        let func = self.module.get_function("wmma_i8_probe_kernel").map_err(hip_err)?;
-        let mut args = [arg!(a.as_device_ptr()), arg!(b.as_device_ptr()), arg!(c.as_device_ptr()), arg!(d.as_device_ptr())];
-        func.launch(Dim3::new_1d(1), Dim3::new_1d(32), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        let func = self
+            .module
+            .get_function("wmma_i8_probe_kernel")
+            .map_err(hip_err)?;
+        let mut args = [
+            arg!(a.as_device_ptr()),
+            arg!(b.as_device_ptr()),
+            arg!(c.as_device_ptr()),
+            arg!(d.as_device_ptr()),
+        ];
+        func.launch(
+            Dim3::new_1d(1),
+            Dim3::new_1d(32),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         rocm_rs::hip::device_synchronize().map_err(hip_err)?;
         Ok(())
     }
@@ -1057,20 +1697,56 @@ impl HipBackend {
     /// Test-only entry point; the production int8 path quantizes into the
     /// backend-private scratch via qmatmul_i8.
     #[cfg(test)]
-    fn quantize_q8_1(&self, x: &HipBuf, n_in: i32, n_tokens: i32, q8: &mut HipBuf, ys: &mut HipBuf) -> Result<()> {
+    fn quantize_q8_1(
+        &self,
+        x: &HipBuf,
+        n_in: i32,
+        n_tokens: i32,
+        q8: &mut HipBuf,
+        ys: &mut HipBuf,
+    ) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
-        self.launch_quantize_q8_1_unlocked(x.as_device_ptr(), n_in, n_tokens, q8.as_device_ptr(), ys.as_device_ptr())?;
+        self.launch_quantize_q8_1_unlocked(
+            x.as_device_ptr(),
+            n_in,
+            n_tokens,
+            q8.as_device_ptr(),
+            ys.as_device_ptr(),
+        )?;
         rocm_rs::hip::device_synchronize().map_err(hip_err)?;
         Ok(())
     }
 
     /// Caller holds `self.lock`.
-    fn launch_quantize_q8_1_unlocked(&self, mut x_ptr: *mut c_void, mut n_in: i32, mut n_tokens: i32, mut q8_ptr: *mut c_void, mut ys_ptr: *mut c_void) -> Result<()> {
-        let func = self.module.get_function("quantize_q8_1_kernel").map_err(hip_err)?;
-        let mut args = [arg!(x_ptr), arg!(n_in), arg!(n_tokens), arg!(q8_ptr), arg!(ys_ptr)];
+    fn launch_quantize_q8_1_unlocked(
+        &self,
+        mut x_ptr: *mut c_void,
+        mut n_in: i32,
+        mut n_tokens: i32,
+        mut q8_ptr: *mut c_void,
+        mut ys_ptr: *mut c_void,
+    ) -> Result<()> {
+        let func = self
+            .module
+            .get_function("quantize_q8_1_kernel")
+            .map_err(hip_err)?;
+        let mut args = [
+            arg!(x_ptr),
+            arg!(n_in),
+            arg!(n_tokens),
+            arg!(q8_ptr),
+            arg!(ys_ptr),
+        ];
         let n = n_tokens as u32 * (n_in as u32 / Q8_1_BLOCK) * Q8_1_LANES;
         let block = 256u32;
-        func.launch(calculate_grid_1d(n, block), Dim3::new_1d(block), 0, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        func.launch(
+            calculate_grid_1d(n, block),
+            Dim3::new_1d(block),
+            0,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
         Ok(())
     }
 
@@ -1080,17 +1756,35 @@ impl HipBackend {
     /// overlapping matmuls, and grows the scratch only after a device
     /// sync so no in-flight kernel can still be reading the old one.
     #[allow(clippy::too_many_arguments)]
-    fn qmatmul_i8(&self, kernel: &str, n_tile: u32, mut w_ptr: *mut c_void, mut n_out: i32, mut n_in: i32, mut n_tokens: i32, x_ptr: *mut c_void, mut y_ptr: *mut c_void) -> Result<()> {
+    fn qmatmul_i8(
+        &self,
+        kernel: &str,
+        n_tile: u32,
+        mut w_ptr: *mut c_void,
+        mut n_out: i32,
+        mut n_in: i32,
+        mut n_tokens: i32,
+        x_ptr: *mut c_void,
+        mut y_ptr: *mut c_void,
+    ) -> Result<()> {
         let _guard = self.lock.lock().unwrap();
         let mut scratch = self.q8_scratch.lock().unwrap();
         let q8_bytes = product(&[n_tokens as usize, n_in as usize])?;
-        let ys_bytes = product(&[n_tokens as usize, n_in as usize / Q8_1_BLOCK as usize, size_of::<[f32; 2]>()])?;
+        let ys_bytes = product(&[
+            n_tokens as usize,
+            n_in as usize / Q8_1_BLOCK as usize,
+            size_of::<[f32; 2]>(),
+        ])?;
         let n_tile = gemm_token_tile(kernel, n_tile, n_tokens as u32);
         // _nt8 is the 128-row x 128-token, 256-thread geometry; _j128 is
         // 8 warps as 4 along rows x 2 along tokens on 64 rows.
         let wide_rows = kernel.ends_with("_nt8");
         let m_tile = if wide_rows { 2 * M_TILE } else { M_TILE };
-        let threads = if wide_rows || kernel.ends_with("_j128") { 2 * GEMM_THREADS } else { GEMM_THREADS };
+        let threads = if wide_rows || kernel.ends_with("_j128") {
+            2 * GEMM_THREADS
+        } else {
+            GEMM_THREADS
+        };
         let grid_x = (n_out as u32).div_ceil(m_tile);
         let grid_y = (n_tokens as u32).div_ceil(n_tile);
         // Splits must align to superblocks. Target 256 blocks, at most
@@ -1101,17 +1795,28 @@ impl HipBackend {
         let mut splits = 1u32;
         for cand in [2u32, 4, 8] {
             let partial = product(&[cand as usize, n_tokens as usize, n_out as usize, 4])?;
-            if u64::from(grid_x) * u64::from(grid_y) * u64::from(splits) >= u64::from(TARGET_BLOCKS) || superblocks % cand != 0 || partial > weight_bytes / 2 {
+            if u64::from(grid_x) * u64::from(grid_y) * u64::from(splits) >= u64::from(TARGET_BLOCKS)
+                || superblocks % cand != 0
+                || partial > weight_bytes / 2
+            {
                 break;
             }
             splits = cand;
         }
-        let partial_bytes = if splits > 1 { product(&[splits as usize, n_tokens as usize, n_out as usize, 4])? } else { 0 };
+        let partial_bytes = if splits > 1 {
+            product(&[splits as usize, n_tokens as usize, n_out as usize, 4])?
+        } else {
+            0
+        };
         let need = sum([q8_bytes, ys_bytes, partial_bytes])?;
         scratch.reserve(need, &self.buffers)?;
         let key = (x_ptr as usize, n_tokens, n_in);
         let reuse = scratch.cached == Some(key);
-        let base = scratch.mem.as_ref().expect("scratch allocated above").as_ptr();
+        let base = scratch
+            .mem
+            .as_ref()
+            .expect("scratch allocated above")
+            .as_ptr();
         let mut q8_ptr = base;
         // SAFETY: all three regions lie inside the live allocation of `need`
         // bytes; q8_bytes is a multiple of 32 and ys_bytes a multiple of 8,
@@ -1124,13 +1829,27 @@ impl HipBackend {
         }
         // Valid until any op writes a buffer -- or this matmul writes into
         // the cached input itself.
-        scratch.cached = if y_ptr as usize == x_ptr as usize { None } else { Some(key) };
+        scratch.cached = if y_ptr as usize == x_ptr as usize {
+            None
+        } else {
+            Some(key)
+        };
 
         let func = self.module.get_function(kernel).map_err(hip_err)?;
         let mut k_split = n_in / splits as i32;
         let mut out_ptr = if splits > 1 { partial_ptr } else { y_ptr };
         let mut n_tile_i = n_tile as i32;
-        let mut args = [arg!(w_ptr), arg!(n_out), arg!(n_in), arg!(n_tokens), arg!(q8_ptr), arg!(ys_ptr), arg!(out_ptr), arg!(k_split), arg!(n_tile_i)];
+        let mut args = [
+            arg!(w_ptr),
+            arg!(n_out),
+            arg!(n_in),
+            arg!(n_tokens),
+            arg!(q8_ptr),
+            arg!(ys_ptr),
+            arg!(out_ptr),
+            arg!(k_split),
+            arg!(n_tile_i),
+        ];
         // The k256 kernel carves its LDS from a dynamic allocation sized to
         // the live token tile (see its i9_smem comment); the others declare
         // theirs statically.
@@ -1140,7 +1859,8 @@ impl HipBackend {
         // keep float2 token scales for all 8 blocks and 16 x 64 float coefs.
         let per_sb = QK_K / Q8_1_BLOCK;
         let shared = if kernel.starts_with("qmatmul_gemm_wmma_i8_k256_nt")
-            || kernel.starts_with("qmatmul_gemm_wmma_i8_k256_packed_nt") {
+            || kernel.starts_with("qmatmul_gemm_wmma_i8_k256_packed_nt")
+        {
             // As, Bs, ysh (d per token per block of the half, f16), shl (s
             // hi/lo per token per block, f16), coef (d*sc), dmin per row,
             // m per row per sub-block (f16) -- see i9_gemm_q4k_nt_body.
@@ -1154,32 +1874,56 @@ impl HipBackend {
         } else if kernel.starts_with("qmatmul_gemm_wmma_i8_q6k_k256_nt") {
             // As, Bs, ysh (d per token per block of the half, f16), coef (16
             // per row: one per 16 K).
-            m_tile * I9_AS_STRIDE + n_tile * I9_BS_STRIDE + n_tile * (per_sb / 2) * F16_BYTES + 2 * per_sb * m_tile * F32_BYTES
+            m_tile * I9_AS_STRIDE
+                + n_tile * I9_BS_STRIDE
+                + n_tile * (per_sb / 2) * F16_BYTES
+                + 2 * per_sb * m_tile * F32_BYTES
         } else if kernel.contains("_k256") {
-            M_TILE * I9_AS_STRIDE + n_tile * I9_BS_STRIDE + n_tile * per_sb * 8 + 2 * per_sb * M_TILE * F32_BYTES
+            M_TILE * I9_AS_STRIDE
+                + n_tile * I9_BS_STRIDE
+                + n_tile * per_sb * 8
+                + 2 * per_sb * M_TILE * F32_BYTES
         } else {
             0
         };
-        func.launch(Dim3::new_3d(grid_x, grid_y, splits), Dim3::new_1d(threads), shared, self.stream.as_ref(), &mut args).map_err(hip_err)?;
+        func.launch(
+            Dim3::new_3d(grid_x, grid_y, splits),
+            Dim3::new_1d(threads),
+            shared,
+            self.stream.as_ref(),
+            &mut args,
+        )
+        .map_err(hip_err)?;
 
         if splits > 1 {
-            let reduce = self.module.get_function("splitk_reduce_kernel").map_err(hip_err)?;
+            let reduce = self
+                .module
+                .get_function("splitk_reduce_kernel")
+                .map_err(hip_err)?;
             let mut splits_i = splits as i32;
             let mut n = n_tokens * n_out;
             let mut rargs = [arg!(partial_ptr), arg!(splits_i), arg!(n), arg!(y_ptr)];
             let block = 256u32;
-            reduce.launch(calculate_grid_1d(n as u32, block), Dim3::new_1d(block), 0, self.stream.as_ref(), &mut rargs).map_err(hip_err)?;
+            reduce
+                .launch(
+                    calculate_grid_1d(n as u32, block),
+                    Dim3::new_1d(block),
+                    0,
+                    self.stream.as_ref(),
+                    &mut rargs,
+                )
+                .map_err(hip_err)?;
         }
         Ok(())
     }
 }
 
-mod decode;
-mod prepared;
-mod graph;
-mod memory;
 #[cfg(test)]
 mod attention;
+mod decode;
+mod graph;
+mod memory;
+mod prepared;
 
 #[cfg(test)]
 pub(crate) mod tests;

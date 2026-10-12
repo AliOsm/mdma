@@ -2,7 +2,11 @@ use super::*;
 use std::collections::HashMap;
 
 fn load_exact(env: &HashMap<&str, &str>) -> Result<Config, BoxError> {
-    Config::load(|name| env.get(name).map(|v| (*v).to_owned()).ok_or(VarError::NotPresent))
+    Config::load(|name| {
+        env.get(name)
+            .map(|v| (*v).to_owned())
+            .ok_or(VarError::NotPresent)
+    })
 }
 
 fn load(vars: &[(&str, &str)]) -> Result<Config, BoxError> {
@@ -34,7 +38,11 @@ fn listen_accepts_loopback_only() {
         ("192.168.1.10:6364", false),
         ("localhost:6364", false),
     ] {
-        assert_eq!(load(&[("MDMA_WEB_LISTEN", listen)]).is_ok(), ok, "listen: {listen}");
+        assert_eq!(
+            load(&[("MDMA_WEB_LISTEN", listen)]).is_ok(),
+            ok,
+            "listen: {listen}"
+        );
     }
 }
 

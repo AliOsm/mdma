@@ -6,8 +6,12 @@ use crate::model::decoder::Decoder;
 use crate::model::{Model, Workspace};
 use crate::sampler::greedy;
 
-pub(crate) type Capture<B> =
-    for<'a> fn(&'a B, &'a Model<B>, &'a mut KvCache<B>, &'a mut Workspace<B>) -> Result<Box<dyn Decoder + 'a>>;
+pub(crate) type Capture<B> = for<'a> fn(
+    &'a B,
+    &'a Model<B>,
+    &'a mut KvCache<B>,
+    &'a mut Workspace<B>,
+) -> Result<Box<dyn Decoder + 'a>>;
 
 pub(crate) fn replay_matches_eager<B: Backend>(
     backend: &B,
@@ -31,7 +35,9 @@ pub(crate) fn replay_matches_eager<B: Backend>(
         let mut logits = Vec::new();
         for pos in 0..steps {
             let token = prompt.get(pos).copied().unwrap_or_else(|| greedy(&logits));
-            let want = model.forward(backend, &mut reference, &mut rw, token, pos as u32).unwrap();
+            let want = model
+                .forward(backend, &mut reference, &mut rw, token, pos as u32)
+                .unwrap();
             logits = da.forward(token, pos as u32).unwrap();
             assert_eq!(logits, want, "graph logits at position {pos}");
             db.forward((pos + 17) as u32, pos as u32).unwrap();
@@ -48,10 +54,22 @@ pub(crate) fn replay_matches_eager<B: Backend>(
     // Drop releases the exclusive borrows. Prefill may grow eager scratch;
     // recapture must pick up the new KV position.
     let mut pw = model.alloc_workspace(backend, 3).unwrap();
-    model.prefill(backend, &mut a, &mut pw, &[31, 47, 59], steps as u32).unwrap();
-    model.prefill(backend, &mut reference, &mut pw, &[31, 47, 59], steps as u32).unwrap();
+    model
+        .prefill(backend, &mut a, &mut pw, &[31, 47, 59], steps as u32)
+        .unwrap();
+    model
+        .prefill(
+            backend,
+            &mut reference,
+            &mut pw,
+            &[31, 47, 59],
+            steps as u32,
+        )
+        .unwrap();
     let pos = (steps + 3) as u32;
-    let want = model.forward(backend, &mut reference, &mut rw, 99, pos).unwrap();
+    let want = model
+        .forward(backend, &mut reference, &mut rw, 99, pos)
+        .unwrap();
     let mut da = capture(backend, model, &mut a, &mut aw).unwrap();
     assert_eq!(da.forward(99, pos).unwrap(), want);
 }

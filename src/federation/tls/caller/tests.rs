@@ -191,7 +191,12 @@ fn local_tls12_anonymous_and_incomplete_connections_cannot_route() {
 fn ordinary_listener_lifetime_is_never_extended_by_expired_material() {
     let (_, leaf, root) = connection(true, true);
     assert!(listener_expiry(&[], std::slice::from_ref(&root), utc_ms().unwrap()).is_err());
-    let expiry = listener_expiry(std::slice::from_ref(&leaf), std::slice::from_ref(&root), utc_ms().unwrap()).unwrap();
+    let expiry = listener_expiry(
+        std::slice::from_ref(&leaf),
+        std::slice::from_ref(&root),
+        utc_ms().unwrap(),
+    )
+    .unwrap();
     assert!(listener_expiry(&[leaf], &[root], expiry).is_err());
 }
 
@@ -204,6 +209,9 @@ fn an_actual_resumed_local_tls_connection_cannot_mint_routing_consent() {
     let now = utc_ms().unwrap();
     Caller::from_inbound(&first, now + 10_000, now, Instant::now()).unwrap();
     let (_, resumed) = super::super::tests::handshake(client, server).unwrap();
-    assert_eq!(resumed.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
+    assert_eq!(
+        resumed.handshake_kind(),
+        Some(rustls::HandshakeKind::Resumed)
+    );
     assert!(Caller::from_inbound(&resumed, now + 10_000, now, Instant::now()).is_err());
 }

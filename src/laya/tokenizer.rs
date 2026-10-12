@@ -35,8 +35,8 @@ impl Tokenizer {
     pub(super) fn from_sources(tokenizer: &str, config: &str) -> Result<Self> {
         // v1 reads canonical 2.0 configs. Convert legacy checkpoints in memory,
         // leaving their files untouched and keeping token IDs unchanged.
-        let canonical = tokenizers::canonicalize_str(tokenizer)
-            .map_err(|e| Error::Tokenizer(e.to_string()))?;
+        let canonical =
+            tokenizers::canonicalize_str(tokenizer).map_err(|e| Error::Tokenizer(e.to_string()))?;
         let inner =
             tokenizers::from_json(&canonical).map_err(|e| Error::Tokenizer(e.to_string()))?;
         let tokenizer_config: Value = serde_json::from_str(&canonical)?;

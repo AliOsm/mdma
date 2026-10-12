@@ -1,9 +1,9 @@
 use super::super::config::{SigningKey, Window};
 use super::super::tls::tests::Fixture;
 use super::*;
-use std::assert_matches;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rama::http::grpc::Code;
+use std::assert_matches;
 
 fn setup() -> (Fixture, ControlService, Binding) {
     let fixture = Fixture::new();
@@ -51,8 +51,14 @@ fn scan() -> ScanCapabilitiesRequest {
 }
 
 fn approve_exports(fixture: &Fixture, exports: &[&str]) {
-    let mut policy = fixture.store.snapshot().unwrap()
-        .peer("remote.mdma.test").unwrap().policy.clone();
+    let mut policy = fixture
+        .store
+        .snapshot()
+        .unwrap()
+        .peer("remote.mdma.test")
+        .unwrap()
+        .policy
+        .clone();
     policy.catalog_exports = exports.iter().map(|name| (*name).into()).collect();
     fixture.store.approve_policy(policy).unwrap();
 }
@@ -61,7 +67,8 @@ fn verify_reply(service: &ControlService, reply: SignedCatalog) -> CatalogBody {
     let now = utc_ms().unwrap();
     catalog::verify_signed_catalog(
         &catalog::SignedCatalogEnvelope {
-            key_id: reply.key_id, body_json: reply.body_json,
+            key_id: reply.key_id,
+            body_json: reply.body_json,
             signature: reply.signature.try_into().unwrap(),
         },
         &service.signer.public_key(),
@@ -73,7 +80,8 @@ fn verify_reply(service: &ControlService, reply: SignedCatalog) -> CatalogBody {
             key_valid_from_ms: now - 60_000,
             key_valid_until_ms: now + 300_000,
         },
-    ).unwrap()
+    )
+    .unwrap()
 }
 
 #[tokio::test]
@@ -83,38 +91,93 @@ async fn native_catalog_is_recipient_filtered_and_disclosure_revocation_withdraw
     let inventory = native.federation_inventory();
     let expected = inventory.snapshot(&["native".into()]);
     let service = service.with_inventory(inventory);
-    assert!(verify_reply(&service, service.scan_capabilities(request(scan(), &binding))
-        .await.unwrap().into_inner()).models.is_empty());
+    assert!(
+        verify_reply(
+            &service,
+            service
+                .scan_capabilities(request(scan(), &binding))
+                .await
+                .unwrap()
+                .into_inner()
+        )
+        .models
+        .is_empty()
+    );
     approve_exports(&f, &["native", "unknown"]);
-    let body = verify_reply(&service, service.scan_capabilities(request(scan(), &binding))
-        .await.unwrap().into_inner());
+    let body = verify_reply(
+        &service,
+        service
+            .scan_capabilities(request(scan(), &binding))
+            .await
+            .unwrap()
+            .into_inner(),
+    );
     assert_eq!(body.models, expected.models);
-    assert!(f.store.snapshot().unwrap().peer("remote.mdma.test")
-        .unwrap().policy.execute_exports.is_empty());
+    assert!(
+        f.store
+            .snapshot()
+            .unwrap()
+            .peer("remote.mdma.test")
+            .unwrap()
+            .policy
+            .execute_exports
+            .is_empty()
+    );
     approve_exports(&f, &[]);
-    assert!(verify_reply(&service, service.scan_capabilities(request(scan(), &binding))
-        .await.unwrap().into_inner()).models.is_empty());
+    assert!(
+        verify_reply(
+            &service,
+            service
+                .scan_capabilities(request(scan(), &binding))
+                .await
+                .unwrap()
+                .into_inner()
+        )
+        .models
+        .is_empty()
+    );
 }
 
 #[tokio::test]
 async fn signed_native_catalog_follows_live_power_and_drain_without_changing_profile() {
-    use crate::power::{PowerStatus, DegradedLimits, ServerState as PowerState};
+    use crate::power::{DegradedLimits, PowerStatus, ServerState as PowerState};
     let (f, service, binding) = setup();
     approve_exports(&f, &["native", "alias"]);
     let (tx, rx) = tokio::sync::watch::channel(PowerStatus::default());
-    let native = crate::federation::inventory::tests::native_service()
-        .with_power(rx, DegradedLimits { n_ctx: 12, max_tokens: 3 });
+    let native = crate::federation::inventory::tests::native_service().with_power(
+        rx,
+        DegradedLimits {
+            n_ctx: 12,
+            max_tokens: 3,
+        },
+    );
     let service = service.with_inventory(native.federation_inventory());
-    let serving = verify_reply(&service, service.scan_capabilities(request(scan(), &binding))
-        .await.unwrap().into_inner());
+    let serving = verify_reply(
+        &service,
+        service
+            .scan_capabilities(request(scan(), &binding))
+            .await
+            .unwrap()
+            .into_inner(),
+    );
     for (power, state) in [
         (PowerState::Degraded, ServerState::Degraded),
         (PowerState::Critical, ServerState::Critical),
         (PowerState::Draining, ServerState::Draining),
     ] {
-        tx.send(PowerStatus { state: power, reading: None }).unwrap();
-        let body = verify_reply(&service, service.scan_capabilities(request(scan(), &binding))
-            .await.unwrap().into_inner());
+        tx.send(PowerStatus {
+            state: power,
+            reading: None,
+        })
+        .unwrap();
+        let body = verify_reply(
+            &service,
+            service
+                .scan_capabilities(request(scan(), &binding))
+                .await
+                .unwrap()
+                .into_inner(),
+        );
         assert_eq!(body.server_state, state);
         assert_eq!(body.models.len(), 2);
         for (model, original) in body.models.iter().zip(&serving.models) {
@@ -135,15 +198,15 @@ async fn readiness_or_policy_change_during_signing_cannot_publish_a_stale_snapsh
     impl Inventory for Changing {
         fn snapshot(&self, _: &[String]) -> inventory::Snapshot {
             let second = self.calls.fetch_add(1, Ordering::SeqCst) > 0;
-            if second
-                && let Some(store) = &self.store
-            {
+            if second && let Some(store) = &self.store {
                 store.suspend("remote.mdma.test").unwrap();
             }
             inventory::Snapshot {
                 state: if second && self.store.is_none() {
                     ServerState::Critical
-                } else { ServerState::Serving },
+                } else {
+                    ServerState::Serving
+                },
                 models: vec![],
                 host: crate::grpc::Host::default(),
             }
@@ -155,8 +218,18 @@ async fn readiness_or_policy_change_during_signing_cannot_publish_a_stale_snapsh
             calls: AtomicUsize::new(0),
             store: change_policy.then(|| f.store.clone()),
         }));
-        let result = service.scan_capabilities(request(scan(), &binding)).await.unwrap_err();
-        assert_eq!(result.code(), if change_policy { Code::PermissionDenied } else { Code::Aborted });
+        let result = service
+            .scan_capabilities(request(scan(), &binding))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            result.code(),
+            if change_policy {
+                Code::PermissionDenied
+            } else {
+                Code::Aborted
+            }
+        );
     }
 }
 
@@ -169,8 +242,14 @@ async fn control_only_shutdown_signs_draining_empty_catalog() {
     let service = service.with_shutdown(Some(weak.clone()));
     trigger.cancel();
     weak.cancelled().await;
-    let body = verify_reply(&service, service.scan_capabilities(request(scan(), &binding))
-        .await.unwrap().into_inner());
+    let body = verify_reply(
+        &service,
+        service
+            .scan_capabilities(request(scan(), &binding))
+            .await
+            .unwrap()
+            .into_inner(),
+    );
     assert_eq!(body.server_state, ServerState::Draining);
     assert!(body.models.is_empty());
 }
@@ -363,11 +442,20 @@ async fn bounded_control_quota_and_exports_never_invent_models() {
         .clone();
     policy.catalog_exports.push("not-integrated".into());
     f.store.approve_policy(policy).unwrap();
-    let reply = service.scan_capabilities(request(scan(), &binding)).await.unwrap().into_inner();
+    let reply = service
+        .scan_capabilities(request(scan(), &binding))
+        .await
+        .unwrap()
+        .into_inner();
     let body = catalog::CatalogBody::from_canonical(
-        &crate::federation::canonical_json::parse(&reply.body_json, catalog::MAX_JSON_DEPTH).unwrap(),
-    ).unwrap();
-    assert!(body.models.is_empty(), "a grant is not native load provenance");
+        &crate::federation::canonical_json::parse(&reply.body_json, catalog::MAX_JSON_DEPTH)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        body.models.is_empty(),
+        "a grant is not native load provenance"
+    );
 }
 
 #[tokio::test]
@@ -429,41 +517,77 @@ struct WireTransport(
 
 #[tokio::test]
 async fn actual_mtls_synthesis_requires_deadline_grant_and_exact_selection_then_completes() {
-    use rama::{Layer, http::{Body, client::EasyHttpConnectorBuilder, server::HttpServer}, rt::Executor, tcp::server::TcpListener};
+    use crate::federation::{
+        config::{ExecuteExport, Operation},
+        execution::ingress::{Connections, Gate},
+    };
+    use rama::tls::rustls::{
+        client::RustlsClientConfigExt,
+        server::{RustlsServerConfigExt, TlsAcceptorLayer},
+    };
     use rama::tls::{client::TlsClientConfig, server::TlsServerConfig};
-    use rama::tls::rustls::{client::RustlsClientConfigExt, server::{RustlsServerConfigExt, TlsAcceptorLayer}};
-    use crate::federation::{config::{ExecuteExport, Operation}, execution::ingress::{Gate, Connections}};
+    use rama::{
+        Layer,
+        http::{Body, client::EasyHttpConnectorBuilder, server::HttpServer},
+        rt::Executor,
+        tcp::server::TcpListener,
+    };
     let (f, service, _) = setup();
     let native = crate::federation::inventory::tests::native_service();
     let descriptor = native.federation_executor().descriptor("native").unwrap();
     let service = service.with_execution(native.federation_executor());
     let (tls_client, tls_server) = f.configs();
     let executor = Executor::default();
-    let listener = TcpListener::bind_address("127.0.0.1:0", executor.clone()).await.unwrap();
+    let listener = TcpListener::bind_address("127.0.0.1:0", executor.clone())
+        .await
+        .unwrap();
     let addr = listener.local_addr().unwrap();
     let mut http = HttpServer::new_h2(executor);
     http.h2_mut().set_max_send_buf_size(1);
     http.h2_mut().set_max_concurrent_streams(2);
-    let server = Connections::new(TlsAcceptorLayer::new(TlsServerConfig::new()
-        .with_modify_rustls_config(move |_| Ok(tls_server.clone())))
+    let server = Connections::new(
+        TlsAcceptorLayer::new(
+            TlsServerConfig::new().with_modify_rustls_config(move |_| Ok(tls_server.clone())),
+        )
         .into_layer(crate::federation::tls::BindPeerService::new(
-            f.store.clone(), f.now_ms + 100_000, http.service(Gate::new(service.into_server())))));
+            f.store.clone(),
+            f.now_ms + 100_000,
+            http.service(Gate::new(service.into_server())),
+        )),
+    );
     let task = tokio::spawn(async move { listener.serve(server).await });
     let tls = TlsClientConfig::new()
         .with_server_name(rama::net::address::Host::from_static("local.mdma.test"))
         .with_modify_rustls_config(move |_| Ok(tls_client.clone()));
     let connector = EasyHttpConnectorBuilder::new()
-        .with_default_transport_connector().with_default_dns_connector()
-        .without_tls_proxy_support().without_proxy_support()
+        .with_default_transport_connector()
+        .with_default_dns_connector()
+        .without_tls_proxy_support()
+        .without_proxy_support()
         .with_tls_support_using_rustls(tls)
         .with_default_http_connector::<Body>(Executor::default())
-        .without_connection_pool().build_client::<Body, Body, _>();
-    let client = FederationClient::new(WireTransport(rama::service::BoxService::new(connector)),
-        format!("https://{addr}").parse().unwrap());
+        .without_connection_pool()
+        .build_client::<Body, Body, _>();
+    let client = FederationClient::new(
+        WireTransport(rama::service::BoxService::new(connector)),
+        format!("https://{addr}").parse().unwrap(),
+    );
     let message = SynthesizeRequest {
-        envelope: Some(ExecutionEnvelope { origin: "remote.mdma.test".into(), destination: "local.mdma.test".into(),
-            request_id: vec![44; 16], model: "native".into(), artifact_id: descriptor.artifact_id, profile_id: descriptor.profile_id, timeout_ms: 2000 }),
-        prompt: "abc".into(), max_tokens: 3, sampler: Some(SamplerConfig { temperature: Some(0.), ..Default::default() }),
+        envelope: Some(ExecutionEnvelope {
+            origin: "remote.mdma.test".into(),
+            destination: "local.mdma.test".into(),
+            request_id: vec![44; 16],
+            model: "native".into(),
+            artifact_id: descriptor.artifact_id,
+            profile_id: descriptor.profile_id,
+            timeout_ms: 2000,
+        }),
+        prompt: "abc".into(),
+        max_tokens: 3,
+        sampler: Some(SamplerConfig {
+            temperature: Some(0.),
+            ..Default::default()
+        }),
     };
     let deadline_request = |message| {
         let mut request = Request::new(message);
@@ -472,27 +596,54 @@ async fn actual_mtls_synthesis_requires_deadline_grant_and_exact_selection_then_
     };
     assert_matches!(client.synthesize(message.clone()).await, Err(s) if s.code() == Code::InvalidArgument);
     assert_matches!(client.synthesize(deadline_request(message.clone())).await, Err(s) if s.code() == Code::PermissionDenied);
-    let mut policy = f.store.snapshot().unwrap().peer("remote.mdma.test").unwrap().policy.clone();
-    policy.execute_exports = vec![ExecuteExport { model: "native".into(), operation: Operation::Synthesize }];
+    let mut policy = f
+        .store
+        .snapshot()
+        .unwrap()
+        .peer("remote.mdma.test")
+        .unwrap()
+        .policy
+        .clone();
+    policy.execute_exports = vec![ExecuteExport {
+        model: "native".into(),
+        operation: Operation::Synthesize,
+    }];
     f.store.approve_policy(policy).unwrap();
     let mut wrong = message.clone();
     wrong.envelope.as_mut().unwrap().profile_id = format!("sha256:{}", "0".repeat(64));
     wrong.envelope.as_mut().unwrap().request_id = vec![43; 16];
     assert_matches!(client.synthesize(deadline_request(wrong)).await, Err(s) if s.code() == Code::FailedPrecondition);
-    let mut stream = client.synthesize(deadline_request(message.clone())).await.unwrap().into_inner();
-    let Some(synthesize_event::Event::Accepted(accepted)) = stream.message().await.unwrap().unwrap().event else { panic!("first event"); };
+    let mut stream = client
+        .synthesize(deadline_request(message.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+    let Some(synthesize_event::Event::Accepted(accepted)) =
+        stream.message().await.unwrap().unwrap().event
+    else {
+        panic!("first event");
+    };
     assert_eq!(accepted.request_id, vec![44; 16]);
     assert_eq!(accepted.sampler.unwrap().temperature, Some(0.));
     let mut count = 0;
     loop {
         let event = stream.message().await.unwrap().unwrap().event.unwrap();
         match event {
-            synthesize_event::Event::Token(token) => { assert_eq!(token.index, count); count += 1; }
-            synthesize_event::Event::Completed(completed) => { assert_eq!(completed.emitted_tokens, count); break; }
+            synthesize_event::Event::Token(token) => {
+                assert_eq!(token.index, count);
+                count += 1;
+            }
+            synthesize_event::Event::Completed(completed) => {
+                assert_eq!(completed.emitted_tokens, count);
+                break;
+            }
             synthesize_event::Event::Accepted(_) => panic!("duplicate Accepted"),
         }
     }
-    assert!(stream.message().await.unwrap().is_none(), "gRPC OK after completion");
+    assert!(
+        stream.message().await.unwrap().is_none(),
+        "gRPC OK after completion"
+    );
     assert_matches!(client.synthesize(deadline_request(message)).await, Err(s) if s.code() == Code::AlreadyExists);
     task.abort();
     let _ = task.await;
@@ -603,6 +754,8 @@ async fn actual_http2_mtls_listener_preserves_binding_and_signed_native_catalog(
 
 impl ControlService {
     pub(crate) fn execution_idle(&self) -> bool {
-        self.execution.as_ref().is_none_or(crate::federation::execution::Service::is_idle)
+        self.execution
+            .as_ref()
+            .is_none_or(crate::federation::execution::Service::is_idle)
     }
 }

@@ -15,9 +15,9 @@ pub mod codegen;
 pub mod executable;
 pub mod isa;
 pub mod link;
-pub mod regs;
 #[cfg(target_os = "freebsd")]
 pub mod pcie;
+pub mod regs;
 #[cfg(target_os = "freebsd")]
 pub mod tpu;
 
@@ -34,19 +34,42 @@ pub enum Error {
     #[error("coral device address space exhausted: {requested} bytes requested, {free} free")]
     AddressSpace { requested: u64, free: u64 },
     #[error("coral device {path}: {op}: {source}")]
-    Device { path: String, op: &'static str, #[source] source: std::io::Error },
-    #[error("coral register {name} (0x{offset:x}) did not reach 0x{expected:x} within {timeout:?}: last 0x{last:x}")]
-    Poll { name: &'static str, offset: u64, expected: u64, last: u64, timeout: std::time::Duration },
+    Device {
+        path: String,
+        op: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "coral register {name} (0x{offset:x}) did not reach 0x{expected:x} within {timeout:?}: last 0x{last:x}"
+    )]
+    Poll {
+        name: &'static str,
+        offset: u64,
+        expected: u64,
+        last: u64,
+        timeout: std::time::Duration,
+    },
     #[error("coral HIB error: status 0x{status:x} ({decoded}), first 0x{first:x}")]
-    Hib { status: u64, first: u64, decoded: String },
+    Hib {
+        status: u64,
+        first: u64,
+        decoded: String,
+    },
     #[error("coral host queue: {0}")]
     HostQueue(String),
     #[error("coral program {name:?} did not complete within {timeout:?}: {state}")]
-    Timeout { name: String, timeout: std::time::Duration, state: String },
+    Timeout {
+        name: String,
+        timeout: std::time::Duration,
+        state: String,
+    },
     #[error("coral: {0}")]
     Protocol(String),
 }
 
 impl From<Error> for super::Error {
-    fn from(error: Error) -> Self { Self::Backend(error.to_string()) }
+    fn from(error: Error) -> Self {
+        Self::Backend(error.to_string())
+    }
 }

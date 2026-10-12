@@ -45,7 +45,8 @@ pub fn live(host: &Host, models: Option<&Path>, device: (Option<usize>, Option<u
 pub fn disk_of(path: &Path) -> Option<(u64, u64)> {
     let path = path.canonicalize().ok()?;
     let disks = Disks::new_with_refreshed_list();
-    disks.iter()
+    disks
+        .iter()
         .filter(|disk| path.starts_with(disk.mount_point()))
         .max_by_key(|disk| disk.mount_point().components().count())
         .map(|disk| (disk.total_space(), disk.available_space()))
@@ -66,14 +67,25 @@ pub fn os_name() -> String {
 /// The release with its branch, from the kern.version banner: "FreeBSD 16.0-CURRENT #1 ...".
 #[cfg(any(target_os = "freebsd", test))]
 fn freebsd_release(banner: &str) -> String {
-    banner.split_whitespace().take(2).collect::<Vec<_>>().join(" ")
+    banner
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Printable ASCII within `MAX_FIELD_BYTES`.
 pub fn is_valid(host: &Host) -> bool {
-    [&host.name, &host.os, &host.os_name, &host.arch, &host.cpu, &host.device]
-        .into_iter()
-        .all(|f| f.len() <= MAX_FIELD_BYTES && f.bytes().all(|b| b == b' ' || b.is_ascii_graphic()))
+    [
+        &host.name,
+        &host.os,
+        &host.os_name,
+        &host.arch,
+        &host.cpu,
+        &host.device,
+    ]
+    .into_iter()
+    .all(|f| f.len() <= MAX_FIELD_BYTES && f.bytes().all(|b| b == b' ' || b.is_ascii_graphic()))
 }
 
 fn field(text: &str) -> String {

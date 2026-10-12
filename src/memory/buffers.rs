@@ -11,7 +11,10 @@ pub enum MemoryDomain {
 
 impl std::fmt::Display for MemoryDomain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self { Self::Device => "device", Self::Host => "host" })
+        f.write_str(match self {
+            Self::Device => "device",
+            Self::Host => "host",
+        })
     }
 }
 
@@ -45,11 +48,17 @@ impl BufferBudget {
     }
 
     fn counter(&self, domain: MemoryDomain) -> &Counter {
-        match domain { MemoryDomain::Device => &self.0.device, MemoryDomain::Host => &self.0.host }
+        match domain {
+            MemoryDomain::Device => &self.0.device,
+            MemoryDomain::Host => &self.0.host,
+        }
     }
 
     pub fn limit(&self, domain: MemoryDomain) -> Option<usize> {
-        self.0.limits[match domain { MemoryDomain::Device => 0, MemoryDomain::Host => 1 }]
+        self.0.limits[match domain {
+            MemoryDomain::Device => 0,
+            MemoryDomain::Host => 1,
+        }]
     }
 
     /// Includes allocation calls in progress and buffers awaiting driver release.
@@ -61,7 +70,9 @@ impl BufferBudget {
     /// Only replace an unused, unshared ledger; never detach live allocations or twins.
     pub(crate) fn replace(&mut self, budget: Self) -> Result<()> {
         if Arc::strong_count(&self.0) != 1 || self.0.device.used() != 0 || self.0.host.used() != 0 {
-            return Err(Error::Backend("buffer budget must be installed before allocations or sharing".into()));
+            return Err(Error::Backend(
+                "buffer budget must be installed before allocations or sharing".into(),
+            ));
         }
         *self = budget;
         Ok(())
@@ -69,10 +80,19 @@ impl BufferBudget {
 
     /// The callback must only allocate: cleanup after successful allocation belongs
     /// to the returned owner. Failed allocations roll back; live charges fail closed.
-    pub(crate) fn allocate<T>(&self, domain: MemoryDomain, bytes: usize, allocate: impl FnOnce() -> Result<T>) -> Result<(T, BufferCharge)> {
+    pub(crate) fn allocate<T>(
+        &self,
+        domain: MemoryDomain,
+        bytes: usize,
+        allocate: impl FnOnce() -> Result<T>,
+    ) -> Result<(T, BufferCharge)> {
         let counter = self.counter(domain);
-        let charge = counter.reserve(bytes)
-            .map_err(|used| Error::BufferBudget { domain, requested: bytes, used, limit: counter.limit() })?;
+        let charge = counter.reserve(bytes).map_err(|used| Error::BufferBudget {
+            domain,
+            requested: bytes,
+            used,
+            limit: counter.limit(),
+        })?;
         let raw = allocate()?;
         Ok((raw, BufferCharge(Some(charge))))
     }

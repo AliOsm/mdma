@@ -1,11 +1,11 @@
 //! GGUF block dequantization.
 use crate::backend::{Error, Result};
 use crate::gguf::GgmlDType;
-use candle_core::quantized::k_quants::{
-    BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1, BlockQ6K,
-    BlockQ8K, BlockQ8_0, BlockQ8_1,
-};
 use candle_core::quantized::GgmlType;
+use candle_core::quantized::k_quants::{
+    BlockQ2K, BlockQ3K, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5_1, BlockQ5K, BlockQ6K,
+    BlockQ8_0, BlockQ8_1, BlockQ8K,
+};
 use half::{bf16, f16};
 
 // Alignment is checked before each block reinterpretation below.

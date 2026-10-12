@@ -1,7 +1,7 @@
+use super::Predictor;
 use super::calibrate::{clamp_temperature, confidence, temp_bucket};
 use super::prompt::{Item, Kind, Question, collate, collate_iter};
 use super::pyjson::dumps;
-use super::Predictor;
 use crate::backend::cpu::CpuBackend;
 use serde_json::{Value, json};
 use std::path::PathBuf;
@@ -10,19 +10,27 @@ use std::path::PathBuf;
 /// from; select its directory with `MDMA_LAYA_PATH`. Run explicitly:
 /// `cargo test --release --lib laya -- --ignored`.
 fn checkpoint() -> PathBuf {
-    let path = std::env::var_os("MDMA_LAYA_PATH").filter(|path| !path.is_empty())
+    let path = std::env::var_os("MDMA_LAYA_PATH")
+        .filter(|path| !path.is_empty())
         .expect("set MDMA_LAYA_PATH to the pinned convaiinnovations/laya checkpoint directory");
     PathBuf::from(path)
 }
 
 fn fixture() -> Value {
-    serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/data/fixtures/laya/reference.json"))).unwrap()
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/data/fixtures/laya/reference.json"
+    )))
+    .unwrap()
 }
 
 #[test]
 fn pyjson_matches_python_dumps_separators_and_escapes() {
     let v = json!({"a": [1, 2.5, true, null], "é": "x\ny\"z", "n": {"k": "v"}});
-    assert_eq!(dumps(&v, false), r#"{"a": [1, 2.5, true, null], "é": "x\ny\"z", "n": {"k": "v"}}"#);
+    assert_eq!(
+        dumps(&v, false),
+        r#"{"a": [1, 2.5, true, null], "é": "x\ny\"z", "n": {"k": "v"}}"#
+    );
     assert_eq!(dumps(&json!("é𝄞"), true), r#""\u00e9\ud834\udd1e""#);
     assert_eq!(dumps(&json!(1e20), false), "1e+20");
 }
@@ -48,10 +56,22 @@ fn pyjson_preserves_integer_precision_and_finite_float_formatting() {
 #[test]
 fn question_rendering_follows_laya_mlx() {
     let q = Question::from_json(&json!({"type": "choice", "instructions": "Who?", "criteria": {"zero": 0, "no": false, "none": null, "blank": "", "d": {"desc": "x"}}})).unwrap();
-    assert_eq!(q.options, ["zero: 0", "no: false", "none", "blank", r#"d: {"desc": "x"}"#]);
+    assert_eq!(
+        q.options,
+        [
+            "zero: 0",
+            "no: false",
+            "none",
+            "blank",
+            r#"d: {"desc": "x"}"#
+        ]
+    );
     assert_eq!(q.labels, ["zero", "no", "none", "blank", "d"]);
 
-    let q = Question::from_json(&json!({"type": "choice", "instructions": "Who?", "criteria": ["second", "first"]})).unwrap();
+    let q = Question::from_json(
+        &json!({"type": "choice", "instructions": "Who?", "criteria": ["second", "first"]}),
+    )
+    .unwrap();
     assert_eq!(q.options, ["second", "first"]);
     assert_eq!(q.labels, q.options);
 
@@ -61,7 +81,13 @@ fn question_rendering_follows_laya_mlx() {
     assert_eq!(q.legend, [json!({"level": "low"}), json!("high")]);
 
     let q = Question::from_json(&json!({"type": "noul", "instructions": "Refund?", "criteria": {"true": {"reason": "money back"}}})).unwrap();
-    assert_eq!(q.options, ["false: no, the statement does not hold", r#"true: {"reason": "money back"}"#]);
+    assert_eq!(
+        q.options,
+        [
+            "false: no, the statement does not hold",
+            r#"true: {"reason": "money back"}"#
+        ]
+    );
 
     for bad in [
         json!({"type": "choice", "instructions": "x", "criteria": []}),
@@ -95,8 +121,16 @@ fn calibration_helpers() {
 #[test]
 fn collate_pads_right_and_keeps_at_least_two_marker_slots() {
     let items = [
-        Item { ids: vec![1, 2, 3], markers: vec![1], kind: Kind::Choice },
-        Item { ids: vec![4], markers: vec![0, 0, 0], kind: Kind::Noul },
+        Item {
+            ids: vec![1, 2, 3],
+            markers: vec![1],
+            kind: Kind::Choice,
+        },
+        Item {
+            ids: vec![4],
+            markers: vec![0, 0, 0],
+            kind: Kind::Noul,
+        },
     ];
     let b = collate(&items, 9).unwrap();
     assert_eq!((b.n, b.seq_len, b.kmax), (2, 3, 3));
@@ -110,8 +144,22 @@ fn collate_pads_right_and_keeps_at_least_two_marker_slots() {
 #[test]
 fn collate_borrowed_items_preserves_order_and_padding() {
     let items = [
-        ("long", Item { ids: vec![1, 2, 3], markers: vec![1], kind: Kind::Choice }),
-        ("short", Item { ids: vec![4], markers: Vec::new(), kind: Kind::Score }),
+        (
+            "long",
+            Item {
+                ids: vec![1, 2, 3],
+                markers: vec![1],
+                kind: Kind::Choice,
+            },
+        ),
+        (
+            "short",
+            Item {
+                ids: vec![4],
+                markers: Vec::new(),
+                kind: Kind::Score,
+            },
+        ),
     ];
     let batch = collate_iter(items.iter().rev().map(|(_, item)| item), 9).unwrap();
     assert_eq!((batch.n, batch.seq_len, batch.kmax), (2, 3, 2));
@@ -126,7 +174,11 @@ fn collate_borrowed_items_preserves_order_and_padding() {
 
 fn load() -> Predictor<CpuBackend> {
     let dir = checkpoint();
-    assert!(dir.join("model.safetensors").is_file(), "Laya checkpoint not found: {}", dir.display());
+    assert!(
+        dir.join("model.safetensors").is_file(),
+        "Laya checkpoint not found: {}",
+        dir.display()
+    );
     Predictor::load(CpuBackend, &dir).expect("load checkpoint")
 }
 
@@ -135,12 +187,24 @@ fn load() -> Predictor<CpuBackend> {
 fn prompts_match_laya_mlx_token_for_token() {
     let p = load();
     for case in fixture()["cases"].as_array().unwrap() {
-        let prepared = p.prepare(&case["state"], case["questions"].as_object().unwrap()).expect("prepare");
+        let prepared = p
+            .prepare(&case["state"], case["questions"].as_object().unwrap())
+            .expect("prepare");
         let items = case["items"].as_array().unwrap();
         assert_eq!(prepared.len(), items.len(), "{}", case["name"]);
         for ((q, item), want) in prepared.iter().zip(items) {
-            let ids: Vec<u32> = want["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
-            let markers: Vec<usize> = want["markers"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as usize).collect();
+            let ids: Vec<u32> = want["ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u32)
+                .collect();
+            let markers: Vec<usize> = want["markers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_u64().unwrap() as usize)
+                .collect();
             assert_eq!(item.ids, ids, "{} ids", case["name"]);
             assert_eq!(item.markers, markers, "{} markers", case["name"]);
             assert_eq!(u64::from(q.kind.index()), want["qtype"].as_u64().unwrap());
@@ -153,18 +217,37 @@ fn check_case(p: &Predictor<CpuBackend>, case: &Value) {
     let questions = case["questions"].as_object().unwrap();
     let prepared = p.prepare(&case["state"], questions).unwrap();
     let batch = collate_iter(prepared.iter().map(|(_, it)| it), 50283).unwrap();
-    let mut ws = p.model.alloc_workspace(&p.backend, batch.n, batch.seq_len, batch.kmax).unwrap();
+    let mut ws = p
+        .model
+        .alloc_workspace(&p.backend, batch.n, batch.seq_len, batch.kmax)
+        .unwrap();
     let out = p.model.forward(&p.backend, &mut ws, &batch).unwrap();
     let mut worst = 0f32;
     for (row, want) in case["items"].as_array().unwrap().iter().enumerate() {
-        let logits: Vec<f32> = want["logits"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
-        let act: Vec<f32> = want["act"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+        let logits: Vec<f32> = want["logits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let act: Vec<f32> = want["act"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
         for (i, (&got, &ref_)) in out.logits[row].iter().zip(&logits).enumerate() {
             worst = worst.max((got - ref_).abs());
-            assert!((got - ref_).abs() < 2e-3, "{name} row {row} logit {i}: got {got}, want {ref_}");
+            assert!(
+                (got - ref_).abs() < 2e-3,
+                "{name} row {row} logit {i}: got {got}, want {ref_}"
+            );
         }
         for (i, (&got, &ref_)) in out.act[row].iter().zip(&act).enumerate() {
-            assert!((got - ref_).abs() < 0.5 + ref_.abs() * 1e-4, "{name} row {row} act {i}: got {got}, want {ref_}");
+            assert!(
+                (got - ref_).abs() < 0.5 + ref_.abs() * 1e-4,
+                "{name} row {row} act {i}: got {got}, want {ref_}"
+            );
         }
     }
     let result = p.predict(&case["state"], questions).unwrap();
@@ -177,19 +260,34 @@ fn check_case(p: &Predictor<CpuBackend>, case: &Value) {
         for key in ["confidence", "score", "noul"] {
             if let Some(w) = want.get(key).and_then(Value::as_f64) {
                 let g = got[key].as_f64().unwrap();
-                assert!((g - w).abs() <= 2e-4, "{name}/{qid} {key}: got {g}, want {w}");
+                assert!(
+                    (g - w).abs() <= 2e-4,
+                    "{name}/{qid} {key}: got {g}, want {w}"
+                );
             }
         }
         if let Some(probs) = want.get("probabilities") {
             for (label, w) in probs.as_object().unwrap() {
                 let g = got["probabilities"][label].as_f64().unwrap();
-                assert!((g - w.as_f64().unwrap()).abs() <= 2e-4, "{name}/{qid} p[{label}]: got {g}, want {w}");
+                assert!(
+                    (g - w.as_f64().unwrap()).abs() <= 2e-4,
+                    "{name}/{qid} p[{label}]: got {g}, want {w}"
+                );
             }
         }
-        let (g, w) = (got["action"]["act_probability"].as_f64().unwrap(), want["action"]["act_probability"].as_f64().unwrap());
-        assert!((g - w).abs() <= 2e-4, "{name}/{qid} act_probability: got {g}, want {w}");
+        let (g, w) = (
+            got["action"]["act_probability"].as_f64().unwrap(),
+            want["action"]["act_probability"].as_f64().unwrap(),
+        );
+        assert!(
+            (g - w).abs() <= 2e-4,
+            "{name}/{qid} act_probability: got {g}, want {w}"
+        );
     }
-    eprintln!("{name}: {} questions, seq_len {}, max |Δlogit| {worst:.2e}", batch.n, batch.seq_len);
+    eprintln!(
+        "{name}: {} questions, seq_len {}, max |Δlogit| {worst:.2e}",
+        batch.n, batch.seq_len
+    );
 }
 
 /// The README email example: 3 questions against upstream PyTorch fp32.
@@ -198,7 +296,12 @@ fn check_case(p: &Predictor<CpuBackend>, case: &Value) {
 fn email_case_matches_upstream_pytorch() {
     let p = load();
     let fx = fixture();
-    let case = fx["cases"].as_array().unwrap().iter().find(|c| c["name"] == "email").unwrap();
+    let case = fx["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "email")
+        .unwrap();
     check_case(&p, case);
 }
 

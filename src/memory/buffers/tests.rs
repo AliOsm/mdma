@@ -14,14 +14,21 @@ impl Buffer {
             assert!(budget.used(Device) >= bytes, "admitted before driver call");
             Ok(())
         })?;
-        Ok(Self { charge, budget: budget.clone(), bytes })
+        Ok(Self {
+            charge,
+            budget: budget.clone(),
+            bytes,
+        })
     }
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
         self.charge.release(|| {
-            assert!(self.budget.used(Device) >= self.bytes, "charged during driver free");
+            assert!(
+                self.budget.used(Device) >= self.bytes,
+                "charged during driver free"
+            );
             true
         });
     }
@@ -47,13 +54,19 @@ fn domains_are_independent_and_rejection_does_not_call_driver() {
 #[test]
 fn failed_driver_allocation_and_unwind_refund_reservations() {
     let budget = BufferBudget::new(Some(100), None);
-    assert!(budget.allocate(Device, 100, || -> Result<()> {
-        assert_eq!(budget.used(Device), 100);
-        Err(Error::Backend("injected allocation failure".into()))
-    }).is_err());
+    assert!(
+        budget
+            .allocate(Device, 100, || -> Result<()> {
+                assert_eq!(budget.used(Device), 100);
+                Err(Error::Backend("injected allocation failure".into()))
+            })
+            .is_err()
+    );
     assert_eq!(budget.used(Device), 0);
     let panic = std::panic::catch_unwind(|| {
-        let _ = budget.allocate(Device, 100, || -> Result<()> { panic!("allocation did not succeed") });
+        let _ = budget.allocate(Device, 100, || -> Result<()> {
+            panic!("allocation did not succeed")
+        });
     });
     assert!(panic.is_err());
     assert_eq!(budget.used(Device), 0);
@@ -73,7 +86,11 @@ fn last_alias_retained_scratch_and_twins_share_one_ledger() {
     drop(graph);
     assert_eq!(budget.used(Device), 70);
     drop(alias);
-    assert_eq!(budget.used(Device), 20, "idle scratch is not a request reservation");
+    assert_eq!(
+        budget.used(Device),
+        20,
+        "idle scratch is not a request reservation"
+    );
     drop(scratch);
     assert_eq!(budget.used(Device), 0);
 }
@@ -89,7 +106,10 @@ fn partial_setup_and_scratch_growth_charge_the_overlap() {
     };
     assert!(setup().is_err());
     assert_eq!(budget.used(Device), 40);
-    assert!(Buffer::new(&budget, 70).is_err(), "replacement cannot discount a still-live buffer");
+    assert!(
+        Buffer::new(&budget, 70).is_err(),
+        "replacement cannot discount a still-live buffer"
+    );
     drop(scratch);
     let replacement = Buffer::new(&budget, 70).unwrap();
     drop(replacement);
@@ -119,7 +139,9 @@ fn deferred_and_failed_frees_do_not_refund_early() {
 fn native_reservations_are_not_charged_to_buffer_quota() {
     let native = crate::memory::NativeMemoryBudget::new(100);
     let buffers = BufferBudget::new(Some(100), None);
-    let reservation = native.reserve(100, crate::memory::MemoryCategory::Weights).unwrap();
+    let reservation = native
+        .reserve(100, crate::memory::MemoryCategory::Weights)
+        .unwrap();
     let buf = Buffer::new(&buffers, 100).unwrap();
     assert_eq!(native.used(), 100);
     assert_eq!(buffers.used(Device), 100);
@@ -150,16 +172,24 @@ fn competing_allocations_cannot_oversubscribe() {
     let held = Barrier::new(3);
     let release = Barrier::new(3);
     std::thread::scope(|scope| {
-        let workers: Vec<_> = (0..2).map(|_| scope.spawn(|| {
-            let buffer = Buffer::new(&budget, 80);
-            held.wait();
-            release.wait();
-            buffer.is_ok()
-        })).collect();
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    let buffer = Buffer::new(&budget, 80);
+                    held.wait();
+                    release.wait();
+                    buffer.is_ok()
+                })
+            })
+            .collect();
         held.wait();
         let used = budget.used(Device);
         release.wait();
-        let admitted = workers.into_iter().map(|w| w.join().unwrap()).filter(|&ok| ok).count();
+        let admitted = workers
+            .into_iter()
+            .map(|w| w.join().unwrap())
+            .filter(|&ok| ok)
+            .count();
         assert_eq!(used, 80);
         assert_eq!(admitted, 1);
     });
@@ -181,6 +211,9 @@ fn unlimited_still_checks_overflow_and_zero_can_forbid_a_domain() {
 fn unsupported_backend_rejects_buffer_limits() {
     use crate::backend::Backend;
     let mut cpu = crate::backend::cpu::CpuBackend;
-    assert_matches!(cpu.set_buffer_budget(BufferBudget::default()), Err(Error::NotImplemented(_)));
+    assert_matches!(
+        cpu.set_buffer_budget(BufferBudget::default()),
+        Err(Error::NotImplemented(_))
+    );
     assert!(cpu.buffer_budget().is_none());
 }

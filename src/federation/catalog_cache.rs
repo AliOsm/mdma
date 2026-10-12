@@ -105,7 +105,9 @@ impl Cache {
         }
         let mut nonce = [0; 32];
         aws_lc_rs::rand::fill(&mut nonce).map_err(|_| Error::Poll("nonce generation failed"))?;
-        let deadline = (now + POLL_TIMEOUT).min(binding.deadline()).min(operation_deadline);
+        let deadline = (now + POLL_TIMEOUT)
+            .min(binding.deadline())
+            .min(operation_deadline);
         entry.outstanding = Some((nonce, deadline));
         entry.latest_challenge = Some(nonce);
         Ok(Poll {
@@ -120,7 +122,10 @@ impl Cache {
     /// Cancel outstanding challenges and withdraw snapshots on runtime trust
     /// notifications. Readers still recheck current authorization independently.
     pub(crate) fn invalidate_all(&self) -> Result<(), Error> {
-        self.peers.lock().map_err(|_| Error::Poll("cache lock poisoned"))?.clear();
+        self.peers
+            .lock()
+            .map_err(|_| Error::Poll("cache lock poisoned"))?
+            .clear();
         Ok(())
     }
 
@@ -180,7 +185,10 @@ impl Poll {
         let started = Instant::now();
         self.finish_at(store, wire, now_ms, now, || {
             let elapsed = started.elapsed();
-            (now_ms.saturating_add(elapsed.as_millis().try_into().unwrap_or(u64::MAX)), now + elapsed)
+            (
+                now_ms.saturating_add(elapsed.as_millis().try_into().unwrap_or(u64::MAX)),
+                now + elapsed,
+            )
         })
     }
 
@@ -203,7 +211,8 @@ impl Poll {
                 .ok_or(Error::Poll("poll no longer outstanding"))?;
             if entry
                 .outstanding
-                .as_ref().is_none_or(|(nonce, _)| nonce != &self.nonce)
+                .as_ref()
+                .is_none_or(|(nonce, _)| nonce != &self.nonce)
             {
                 return Err(Error::Poll("poll challenge replaced or canceled"));
             }
@@ -295,7 +304,10 @@ impl Drop for Poll {
     fn drop(&mut self) {
         if let Ok(mut peers) = self.peers.lock()
             && let Some(entry) = peers.get_mut(self.peer_id())
-            && entry.outstanding.as_ref().is_some_and(|(nonce, _)| nonce == &self.nonce)
+            && entry
+                .outstanding
+                .as_ref()
+                .is_some_and(|(nonce, _)| nonce == &self.nonce)
         {
             entry.outstanding = None;
         }

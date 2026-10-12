@@ -16,14 +16,30 @@ pub struct RopeParams {
     pub rope_type: Option<String>,
 }
 
-fn d_model_type() -> String { "modernbert".into() }
-fn d_gelu() -> String { "gelu".into() }
-fn d_norm_eps() -> f32 { 1e-5 }
-fn d_local_attention() -> usize { 128 }
-fn d_global_every() -> usize { 3 }
-fn d_global_theta() -> f64 { 160000.0 }
-fn d_local_theta() -> f64 { 10000.0 }
-fn d_max_pos() -> usize { 8192 }
+fn d_model_type() -> String {
+    "modernbert".into()
+}
+fn d_gelu() -> String {
+    "gelu".into()
+}
+fn d_norm_eps() -> f32 {
+    1e-5
+}
+fn d_local_attention() -> usize {
+    128
+}
+fn d_global_every() -> usize {
+    3
+}
+fn d_global_theta() -> f64 {
+    160000.0
+}
+fn d_local_theta() -> f64 {
+    10000.0
+}
+fn d_max_pos() -> usize {
+    8192
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EncoderConfig {
@@ -75,28 +91,46 @@ impl EncoderConfig {
 
     pub(super) fn validate(&self) -> Result<(), Error> {
         if self.model_type != "modernbert" {
-            return Err(Error::Config(format!("unsupported encoder {:?}; expected modernbert", self.model_type)));
+            return Err(Error::Config(format!(
+                "unsupported encoder {:?}; expected modernbert",
+                self.model_type
+            )));
         }
         if self.hidden_activation != "gelu" {
-            return Err(Error::Config(format!("unsupported encoder activation {:?}", self.hidden_activation)));
+            return Err(Error::Config(format!(
+                "unsupported encoder activation {:?}",
+                self.hidden_activation
+            )));
         }
-        if self.num_attention_heads == 0 || !self.hidden_size.is_multiple_of(self.num_attention_heads) || !self.head_dim().is_multiple_of(2) {
-            return Err(Error::Config("ModernBERT requires an even, integral attention head dimension".into()));
+        if self.num_attention_heads == 0
+            || !self.hidden_size.is_multiple_of(self.num_attention_heads)
+            || !self.head_dim().is_multiple_of(2)
+        {
+            return Err(Error::Config(
+                "ModernBERT requires an even, integral attention head dimension".into(),
+            ));
         }
         if let Some(types) = &self.layer_types
-            && (types.len() != self.num_hidden_layers || types.iter().any(|t| t != "full_attention" && t != "sliding_attention"))
+            && (types.len() != self.num_hidden_layers
+                || types
+                    .iter()
+                    .any(|t| t != "full_attention" && t != "sliding_attention"))
         {
             return Err(Error::Config("invalid ModernBERT layer_types".into()));
         }
         for (kind, params) in self.rope_parameters.iter().flatten() {
             if params.rope_type.as_deref().unwrap_or("default") != "default" {
-                return Err(Error::Config(format!("only default (unscaled) ModernBERT RoPE is supported, {kind} is not")));
+                return Err(Error::Config(format!(
+                    "only default (unscaled) ModernBERT RoPE is supported, {kind} is not"
+                )));
             }
         }
         Ok(())
     }
 
-    pub fn head_dim(&self) -> usize { self.hidden_size / self.num_attention_heads }
+    pub fn head_dim(&self) -> usize {
+        self.hidden_size / self.num_attention_heads
+    }
 
     pub fn layer_kind(&self, index: usize) -> LayerKind {
         match &self.layer_types {
@@ -112,6 +146,10 @@ impl EncoderConfig {
             LayerKind::Full => ("full_attention", self.global_rope_theta),
             LayerKind::Sliding => ("sliding_attention", self.local_rope_theta),
         };
-        self.rope_parameters.as_ref().and_then(|p| p.get(key)).and_then(|p| p.rope_theta).unwrap_or(fallback) as f32
+        self.rope_parameters
+            .as_ref()
+            .and_then(|p| p.get(key))
+            .and_then(|p| p.rope_theta)
+            .unwrap_or(fallback) as f32
     }
 }

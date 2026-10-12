@@ -3,7 +3,11 @@ use super::*;
 #[test]
 fn dedicated_inference_does_not_queue_behind_shared_blocking_pool_and_join_stays_charged() {
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1).max_blocking_threads(1).enable_all().build().unwrap();
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
     runtime.block_on(async {
         let ledger = Ledger::new();
         let (entered, started) = std::sync::mpsc::sync_channel(1);
@@ -14,20 +18,43 @@ fn dedicated_inference_does_not_queue_behind_shared_blocking_pool_and_join_stays
         });
         started.recv_timeout(Duration::from_secs(1)).unwrap();
         let (executed, receive) = tokio::sync::oneshot::channel();
-        let claim = ledger.claim("origin.mdma.test", RequestId::parse(&[101; 16]).unwrap(),
-            &config::Limits::default()).unwrap();
-        let worker = claim.spawn_dedicated(move || {
-            let _ = executed.send(());
-            Outcome::Completed
-        }).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), receive).await.unwrap().unwrap();
-        assert!(matches!(ledger.claim("origin.mdma.test", RequestId::parse(&[102; 16]).unwrap(),
-            &config::Limits::default()), Err(Error::Concurrency)));
+        let claim = ledger
+            .claim(
+                "origin.mdma.test",
+                RequestId::parse(&[101; 16]).unwrap(),
+                &config::Limits::default(),
+            )
+            .unwrap();
+        let worker = claim
+            .spawn_dedicated(move || {
+                let _ = executed.send(());
+                Outcome::Completed
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), receive)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            ledger.claim(
+                "origin.mdma.test",
+                RequestId::parse(&[102; 16]).unwrap(),
+                &config::Limits::default()
+            ),
+            Err(Error::Concurrency)
+        ));
         release.send(()).unwrap();
         blocker.await.unwrap();
         assert_eq!(worker.await.unwrap(), Outcome::Completed);
-        drop(ledger.claim("origin.mdma.test", RequestId::parse(&[103; 16]).unwrap(),
-            &config::Limits::default()).unwrap());
+        drop(
+            ledger
+                .claim(
+                    "origin.mdma.test",
+                    RequestId::parse(&[103; 16]).unwrap(),
+                    &config::Limits::default(),
+                )
+                .unwrap(),
+        );
     });
 }
 
@@ -37,38 +64,67 @@ async fn dropping_dedicated_join_handle_never_releases_running_worker_charge() {
     let (entered, started) = tokio::sync::oneshot::channel();
     let (release, held) = std::sync::mpsc::sync_channel(1);
     let (finished, finish) = tokio::sync::oneshot::channel();
-    let worker = ledger.claim("origin.mdma.test", RequestId::parse(&[104; 16]).unwrap(),
-        &config::Limits::default()).unwrap().spawn_dedicated(move || {
-        let _ = entered.send(());
-        held.recv_timeout(Duration::from_secs(2)).unwrap();
-        let _ = finished.send(());
-        Outcome::Cancelled
-    }).unwrap();
+    let worker = ledger
+        .claim(
+            "origin.mdma.test",
+            RequestId::parse(&[104; 16]).unwrap(),
+            &config::Limits::default(),
+        )
+        .unwrap()
+        .spawn_dedicated(move || {
+            let _ = entered.send(());
+            held.recv_timeout(Duration::from_secs(2)).unwrap();
+            let _ = finished.send(());
+            Outcome::Cancelled
+        })
+        .unwrap();
     started.await.unwrap();
     drop(worker);
-    assert!(matches!(ledger.claim("origin.mdma.test", RequestId::parse(&[105; 16]).unwrap(),
-        &config::Limits::default()), Err(Error::Concurrency)));
+    assert!(matches!(
+        ledger.claim(
+            "origin.mdma.test",
+            RequestId::parse(&[105; 16]).unwrap(),
+            &config::Limits::default()
+        ),
+        Err(Error::Concurrency)
+    ));
     release.send(()).unwrap();
     finish.await.unwrap();
     // Join/claim teardown follows the compute hint. Wait on observable ledger
     // state, not the hint itself, before treating capacity as reusable.
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if ledger.state.lock().unwrap().active == 0 { break; }
+            if ledger.state.lock().unwrap().active == 0 {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
 async fn dedicated_panic_is_not_success_and_retains_failed_id_after_join() {
     let ledger = Ledger::new();
-    let worker = ledger.claim("origin.mdma.test", RequestId::parse(&[106; 16]).unwrap(),
-        &config::Limits::default()).unwrap()
-        .spawn_dedicated(|| panic!("injected native worker panic")).unwrap();
+    let worker = ledger
+        .claim(
+            "origin.mdma.test",
+            RequestId::parse(&[106; 16]).unwrap(),
+            &config::Limits::default(),
+        )
+        .unwrap()
+        .spawn_dedicated(|| panic!("injected native worker panic"))
+        .unwrap();
     assert!(worker.await.is_err());
-    assert!(matches!(ledger.claim("origin.mdma.test", RequestId::parse(&[106; 16]).unwrap(),
-        &config::Limits::default()), Err(Error::Duplicate)));
+    assert!(matches!(
+        ledger.claim(
+            "origin.mdma.test",
+            RequestId::parse(&[106; 16]).unwrap(),
+            &config::Limits::default()
+        ),
+        Err(Error::Duplicate)
+    ));
     assert_eq!(ledger.state.lock().unwrap().active, 0);
 }
 use std::sync::Barrier;

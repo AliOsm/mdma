@@ -33,7 +33,10 @@ fn desc(p: &str, off: usize) -> Vec<FieldSpec> {
 fn rec(p: &str, lo: usize, idw: usize, valw: usize) -> Vec<FieldSpec> {
     let q = lo + idw + valw;
     let mut f = vec![
-        spec(&format!("{p}id"), lo, idw), sspec(&format!("{p}val"), lo + idw, valw), spec(&format!("{p}en_a"), q, 1), spec(&format!("{p}x"), q + 1, 15),
+        spec(&format!("{p}id"), lo, idw),
+        sspec(&format!("{p}val"), lo + idw, valw),
+        spec(&format!("{p}en_a"), q, 1),
+        spec(&format!("{p}x"), q + 1, 15),
         spec(&format!("{p}en_b"), q + 16, 1),
     ];
     if q + 17 < lo + 41 {
@@ -64,9 +67,17 @@ pub static RING_CONSUMER: LazyLock<Layout> = LazyLock::new(|| {
     f.extend(desc("", 0));
     f.extend([
         spec("gstride", 249, 18), // multi-packet groups: 4*(G-1)*p + 1 (G groups of p packets)
-        spec("aux_en0", 267, 1), spec("aux_addr0", 268, 18), spec("aux_addr1", 300, 18), spec("aux_en1", 318, 1), // caching: parameter relocation fields
-        spec("mode", 335, 2), // 3 = infeed-fed / parameter, 1 = fed by a tile's ringProducer
-        spec("s_id", 339, 7), sspec("s_val", 346, 16), spec("s_en_a", 362, 1), spec("s_cnt", 368, 10), spec("s_en_b", 378, 1), spec("s_y", 379, 1),
+        spec("aux_en0", 267, 1),
+        spec("aux_addr0", 268, 18),
+        spec("aux_addr1", 300, 18),
+        spec("aux_en1", 318, 1), // caching: parameter relocation fields
+        spec("mode", 335, 2),    // 3 = infeed-fed / parameter, 1 = fed by a tile's ringProducer
+        spec("s_id", 339, 7),
+        sspec("s_val", 346, 16),
+        spec("s_en_a", 362, 1),
+        spec("s_cnt", 368, 10),
+        spec("s_en_b", 378, 1),
+        spec("s_y", 379, 1),
     ]);
     Layout::new("ringConsumer", &[0x11, 0x12], 4, f, Fields::new())
 });
@@ -81,13 +92,19 @@ pub static MESH: LazyLock<Layout> = LazyLock::new(|| {
     }
     f.extend([
         spec("fill_en", 727, 1), // the inbound half generates a constant instead of receiving (edge padding)
-        spec("fill", 728, 32),   // 32-bit fill pattern, e.g. 0x80808080 = zero point 128 in every byte
+        spec("fill", 728, 32), // 32-bit fill pattern, e.g. 0x80808080 = zero point 128 in every byte
     ]);
     Layout::new("mesh", &[0x16, 0x17, 0x15, 0x18], 6, f, Fields::new())
 });
 
-pub fn encode_ring_producer(f: &Fields) -> Vec<u128> { RING_PRODUCER.encode(f) }
+pub fn encode_ring_producer(f: &Fields) -> Vec<u128> {
+    RING_PRODUCER.encode(f)
+}
 
-pub fn encode_ring_consumer(f: &Fields) -> Vec<u128> { RING_CONSUMER.encode(f) }
+pub fn encode_ring_consumer(f: &Fields) -> Vec<u128> {
+    RING_CONSUMER.encode(f)
+}
 
-pub fn encode_mesh(f: &Fields) -> Vec<u128> { MESH.encode(f) }
+pub fn encode_mesh(f: &Fields) -> Vec<u128> {
+    MESH.encode(f)
+}

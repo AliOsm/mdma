@@ -57,13 +57,22 @@ impl Remote {
 }
 impl Federation for Remote {
     type SynthesizeStream = execution::EventStream;
-    async fn acquire_lease(&self, request: Request<crate::federation::control::LeaseRequest>) -> Result<Response<crate::federation::control::LeaseGrant>, Status> {
+    async fn acquire_lease(
+        &self,
+        request: Request<crate::federation::control::LeaseRequest>,
+    ) -> Result<Response<crate::federation::control::LeaseGrant>, Status> {
         self.service.acquire_lease(request).await
     }
-    async fn renew_lease(&self, request: Request<crate::federation::control::LeaseRenewal>) -> Result<Response<crate::federation::control::LeaseGrant>, Status> {
+    async fn renew_lease(
+        &self,
+        request: Request<crate::federation::control::LeaseRenewal>,
+    ) -> Result<Response<crate::federation::control::LeaseGrant>, Status> {
         self.service.renew_lease(request).await
     }
-    async fn release_lease(&self, request: Request<crate::federation::control::LeaseRelease>) -> Result<Response<crate::federation::control::LeaseReleased>, Status> {
+    async fn release_lease(
+        &self,
+        request: Request<crate::federation::control::LeaseRelease>,
+    ) -> Result<Response<crate::federation::control::LeaseReleased>, Status> {
         self.service.release_lease(request).await
     }
     async fn identify(
@@ -175,7 +184,10 @@ impl Live {
         Self::with_backend(Arc::new(CpuBackend), "cpu").await
     }
     async fn with_backend<B>(backend: Arc<B>, name: &'static str) -> Self
-    where B: crate::backend::Backend + Send + Sync + 'static, B::Buf: Send + Sync {
+    where
+        B: crate::backend::Backend + Send + Sync + 'static,
+        B::Buf: Send + Sync,
+    {
         let fixture = Fixture::new();
         let gguf = crate::gguf::tests::Fixture::new(1, 8)
             .with_tokenizer()
@@ -185,7 +197,10 @@ impl Live {
             ("native".into(), Source::Gguf(gguf.path().into())),
             ("laya".into(), Source::Laya(laya.path().into())),
         ];
-        let options = Options { frozen: true, ..Options::new(32) };
+        let options = Options {
+            frozen: true,
+            ..Options::new(32)
+        };
         let mut registry = Registry::new(backend, models, Some("native"), options).unwrap();
         // Nothing is loaded: the first federated request loads each model.
         registry.hash_artifacts(|| false);
@@ -193,7 +208,10 @@ impl Live {
         let native = grpc::MdmaService::new(registry, name);
         let registry = native.registry().clone();
         let on_executor = Box::new(move |model: &str| {
-            let entry = registry.entries().find(|entry| entry.name == model).unwrap();
+            let entry = registry
+                .entries()
+                .find(|entry| entry.name == model)
+                .unwrap();
             (entry.phase, entry.leases)
         });
         let inventory = native.federation_inventory();
@@ -379,7 +397,10 @@ impl Live {
                     sampler: Some(grpc::SynthesizeSamplerConfig {
                         temperature: Some(0.),
                         ..Default::default()
-                    }), emit_events: false, chat: false, system: String::new(),
+                    }),
+                    emit_events: false,
+                    chat: false,
+                    system: String::new(),
                 },
                 timeout,
             ))
@@ -443,7 +464,12 @@ async fn executor_reaches(live: &Live, model: &str, expected: (Phase, u32)) {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("{model} stayed {:?}, expected {expected:?}", (live.on_executor)(model)));
+    .unwrap_or_else(|_| {
+        panic!(
+            "{model} stayed {:?}, expected {expected:?}",
+            (live.on_executor)(model)
+        )
+    });
 }
 
 fn questions() -> String {
@@ -488,15 +514,33 @@ async fn actual_single_hop_native_synthesis_decision_and_response_quota() {
 #[tokio::test]
 async fn a_local_lease_on_a_route_keeps_the_model_loaded_on_its_executor() {
     let live = Live::new().await;
-    let (first, second) = (Holder::Client("first".into()), Holder::Client("second".into()));
+    let (first, second) = (
+        Holder::Client("first".into()),
+        Holder::Client("second".into()),
+    );
     assert_eq!((live.on_executor)("native"), (Phase::Available, 0));
-    assert_eq!(live.router.lease(first.clone(), "native", None), Err(LeaseError::Missing("native".into())));
+    assert_eq!(
+        live.router.lease(first.clone(), "native", None),
+        Err(LeaseError::Missing("native".into()))
+    );
 
-    let a = live.router.lease(first.clone(), "remote-native", None).unwrap();
+    let a = live
+        .router
+        .lease(first.clone(), "remote-native", None)
+        .unwrap();
     executor_reaches(&live, "native", (Phase::Resident, 1)).await;
-    let b = live.router.lease(second.clone(), "remote-native", None).unwrap();
-    assert_eq!(live.router.release_lease(&second, &a.id), Err(LeaseError::Unknown));
-    assert_eq!(live.router.renew_lease(&first, &a.id, None).unwrap().model, "remote-native");
+    let b = live
+        .router
+        .lease(second.clone(), "remote-native", None)
+        .unwrap();
+    assert_eq!(
+        live.router.release_lease(&second, &a.id),
+        Err(LeaseError::Unknown)
+    );
+    assert_eq!(
+        live.router.renew_lease(&first, &a.id, None).unwrap().model,
+        "remote-native"
+    );
 
     // The keeper renews its one executor lease while a local lease is left.
     live.router.release_lease(&first, &a.id).unwrap();
@@ -522,15 +566,40 @@ async fn executors_refuse_leases_on_a_changed_selection_or_without_a_grant() {
         ttl_ms: 0,
     };
     let refused = async |request: control::LeaseRequest| {
-        live.router.remote(&route, |client| async move { client.acquire_lease(request).await }).await.unwrap_err().code()
+        live.router
+            .remote(&route, |client| async move {
+                client.acquire_lease(request).await
+            })
+            .await
+            .unwrap_err()
+            .code()
     };
-    assert_eq!(refused(acquire("laya", "sha256:stale")).await, Code::FailedPrecondition);
+    assert_eq!(
+        refused(acquire("laya", "sha256:stale")).await,
+        Code::FailedPrecondition
+    );
     // Missing and ungranted models look alike.
-    assert_eq!(refused(acquire("absent", &route.artifact_id)).await, Code::PermissionDenied);
-    let mut policy = live.fixture.store.snapshot().unwrap().peer("remote.mdma.test").unwrap().policy.clone();
-    policy.execute_exports.retain(|export| export.model != "laya");
+    assert_eq!(
+        refused(acquire("absent", &route.artifact_id)).await,
+        Code::PermissionDenied
+    );
+    let mut policy = live
+        .fixture
+        .store
+        .snapshot()
+        .unwrap()
+        .peer("remote.mdma.test")
+        .unwrap()
+        .policy
+        .clone();
+    policy
+        .execute_exports
+        .retain(|export| export.model != "laya");
     live.fixture.store.approve_policy(policy).unwrap();
-    assert_eq!(refused(acquire("laya", &route.artifact_id)).await, Code::PermissionDenied);
+    assert_eq!(
+        refused(acquire("laya", &route.artifact_id)).await,
+        Code::PermissionDenied
+    );
     assert_eq!((live.on_executor)("laya"), (Phase::Available, 0));
     live.close().await;
 }
@@ -702,7 +771,10 @@ async fn alias_collisions_wrong_operation_missing_principal_and_invalid_input_do
             sampler: Some(grpc::SynthesizeSamplerConfig {
                 top_p: Some(0.),
                 ..Default::default()
-            }), emit_events: false, chat: false, system: String::new(),
+            }),
+            emit_events: false,
+            chat: false,
+            system: String::new(),
         },
         "3000m",
     );
@@ -738,7 +810,10 @@ async fn origin_declares_effective_defaults_and_preserves_explicit_zero_on_the_w
                 model: "remote-native".into(),
                 prompt: "abc".into(),
                 max_tokens: 2,
-                sampler, emit_events: false, chat: false, system: String::new(),
+                sampler,
+                emit_events: false,
+                chat: false,
+                system: String::new(),
             },
             "3000m",
         );
@@ -850,7 +925,10 @@ async fn check_normal_client(live: Live) {
         sampler: Some(grpc::SynthesizeSamplerConfig {
             temperature: Some(0.),
             ..Default::default()
-        }), emit_events: false, chat: false, system: String::new(),
+        }),
+        emit_events: false,
+        chat: false,
+        system: String::new(),
     };
     let health = client
         .introspect(grpc::IntrospectRequest {})
@@ -939,21 +1017,48 @@ async fn check_normal_client(live: Live) {
     assert_eq!(live.remote.calls.load(Ordering::SeqCst), 2);
     // Leases on a routed alias are held on the executor.
     let lease = client
-        .acquire(grpc::AcquireRequest { model: "remote-laya".into(), ttl_ms: 0, wait: false })
+        .acquire(grpc::AcquireRequest {
+            model: "remote-laya".into(),
+            ttl_ms: 0,
+            wait: false,
+        })
         .await
         .unwrap()
         .into_inner();
-    assert_eq!((lease.model.as_str(), lease.ttl_ms), ("remote-laya", 60_000));
+    assert_eq!(
+        (lease.model.as_str(), lease.ttl_ms),
+        ("remote-laya", 60_000)
+    );
     executor_reaches(&live, "laya", (Phase::Resident, 1)).await;
-    let health = client.introspect(grpc::IntrospectRequest {}).await.unwrap().into_inner();
-    assert_eq!(health.models.iter().find(|m| m.name == "remote-laya").unwrap().leases, 1);
+    let health = client
+        .introspect(grpc::IntrospectRequest {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        health
+            .models
+            .iter()
+            .find(|m| m.name == "remote-laya")
+            .unwrap()
+            .leases,
+        1
+    );
     let renewed = client
-        .renew(grpc::RenewRequest { lease_id: lease.lease_id.clone(), ttl_ms: 0 })
+        .renew(grpc::RenewRequest {
+            lease_id: lease.lease_id.clone(),
+            ttl_ms: 0,
+        })
         .await
         .unwrap()
         .into_inner();
     assert_eq!(renewed.lease_id, lease.lease_id);
-    client.release(grpc::ReleaseRequest { lease_id: lease.lease_id }).await.unwrap();
+    client
+        .release(grpc::ReleaseRequest {
+            lease_id: lease.lease_id,
+        })
+        .await
+        .unwrap();
     executor_reaches(&live, "laya", (Phase::Resident, 0)).await;
     live.remote.mode.store(6, Ordering::SeqCst);
     let mut request = Request::new(grpc::DecideRequest {
@@ -982,31 +1087,51 @@ async fn check_normal_client(live: Live) {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[tokio::test]
 async fn actual_normal_client_two_leg_mtls_executes_metal_and_keeps_cpu_decisions() {
-    check_normal_client(Live::with_backend(
-        Arc::new(crate::backend::metal::MetalBackend::new().unwrap()), "metal",
-    ).await).await;
+    check_normal_client(
+        Live::with_backend(
+            Arc::new(crate::backend::metal::MetalBackend::new().unwrap()),
+            "metal",
+        )
+        .await,
+    )
+    .await;
 }
 
 #[cfg(feature = "vulkan")]
 #[tokio::test]
 async fn actual_normal_client_two_leg_mtls_executes_vulkan_and_keeps_cpu_decisions() {
-    check_normal_client(Live::with_backend(
-        Arc::new(crate::backend::vulkan::VulkanBackend::new().unwrap()), "vulkan",
-    ).await).await;
+    check_normal_client(
+        Live::with_backend(
+            Arc::new(crate::backend::vulkan::VulkanBackend::new().unwrap()),
+            "vulkan",
+        )
+        .await,
+    )
+    .await;
 }
 
 #[cfg(feature = "rocm")]
 #[tokio::test]
 async fn actual_normal_client_two_leg_mtls_executes_rocm_and_keeps_cpu_decisions() {
-    check_normal_client(Live::with_backend(
-        Arc::new(crate::backend::rocm::HipBackend::new_f32().unwrap()), "rocm",
-    ).await).await;
+    check_normal_client(
+        Live::with_backend(
+            Arc::new(crate::backend::rocm::HipBackend::new_f32().unwrap()),
+            "rocm",
+        )
+        .await,
+    )
+    .await;
 }
 
 #[cfg(feature = "cuda")]
 #[tokio::test]
 async fn actual_normal_client_two_leg_mtls_executes_cuda_and_keeps_cpu_decisions() {
-    check_normal_client(Live::with_backend(
-        Arc::new(crate::backend::cuda::CudaBackend::new().unwrap()), "cuda",
-    ).await).await;
+    check_normal_client(
+        Live::with_backend(
+            Arc::new(crate::backend::cuda::CudaBackend::new().unwrap()),
+            "cuda",
+        )
+        .await,
+    )
+    .await;
 }

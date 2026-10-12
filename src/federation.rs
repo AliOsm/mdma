@@ -32,14 +32,14 @@ pub mod config;
 pub mod control;
 pub(crate) mod execution;
 pub(crate) mod inventory;
-pub mod runtime;
 pub mod profile;
+pub(crate) mod routing;
+pub mod runtime;
 pub mod server_id;
 pub mod signing;
 pub mod tls;
-pub mod trust;
-pub(crate) mod routing;
 pub(crate) mod topology;
+pub mod trust;
 
 #[cfg(test)]
 mod tests;

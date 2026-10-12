@@ -62,15 +62,27 @@ fn coral_accelerator_renders_as_detected_without_backend() {
             device_node: Some("/dev/apex_0".into()),
             status: Some("ALIVE".into()),
             temperature_c: Some(64.8),
-            current_link: PcieLink { speed_gt_s: Some(5.0), width: Some(1) },
+            current_link: PcieLink {
+                speed_gt_s: Some(5.0),
+                width: Some(1),
+            },
             ..Accelerator::default()
         }],
         warnings: Vec::new(),
     };
     let text = text(&report);
-    assert!(text.contains("Kind: Coral Edge TPU (pci) — detected, no mdma backend yet"), "{text}");
-    assert!(text.contains("Device node: /dev/apex_0 / status: ALIVE / temperature: 64.8 °C"), "{text}");
-    assert!(text.contains("PCIe link now: PCIe 2.0 x1 (5.0 GT/s)"), "{text}");
+    assert!(
+        text.contains("Kind: Coral Edge TPU (pci) — detected, no mdma backend yet"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Device node: /dev/apex_0 / status: ALIVE / temperature: 64.8 °C"),
+        "{text}"
+    );
+    assert!(
+        text.contains("PCIe link now: PCIe 2.0 x1 (5.0 GT/s)"),
+        "{text}"
+    );
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(json["accelerators"][0]["kind"], "coral_edge_tpu");
     assert!(json["accelerators"][0]["firmware_loaded"].is_null());

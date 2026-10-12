@@ -140,7 +140,10 @@ impl Decision {
     }
 
     /// Rama's unary client returns a response only after its final gRPC status.
-    #[expect(clippy::needless_collect, reason = "the label set sorts and deduplicates before comparing with sorted map keys")]
+    #[expect(
+        clippy::needless_collect,
+        reason = "the label set sorts and deduplicates before comparing with sorted map keys"
+    )]
     pub(in crate::federation::routing) fn response(
         &self,
         wire: &DecideResponse,
@@ -178,7 +181,10 @@ impl Decision {
                 ) => {
                     common(*confidence, action)
                         && distribution(probabilities)
-                        && probabilities.keys().eq(question.labels.iter().collect::<std::collections::BTreeSet<_>>())
+                        && probabilities.keys().eq(question
+                            .labels
+                            .iter()
+                            .collect::<std::collections::BTreeSet<_>>())
                         && question.labels.contains(choice)
                 }
                 (

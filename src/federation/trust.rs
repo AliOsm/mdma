@@ -437,7 +437,9 @@ impl Store {
                 return Err(Error::Denied("suspend an active peer before recovery"));
             }
             check_material(snapshot, &peer)?;
-            snapshot.disclosures.retain(|grant| grant.peer_id != peer.server_id);
+            snapshot
+                .disclosures
+                .retain(|grant| grant.peer_id != peer.server_id);
             let old = snapshot.peers.remove(&peer.server_id);
             let mut record = old.unwrap_or_else(|| Record {
                 state: State::Staged,
@@ -534,7 +536,9 @@ impl Store {
         config::validate_digest(digest)?;
         self.update(|snapshot| {
             snapshot.denied_tls.insert(digest.into());
-            snapshot.disclosures.retain(|grant| grant.caller_spki_sha256 != digest);
+            snapshot
+                .disclosures
+                .retain(|grant| grant.caller_spki_sha256 != digest);
             for record in snapshot.peers.values_mut() {
                 if record
                     .policy
@@ -580,17 +584,20 @@ impl Store {
         if now_ms < current.clock_floor_ms || now_ms > config::MAX_SAFE_TIMESTAMP {
             return Err(Error::Denied("invalid or rolled-back UTC clock"));
         }
-        let needs_update = current.disclosures.iter().any(|grant| now_ms >= grant.window.valid_until_ms)
+        let needs_update = current
+            .disclosures
+            .iter()
+            .any(|grant| now_ms >= grant.window.valid_until_ms)
             || current.local_signing_history.iter().any(|(id, key)| {
-            now_ms >= key.window.valid_until_ms && !current.retired_local_signing.contains(id)
-        }) || current.peers.values().any(|r| {
-            r.signing_history
-                .iter()
-                .any(|(id, k)| now_ms >= k.window.valid_until_ms && !r.retired_signing.contains(id))
-                || r.tls_history.values().any(|p| {
+                now_ms >= key.window.valid_until_ms && !current.retired_local_signing.contains(id)
+            })
+            || current.peers.values().any(|r| {
+                r.signing_history.iter().any(|(id, k)| {
+                    now_ms >= k.window.valid_until_ms && !r.retired_signing.contains(id)
+                }) || r.tls_history.values().any(|p| {
                     now_ms >= p.window.valid_until_ms && !r.retired_tls.contains(&pin_label(p))
                 })
-        });
+            });
         if !needs_update {
             return Ok(());
         }
@@ -599,7 +606,9 @@ impl Store {
                 return Err(Error::Denied("rolled-back UTC clock"));
             }
             snapshot.clock_floor_ms = now_ms;
-            snapshot.disclosures.retain(|grant| now_ms < grant.window.valid_until_ms);
+            snapshot
+                .disclosures
+                .retain(|grant| now_ms < grant.window.valid_until_ms);
             for (id, key) in &snapshot.local_signing_history {
                 if now_ms >= key.window.valid_until_ms {
                     snapshot.retired_local_signing.insert(id.clone());

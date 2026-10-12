@@ -19,7 +19,11 @@ fn matmul_infers_tokens_and_rejects_partial_rows() {
     assert_eq!((m.n_out, m.n_in, m.n_tokens), (3, 4, 2));
     assert!(matmul(&[3, 4], 7, 6).is_err());
     assert!(matmul(&[3, 4], 8, 5).is_err());
-    assert_eq!(matmul(&[3, 4], 8, 7).unwrap().n_tokens, 2, "oversized output is fine");
+    assert_eq!(
+        matmul(&[3, 4], 8, 7).unwrap().n_tokens,
+        2,
+        "oversized output is fine"
+    );
     assert!(matmul(&[3, 4], 0, 0).is_err());
     assert!(matmul(&[3], 8, 6).is_err());
     assert!(matmul(&[0, 4], 8, 0).is_err());
@@ -64,29 +68,76 @@ fn rows_same_and_range() {
 
 #[test]
 fn rope_and_attn_geometry() {
-    let spec = RopeSpec { head_dim: 4, theta: 1.0 };
+    let spec = RopeSpec {
+        head_dim: 4,
+        theta: 1.0,
+    };
     let r = rope(&spec, 16, 8, 2).unwrap();
     assert_eq!((r.n_q_heads, r.n_kv_heads), (2, 1));
     assert!(rope(&spec, 16, 8, 3).is_err());
-    assert!(rope(&RopeSpec { head_dim: 3, theta: 1.0 }, 6, 6, 2).is_err());
+    assert!(
+        rope(
+            &RopeSpec {
+                head_dim: 3,
+                theta: 1.0
+            },
+            6,
+            6,
+            2
+        )
+        .is_err()
+    );
 
-    let spec = AttnSpec { head_dim: 2, n_q_heads: 2, n_kv_heads: 1 };
+    let spec = AttnSpec {
+        head_dim: 2,
+        n_q_heads: 2,
+        n_kv_heads: 1,
+    };
     let a = attn(&spec, 8, 5, 10, 10, 8).unwrap();
     assert_eq!((a.n_q, a.prefix), (2, 3));
     assert!(attn(&spec, 8, 1, 10, 10, 8).is_err(), "n_q exceeds kv.len");
     assert!(attn(&spec, 8, 5, 9, 10, 8).is_err(), "short cache");
     assert!(attn(&spec, 8, 5, 10, 10, 4).is_err(), "o too small");
     assert!(attn(&spec, 8, 5, 10, 10, 9).is_ok(), "o oversized");
-    assert!(attn(&AttnSpec { head_dim: 2, n_q_heads: 3, n_kv_heads: 2 }, 12, 5, 20, 20, 12).is_err());
+    assert!(
+        attn(
+            &AttnSpec {
+                head_dim: 2,
+                n_q_heads: 3,
+                n_kv_heads: 2
+            },
+            12,
+            5,
+            20,
+            20,
+            12
+        )
+        .is_err()
+    );
 }
 
 #[test]
 fn encoder_geometry() {
-    let spec = EncoderSpec { seq_len: 3, n_heads: 2, head_dim: 2, window: None };
+    let spec = EncoderSpec {
+        seq_len: 3,
+        n_heads: 2,
+        head_dim: 2,
+        window: None,
+    };
     assert_eq!(encoder_batch("e", &spec, 24).unwrap(), 2);
     assert!(encoder_batch("e", &spec, 20).is_err());
     assert_eq!(rope_neox(&spec, 24, 24).unwrap(), 2);
-    assert!(rope_neox(&EncoderSpec { head_dim: 3, ..spec }, 18, 18).is_err());
+    assert!(
+        rope_neox(
+            &EncoderSpec {
+                head_dim: 3,
+                ..spec
+            },
+            18,
+            18
+        )
+        .is_err()
+    );
     assert_eq!(attn_bidir(&spec, &[3, 1], 24, 24, 24, 24).unwrap(), 2);
     assert!(attn_bidir(&spec, &[3], 24, 24, 24, 24).is_err());
     assert!(attn_bidir(&spec, &[4, 1], 24, 24, 24, 24).is_err());

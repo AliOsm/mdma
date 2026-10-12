@@ -18,12 +18,12 @@ use rama::error::BoxError;
 use std::io::Write;
 use tokio_stream::StreamExt;
 
+#[path = "mdma-client/deadline.rs"]
+mod deadline;
 #[path = "mdma-client/readiness.rs"]
 mod readiness;
 #[path = "mdma-client/sampling.rs"]
 mod sampling;
-#[path = "mdma-client/deadline.rs"]
-mod deadline;
 
 fn env(name: &str) -> Result<String, BoxError> {
     std::env::var(name).map_err(|_| format!("missing required env var {name}").into())
@@ -32,7 +32,10 @@ fn env(name: &str) -> Result<String, BoxError> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), BoxError> {
     let addr = std::env::var("MDMA_ADDR").unwrap_or_else(|_| "localhost:6362".to_string());
-    let max_tokens: u32 = std::env::var("MDMA_MAX_TOKENS").ok().and_then(|s| s.parse().ok()).unwrap_or(64);
+    let max_tokens: u32 = std::env::var("MDMA_MAX_TOKENS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(64);
     let ready_timeout = readiness::timeout(|name| std::env::var(name))?;
     let sampler = sampling::config(|name| std::env::var(name))?;
     let rpc_timeout = deadline::timeout(|name| std::env::var(name))?;
@@ -56,30 +59,55 @@ async fn main() -> Result<(), BoxError> {
     let decision = match args.as_slice() {
         [flag, path] if flag == "--decide" => {
             let request: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-            let state_json = request.get("state").ok_or("request needs a \"state\"")?.to_string();
-            let questions_json = request.get("questions").ok_or("request needs a \"questions\" object")?.to_string();
-            Some(DecideRequest { model: model.clone(), state_json, questions_json })
+            let state_json = request
+                .get("state")
+                .ok_or("request needs a \"state\"")?
+                .to_string();
+            let questions_json = request
+                .get("questions")
+                .ok_or("request needs a \"questions\" object")?
+                .to_string();
+            Some(DecideRequest {
+                model: model.clone(),
+                state_json,
+                questions_json,
+            })
         }
         _ => None,
     };
     let prompt: String = args.join(" ");
-    let selected = if prompt.is_empty() && model.is_empty() { None } else { Some(model.as_str()) };
+    let selected = if prompt.is_empty() && model.is_empty() {
+        None
+    } else {
+        Some(model.as_str())
+    };
     let h = readiness::wait(
         || async { Ok(client.introspect(IntrospectRequest {}).await?.into_inner()) },
         selected,
         ready_timeout,
-    ).await?;
+    )
+    .await?;
 
     if let Some(request) = decision {
-        let reply = client.decide(deadline::request(request, rpc_timeout)?).await?.into_inner();
+        let reply = client
+            .decide(deadline::request(request, rpc_timeout)?)
+            .await?
+            .into_inner();
         let result: serde_json::Value = serde_json::from_str(&reply.result_json)?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
     if prompt.is_empty() {
-        println!("ready={} state={} backend={} default={}", h.ready, h.server_state, h.backend, h.default_model);
+        println!(
+            "ready={} state={} backend={} default={}",
+            h.ready, h.server_state, h.backend, h.default_model
+        );
         for m in h.models {
-            let size = if m.weight_bytes > 0 { format!(" {} MB", m.weight_bytes >> 20) } else { String::new() };
+            let size = if m.weight_bytes > 0 {
+                format!(" {} MB", m.weight_bytes >> 20)
+            } else {
+                String::new()
+            };
             let target = m.host.map_or(m.backend, |host| host.name);
             println!(
                 "  {:<20} {:<9} {:<10} ready={} {} leases={} arch={} n_ctx={}{size}",
@@ -88,9 +116,21 @@ async fn main() -> Result<(), BoxError> {
         }
         return Ok(());
     }
-    let mut stream = client.synthesize(deadline::request(
-        SynthesizeRequest { prompt, max_tokens, sampler, model, emit_events: false, chat, system }, rpc_timeout,
-    )?).await?.into_inner();
+    let mut stream = client
+        .synthesize(deadline::request(
+            SynthesizeRequest {
+                prompt,
+                max_tokens,
+                sampler,
+                model,
+                emit_events: false,
+                chat,
+                system,
+            },
+            rpc_timeout,
+        )?)
+        .await?
+        .into_inner();
     let mut out = std::io::stdout();
     let started = std::time::Instant::now();
     let mut n = 0u32;
@@ -101,6 +141,9 @@ async fn main() -> Result<(), BoxError> {
         n += 1;
     }
     let secs = started.elapsed().as_secs_f64();
-    eprintln!("\n[{n} tokens in {secs:.2}s, {:.1} tok/s]", f64::from(n) / secs);
+    eprintln!(
+        "\n[{n} tokens in {secs:.2}s, {:.1} tok/s]",
+        f64::from(n) / secs
+    );
     Ok(())
 }

@@ -101,11 +101,18 @@ impl<S> Gate<S> {
 /// The response quota and current authorization survive protobuf encoding
 /// until the actual HTTP response body is consumed or dropped.
 pub(crate) fn lease(response: Response) -> Response {
-    let lease = response.extensions().get_ref::<super::ResponseLease>().cloned();
+    let lease = response
+        .extensions()
+        .get_ref::<super::ResponseLease>()
+        .cloned();
     match lease {
-        Some(lease) => response.map(|inner| Body::new(LeasedBody {
-            inner, _charge: lease.charge, eligible: lease.eligible,
-        })),
+        Some(lease) => response.map(|inner| {
+            Body::new(LeasedBody {
+                inner,
+                _charge: lease.charge,
+                eligible: lease.eligible,
+            })
+        }),
         None => response,
     }
 }

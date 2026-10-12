@@ -20,6 +20,7 @@ pub(crate) struct EagerDecoder<'a, B: Backend> {
 
 impl<B: Backend> Decoder for EagerDecoder<'_, B> {
     fn forward(&mut self, token: u32, pos: u32) -> Result<Vec<f32>> {
-        self.model.forward(self.backend, self.kv, self.ws, token, pos)
+        self.model
+            .forward(self.backend, self.kv, self.ws, token, pos)
     }
 }

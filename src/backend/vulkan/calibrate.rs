@@ -30,7 +30,11 @@ impl F16Calibration {
             "f16-staged prefill {}: {:.2}x {} than f32, max logit diff {:.3} of {:.1}, top-1 {}",
             if self.f16 { "on" } else { "off" },
             self.speedup,
-            if self.speedup >= 1.0 { "faster" } else { "slower" },
+            if self.speedup >= 1.0 {
+                "faster"
+            } else {
+                "slower"
+            },
             self.max_logit_diff,
             self.logit_scale,
             if self.argmax_same { "same" } else { "differs" }
@@ -44,13 +48,19 @@ impl VulkanBackend {
     pub fn calibrate_f16(&self, model: &Model<Self>) -> Result<F16Calibration> {
         if !self.f16_weights_available() {
             self.set_f16_weights(false);
-            return Err(crate::backend::Error::Backend("vulkan: f16 staging unavailable".into()));
+            return Err(crate::backend::Error::Backend(
+                "vulkan: f16 staging unavailable".into(),
+            ));
         }
         if self.int8() {
-            return Err(crate::backend::Error::Backend("vulkan: disable int8 before f16 calibration".into()));
+            return Err(crate::backend::Error::Backend(
+                "vulkan: disable int8 before f16 calibration".into(),
+            ));
         }
         let n_ctx = model.config().n_ctx.min(256).max(PROBE_TOKENS);
-        let tokens: Vec<u32> = (0..PROBE_TOKENS as u32).map(|i| 1 + (i * 7919 + 13) % 1000).collect();
+        let tokens: Vec<u32> = (0..PROBE_TOKENS as u32)
+            .map(|i| 1 + (i * 7919 + 13) % 1000)
+            .collect();
         let run = |f16: bool| -> Result<(Vec<f32>, f64)> {
             self.set_f16_weights(f16);
             let mut kv = model.new_kv_cache(self, n_ctx)?;
@@ -71,12 +81,27 @@ impl VulkanBackend {
                 return Err(e);
             }
         };
-        let argmax = |v: &[f32]| v.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).map(|(i, _)| i);
-        let max_logit_diff = l32.iter().zip(&l16).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let argmax = |v: &[f32]| {
+            v.iter()
+                .enumerate()
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i)
+        };
+        let max_logit_diff = l32
+            .iter()
+            .zip(&l16)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
         let logit_scale = l32.iter().map(|a| a.abs()).fold(0f32, f32::max);
         let speedup = t32 / t16;
         let f16 = speedup >= MIN_SPEEDUP && max_logit_diff <= MAX_LOGIT_DIFF * logit_scale;
         self.set_f16_weights(f16);
-        Ok(F16Calibration { speedup, max_logit_diff, logit_scale, argmax_same: argmax(&l32) == argmax(&l16), f16 })
+        Ok(F16Calibration {
+            speedup,
+            max_logit_diff,
+            logit_scale,
+            argmax_same: argmax(&l32) == argmax(&l16),
+            f16,
+        })
     }
 }

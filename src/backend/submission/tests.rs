@@ -17,10 +17,16 @@ fn only_a_completed_submission_becomes_idle() {
 fn failed_submit_or_wait_keeps_deferred_buffers_charged() {
     for stage in ["end", "submit", "wait", "reset"] {
         let budget = BufferBudget::new(Some(100), None);
-        let ((), mut deferred) = budget.allocate(MemoryDomain::Device, 100, || Ok(())).unwrap();
+        let ((), mut deferred) = budget
+            .allocate(MemoryDomain::Device, 100, || Ok(()))
+            .unwrap();
         let mut submission = Submission::default();
         submission.begin(|| Ok(())).unwrap();
-        assert!(submission.finish(|| Err(Error::Backend(stage.into()))).is_err());
+        assert!(
+            submission
+                .finish(|| Err(Error::Backend(stage.into())))
+                .is_err()
+        );
         assert!(!submission.is_idle());
         assert!(submission.begin(|| panic!("must not reuse")).is_err());
         assert!(submission.finish(|| panic!("must not resubmit")).is_err());
@@ -34,7 +40,11 @@ fn failed_submit_or_wait_keeps_deferred_buffers_charged() {
 #[test]
 fn begin_failure_is_not_silently_retried() {
     let mut submission = Submission::default();
-    assert!(submission.begin(|| Err(Error::Backend("begin".into()))).is_err());
+    assert!(
+        submission
+            .begin(|| Err(Error::Backend("begin".into())))
+            .is_err()
+    );
     assert!(!submission.is_idle());
     assert!(submission.begin(|| panic!("must not reuse")).is_err());
 }

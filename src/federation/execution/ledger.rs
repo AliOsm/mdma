@@ -55,7 +55,10 @@ enum Entry {
     Active,
     Terminal {
         finished: Instant,
-        #[cfg_attr(not(test), expect(dead_code, reason = "tombstone outcomes are only inspected by tests"))]
+        #[cfg_attr(
+            not(test),
+            expect(dead_code, reason = "tombstone outcomes are only inspected by tests")
+        )]
         outcome: Outcome,
     },
 }
@@ -237,15 +240,17 @@ impl Claim {
         job: impl FnOnce() -> Outcome + Send + 'static,
     ) -> Result<JoinHandle<Outcome>, std::io::Error> {
         let (done, ready) = tokio::sync::oneshot::channel();
-        let thread = std::thread::Builder::new().name("mdma-federation".into()).spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
-            self.outcome = result.as_ref().copied().unwrap_or(Outcome::Failed);
-            // Keep the claim through actual join (including time waiting for
-            // a join slot). This also bounds finished thread handles to one.
-            // The inference captures have already been destroyed/unwound.
-            let _ = done.send(self);
-            result
-        })?;
+        let thread = std::thread::Builder::new()
+            .name("mdma-federation".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                self.outcome = result.as_ref().copied().unwrap_or(Outcome::Failed);
+                // Keep the claim through actual join (including time waiting for
+                // a join slot). This also bounds finished thread handles to one.
+                // The inference captures have already been destroyed/unwound.
+                let _ = done.send(self);
+                result
+            })?;
         Ok(tokio::spawn(async move {
             let claim = ready.await.ok();
             tokio::task::spawn_blocking(move || {
@@ -255,7 +260,9 @@ impl Claim {
                     Ok(Ok(outcome)) => outcome,
                     Ok(Err(panic)) | Err(panic) => std::panic::resume_unwind(panic),
                 }
-            }).await.expect("native thread join failed")
+            })
+            .await
+            .expect("native thread join failed")
         }))
     }
 }

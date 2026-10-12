@@ -2,7 +2,9 @@
 //! Kernels receive buffer addresses through push constants. Operations
 //! accumulate in one command buffer until a host transfer submits it.
 //! Buffer destruction is deferred until referencing commands complete.
-use super::{AttnSpec, Backend, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec, dtype_code, shape};
+use super::{
+    AttnSpec, Backend, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec, dtype_code, shape,
+};
 use ash::vk;
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -397,7 +399,9 @@ impl VulkanBackend {
         // be >= 1.2.
         unsafe { instance.get_physical_device_properties2(pdev, &mut props2) };
         if subgroup.subgroup_size < 8
-            || !subgroup.supported_stages.contains(vk::ShaderStageFlags::COMPUTE)
+            || !subgroup
+                .supported_stages
+                .contains(vk::ShaderStageFlags::COMPUTE)
             || !subgroup
                 .supported_operations
                 .contains(vk::SubgroupFeatureFlags::ARITHMETIC)
@@ -411,7 +415,9 @@ impl VulkanBackend {
         let coopmat = match coopmat::probe(&entry, &instance, pdev) {
             Ok(support) => support,
             Err(e) => {
-                eprintln!("mdma: Vulkan int8 capability probe failed, keeping existing kernels: {e}");
+                eprintln!(
+                    "mdma: Vulkan int8 capability probe failed, keeping existing kernels: {e}"
+                );
                 None
             }
         };
@@ -425,7 +431,9 @@ impl VulkanBackend {
         let tiled_attention = match attention::probe(&instance, pdev) {
             Ok(support) => support,
             Err(e) => {
-                eprintln!("mdma: Vulkan tiled-attention probe failed, keeping existing kernel: {e}");
+                eprintln!(
+                    "mdma: Vulkan tiled-attention probe failed, keeping existing kernel: {e}"
+                );
                 false
             }
         };
@@ -449,18 +457,21 @@ impl VulkanBackend {
             .shader_int8(true)
             .shader_float16(shader_float16)
             .vulkan_memory_model(coopmat.is_some());
-        let mut coop_features = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()
-            .cooperative_matrix(true);
-        let mut size_features = vk::PhysicalDeviceSubgroupSizeControlFeatures::default()
-            .subgroup_size_control(true);
+        let mut coop_features =
+            vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default().cooperative_matrix(true);
+        let mut size_features =
+            vk::PhysicalDeviceSubgroupSizeControlFeatures::default().subgroup_size_control(true);
         let mut dot_features = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default()
             .shader_integer_dot_product(true);
         // SAFETY: `pdev` was enumerated from the live `instance`.
         let memory_budget = unsafe { instance.enumerate_device_extension_properties(pdev) }
-            .map_err(vk_err("enumerate extensions"))?.iter().any(|extension| {
+            .map_err(vk_err("enumerate extensions"))?
+            .iter()
+            .any(|extension| {
                 // SAFETY: the spec requires extensionName to be NUL-terminated within its
                 // fixed array, which lives in the Vec for the whole comparison.
-                (unsafe { std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()) }) == ash::ext::memory_budget::NAME
+                (unsafe { std::ffi::CStr::from_ptr(extension.extension_name.as_ptr()) })
+                    == ash::ext::memory_budget::NAME
             });
         let mut extensions = Vec::new();
         if memory_budget {
@@ -570,7 +581,8 @@ impl VulkanBackend {
             let tiled_kernel = *name == "attn_tile";
             let f16_kernel = *name == "gemm_q_f16";
             let optional_kernel = int8_kernel || tiled_kernel || f16_kernel;
-            if (coop_kernel && coopmat.is_none()) || (dot_kernel && !dot)
+            if (coop_kernel && coopmat.is_none())
+                || (dot_kernel && !dot)
                 || (*name == "quantize_q8" && coopmat.is_none() && !dot)
                 || (tiled_kernel && !tiled_attention)
                 || (f16_kernel && !shader_float16)
@@ -587,11 +599,19 @@ impl VulkanBackend {
                     .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
             }
             .map_err(vk_err("create shader module"))?;
-            let spec_value = coopmat.map_or(0, coopmat::Generation::specialization).to_ne_bytes();
-            let spec_entries = [vk::SpecializationMapEntry::default().constant_id(0).offset(0).size(4)];
-            let spec = vk::SpecializationInfo::default().map_entries(&spec_entries).data(&spec_value);
-            let mut required_size = vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default()
-                .required_subgroup_size(32);
+            let spec_value = coopmat
+                .map_or(0, coopmat::Generation::specialization)
+                .to_ne_bytes();
+            let spec_entries = [vk::SpecializationMapEntry::default()
+                .constant_id(0)
+                .offset(0)
+                .size(4)];
+            let spec = vk::SpecializationInfo::default()
+                .map_entries(&spec_entries)
+                .data(&spec_value);
+            let mut required_size =
+                vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo::default()
+                    .required_subgroup_size(32);
             let mut stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(module)
@@ -629,13 +649,18 @@ impl VulkanBackend {
                         eprintln!("mdma: Vulkan optional pipeline {name} failed: {e}");
                         continue;
                     }
-                    return Err(Error::Backend(format!("vulkan create pipeline {name}: {e}")));
+                    return Err(Error::Backend(format!(
+                        "vulkan create pipeline {name}: {e}"
+                    )));
                 }
             };
             kernels.insert(*name, Kernel { module, pipeline });
         }
         // Each optional path fails independently; both need the quantizer.
-        for group in [["gemm_q4k_i8", "gemm_q6k_i8"], ["gemm_q4k_dot", "gemm_q6k_dot"]] {
+        for group in [
+            ["gemm_q4k_i8", "gemm_q6k_i8"],
+            ["gemm_q4k_dot", "gemm_q6k_dot"],
+        ] {
             if !kernels.contains_key("quantize_q8")
                 || !group.iter().all(|name| kernels.contains_key(name))
             {
@@ -652,7 +677,8 @@ impl VulkanBackend {
                 }
             }
         }
-        if !kernels.contains_key("gemm_q4k_i8") && !kernels.contains_key("gemm_q4k_dot")
+        if !kernels.contains_key("gemm_q4k_i8")
+            && !kernels.contains_key("gemm_q4k_dot")
             && let Some(kernel) = kernels.remove("quantize_q8")
         {
             // SAFETY: no command buffer has been recorded yet (the backend is built below); the
@@ -664,7 +690,8 @@ impl VulkanBackend {
         }
 
         let inner = Arc::new(Inner {
-            pdev, memory_budget,
+            pdev,
+            memory_budget,
             _entry: entry,
             instance,
             device,
@@ -689,7 +716,9 @@ impl VulkanBackend {
             memory_type,
             device_type,
             f16_weights: AtomicBool::new(false),
-            fused_norm: AtomicBool::new(!std::env::var_os("MDMA_VK_FUSED_NORM").is_some_and(|v| v == "0")),
+            fused_norm: AtomicBool::new(
+                !std::env::var_os("MDMA_VK_FUSED_NORM").is_some_and(|v| v == "0"),
+            ),
             tiled_attention: AtomicBool::new(false),
             int8: AtomicU8::new(INT8_OFF),
             int8_scratch: Mutex::new(None),
@@ -704,62 +733,86 @@ impl VulkanBackend {
             eprintln!("mdma: requested Vulkan f16 staging unavailable; using f32 prefill kernels");
         }
         let requested = std::env::var_os("MDMA_VK_INT8");
-        backend.set_tiled_attention(!std::env::var_os("MDMA_VK_TILED_ATTN").is_some_and(|v| v == "0"));
+        backend
+            .set_tiled_attention(!std::env::var_os("MDMA_VK_TILED_ATTN").is_some_and(|v| v == "0"));
         if requested.as_ref().is_some_and(|v| v == "dot") {
             backend.set_int8_dot(true);
         } else if requested.as_ref().is_some_and(|v| v == "1") {
             backend.set_int8(true);
         }
         if requested.is_some_and(|v| v == "1" || v == "dot") && !backend.int8() {
-            eprintln!("mdma: requested Vulkan int8 path unavailable; using existing prefill kernels");
+            eprintln!(
+                "mdma: requested Vulkan int8 path unavailable; using existing prefill kernels"
+            );
         }
         Ok(backend)
     }
 
-    pub(crate) fn federation_profile(&self) -> std::io::Result<crate::federation::profile::gpu::Gpu> {
+    pub(crate) fn federation_profile(
+        &self,
+    ) -> std::io::Result<crate::federation::profile::gpu::Gpu> {
         use crate::federation::profile::gpu::{Gpu, fields};
         use sha2::{Digest, Sha256};
         let mut driver = vk::PhysicalDeviceDriverProperties::default();
         let mut ids = vk::PhysicalDeviceIDProperties::default();
         let mut properties = vk::PhysicalDeviceProperties2::default()
-            .push_next(&mut driver).push_next(&mut ids);
+            .push_next(&mut driver)
+            .push_next(&mut ids);
         // SAFETY: `inner.pdev` was enumerated from `inner.instance`, both live while `self` is;
         // the chained `driver` (core 1.2) and `ids` (core 1.1) outlive the call.
-        unsafe { self.inner.instance.get_physical_device_properties2(self.inner.pdev, &mut properties) };
+        unsafe {
+            self.inner
+                .instance
+                .get_physical_device_properties2(self.inner.pdev, &mut properties)
+        };
         let properties = properties.properties;
         // SAFETY: deviceName, driverName and driverInfo are NUL-terminated within their fixed
         // arrays per the spec; `properties` and `driver` are locals that outlive these Cows.
-        let name = unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }.to_string_lossy();
-        let driver_name = unsafe { std::ffi::CStr::from_ptr(driver.driver_name.as_ptr()) }.to_string_lossy();
-        let driver_info = unsafe { std::ffi::CStr::from_ptr(driver.driver_info.as_ptr()) }.to_string_lossy();
-        let mut kernels: Vec<_> = KERNELS.iter().filter(|(name, _)| self.kernels.contains_key(name))
-            .map(|(name, bytes)| format!("{name}:{}", hex::encode(Sha256::digest(bytes)))).collect();
+        let name =
+            unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }.to_string_lossy();
+        let driver_name =
+            unsafe { std::ffi::CStr::from_ptr(driver.driver_name.as_ptr()) }.to_string_lossy();
+        let driver_info =
+            unsafe { std::ffi::CStr::from_ptr(driver.driver_info.as_ptr()) }.to_string_lossy();
+        let mut kernels: Vec<_> = KERNELS
+            .iter()
+            .filter(|(name, _)| self.kernels.contains_key(name))
+            .map(|(name, bytes)| format!("{name}:{}", hex::encode(Sha256::digest(bytes))))
+            .collect();
         kernels.sort();
-        self.modes.capture(|| Gpu::immutable("vulkan", "f32", "f32", fields([
-            ("vocabulary", "mdma.vulkan.v1".into()),
-            ("workload", "decoder".into()),
-            ("device_name", name.into_owned()),
-            ("device_uuid", hex::encode(ids.device_uuid)),
-            ("vendor_id", properties.vendor_id.to_string()),
-            ("device_id", properties.device_id.to_string()),
-            ("driver_id", driver.driver_id.as_raw().to_string()),
-            ("driver_version", properties.driver_version.to_string()),
-            ("driver_name", driver_name.into_owned()),
-            ("driver_info", driver_info.into_owned()),
-            ("driver_uuid", hex::encode(ids.driver_uuid)),
-            ("api_version", properties.api_version.to_string()),
-            ("kernel_ids", kernels.join(",")),
-            ("weights", "gguf-raw-matrices-f32-norms".into()),
-            ("f16_staging", self.f16_weights().to_string()),
-            ("int8_mode", self.int8.load(Ordering::Relaxed).to_string()),
-            ("fused_norm", self.fused_norm().to_string()),
-            ("tiled_attention", self.tiled_attention().to_string()),
-            ("execution", "recorded-commands-fence-joined".into()),
-            ("device_memory_type", self.device_type.to_string()),
-            ("staging_memory_type", self.memory_type.to_string()),
-            ("target_arch", std::env::consts::ARCH.into()),
-            ("target_os", std::env::consts::OS.into()),
-        ]), self.health.clone()))
+        self.modes.capture(|| {
+            Gpu::immutable(
+                "vulkan",
+                "f32",
+                "f32",
+                fields([
+                    ("vocabulary", "mdma.vulkan.v1".into()),
+                    ("workload", "decoder".into()),
+                    ("device_name", name.into_owned()),
+                    ("device_uuid", hex::encode(ids.device_uuid)),
+                    ("vendor_id", properties.vendor_id.to_string()),
+                    ("device_id", properties.device_id.to_string()),
+                    ("driver_id", driver.driver_id.as_raw().to_string()),
+                    ("driver_version", properties.driver_version.to_string()),
+                    ("driver_name", driver_name.into_owned()),
+                    ("driver_info", driver_info.into_owned()),
+                    ("driver_uuid", hex::encode(ids.driver_uuid)),
+                    ("api_version", properties.api_version.to_string()),
+                    ("kernel_ids", kernels.join(",")),
+                    ("weights", "gguf-raw-matrices-f32-norms".into()),
+                    ("f16_staging", self.f16_weights().to_string()),
+                    ("int8_mode", self.int8.load(Ordering::Relaxed).to_string()),
+                    ("fused_norm", self.fused_norm().to_string()),
+                    ("tiled_attention", self.tiled_attention().to_string()),
+                    ("execution", "recorded-commands-fence-joined".into()),
+                    ("device_memory_type", self.device_type.to_string()),
+                    ("staging_memory_type", self.memory_type.to_string()),
+                    ("target_arch", std::env::consts::ARCH.into()),
+                    ("target_os", std::env::consts::OS.into()),
+                ]),
+                self.health.clone(),
+            )
+        })
     }
 
     /// Prefill with the f16-staged weight tile (the MDMA_VK_F16_WEIGHTS
@@ -771,7 +824,10 @@ impl VulkanBackend {
     }
 
     pub fn set_f16_weights(&self, on: bool) {
-        self.modes.change(|| self.f16_weights.store(on && self.f16_weights_available(), Ordering::Relaxed));
+        self.modes.change(|| {
+            self.f16_weights
+                .store(on && self.f16_weights_available(), Ordering::Relaxed)
+        });
     }
 
     /// Whether the device supports FP16 arithmetic and its staging pipeline
@@ -792,11 +848,17 @@ impl VulkanBackend {
     }
 
     pub fn set_int8(&self, on: bool) {
-        let mode = if !on { INT8_OFF }
-            else if self.int8_coopmat_available() { INT8_COOPMAT }
-            else if self.int8_dot_available() { INT8_DOT }
-            else { INT8_OFF };
-        self.modes.change(|| self.int8.store(mode, Ordering::Relaxed));
+        let mode = if !on {
+            INT8_OFF
+        } else if self.int8_coopmat_available() {
+            INT8_COOPMAT
+        } else if self.int8_dot_available() {
+            INT8_DOT
+        } else {
+            INT8_OFF
+        };
+        self.modes
+            .change(|| self.int8.store(mode, Ordering::Relaxed));
     }
 
     pub fn int8_available(&self) -> bool {
@@ -805,7 +867,8 @@ impl VulkanBackend {
 
     pub fn int8_coopmat_available(&self) -> bool {
         ["quantize_q8", "gemm_q4k_i8", "gemm_q6k_i8"]
-            .iter().all(|name| self.kernels.contains_key(name))
+            .iter()
+            .all(|name| self.kernels.contains_key(name))
     }
 
     /// Force the RDNA2-compatible packed-dot path, including on newer GPUs.
@@ -816,13 +879,22 @@ impl VulkanBackend {
     }
 
     pub fn set_int8_dot(&self, on: bool) {
-        self.modes.change(|| self.int8.store(if on && self.int8_dot_available() { INT8_DOT } else { INT8_OFF },
-            Ordering::Relaxed));
+        self.modes.change(|| {
+            self.int8.store(
+                if on && self.int8_dot_available() {
+                    INT8_DOT
+                } else {
+                    INT8_OFF
+                },
+                Ordering::Relaxed,
+            )
+        });
     }
 
     pub fn int8_dot_available(&self) -> bool {
         ["quantize_q8", "gemm_q4k_dot", "gemm_q6k_dot"]
-            .iter().all(|name| self.kernels.contains_key(name))
+            .iter()
+            .all(|name| self.kernels.contains_key(name))
     }
 
     pub fn int8_dot(&self) -> bool {
@@ -860,14 +932,19 @@ impl VulkanBackend {
             .enumerate()
             .find(|(i, t)| bits & (1 << i) != 0 && t.property_flags.contains(need))
             .map(|(i, _)| i as u32)
-            .ok_or_else(|| Error::Backend(format!("vulkan: no memory type for {need:?} in {bits:#x}")))
+            .ok_or_else(|| {
+                Error::Backend(format!("vulkan: no memory type for {need:?} in {bits:#x}"))
+            })
     }
 
     /// A buffer on the host-visible type (mapped) or the device-local one.
     fn buffer(&self, bytes: usize, host: bool) -> Result<VkBuf> {
         // Kernels read whole 32-bit words: a 210-byte Q6_K block or an
         // odd f16 row must not end mid-word.
-        let size = bytes.max(16).checked_next_multiple_of(4).ok_or(Error::SizeOverflow)? as u64;
+        let size = bytes
+            .max(16)
+            .checked_next_multiple_of(4)
+            .ok_or(Error::SizeOverflow)? as u64;
         let usage = vk::BufferUsageFlags::STORAGE_BUFFER
             | vk::BufferUsageFlags::TRANSFER_SRC
             | vk::BufferUsageFlags::TRANSFER_DST
@@ -905,21 +982,26 @@ impl VulkanBackend {
             .push_next(&mut flags);
         // Host-visible BAR/unified memory can still live on a device-local heap.
         let heap = self.inner.mem.memory_types[memory_type as usize].heap_index as usize;
-        let domain = if self.inner.mem.memory_heaps[heap].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) {
+        let domain = if self.inner.mem.memory_heaps[heap]
+            .flags
+            .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+        {
             crate::memory::MemoryDomain::Device
         } else {
             crate::memory::MemoryDomain::Host
         };
-        let allocation = usize::try_from(reqs.size).map_err(|_| Error::SizeOverflow).and_then(|bytes| {
-            self.buffers.allocate(domain, bytes, || {
-                // SAFETY: `ai` and its chained `flags` live in the enclosing frame; memory_type_for
-                // returned an index below memory_type_count whose bit is set in
-                // reqs.memory_type_bits, and the DEVICE_ADDRESS flag relies on bufferDeviceAddress
-                // (enabled). The live allocation count is not tracked against
-                // maxMemoryAllocationCount (one allocation per buffer).
-                unsafe { device.allocate_memory(&ai, None) }.map_err(vk_err("allocate memory"))
-            })
-        });
+        let allocation = usize::try_from(reqs.size)
+            .map_err(|_| Error::SizeOverflow)
+            .and_then(|bytes| {
+                self.buffers.allocate(domain, bytes, || {
+                    // SAFETY: `ai` and its chained `flags` live in the enclosing frame; memory_type_for
+                    // returned an index below memory_type_count whose bit is set in
+                    // reqs.memory_type_bits, and the DEVICE_ADDRESS flag relies on bufferDeviceAddress
+                    // (enabled). The live allocation count is not tracked against
+                    // maxMemoryAllocationCount (one allocation per buffer).
+                    unsafe { device.allocate_memory(&ai, None) }.map_err(vk_err("allocate memory"))
+                })
+            });
         let (memory, mut charge) = match allocation {
             Ok(allocation) => allocation,
             Err(e) => {
@@ -1063,7 +1145,11 @@ impl VulkanBackend {
     }
 
     fn sync(&self) -> Result<()> {
-        let mut pending = self.inner.pending.lock().map_err(|_| Error::Backend("Vulkan submission lock poisoned".into()))?;
+        let mut pending = self
+            .inner
+            .pending
+            .lock()
+            .map_err(|_| Error::Backend("Vulkan submission lock poisoned".into()))?;
         self.flush(&mut pending)
     }
 
@@ -1129,10 +1215,24 @@ impl VulkanBackend {
         self.launch_labeled(name, push, grid, name)
     }
 
-    fn launch_binary_f32(&self, op: &'static str, a: &VkBuf, b: &VkBuf, y: &mut VkBuf) -> Result<()> {
-        let n = shape::elementwise(op, &[shape::elems(op, a.len)?, shape::elems(op, b.len)?],
-            &[shape::elems(op, y.len)?])?;
-        let pc = PcElem { a: a.addr, b: b.addr, y: y.addr, n: n as u32 };
+    fn launch_binary_f32(
+        &self,
+        op: &'static str,
+        a: &VkBuf,
+        b: &VkBuf,
+        y: &mut VkBuf,
+    ) -> Result<()> {
+        let n = shape::elementwise(
+            op,
+            &[shape::elems(op, a.len)?, shape::elems(op, b.len)?],
+            &[shape::elems(op, y.len)?],
+        )?;
+        let pc = PcElem {
+            a: a.addr,
+            b: b.addr,
+            y: y.addr,
+            n: n as u32,
+        };
         self.launch(op, &push(&pc), [(n as u32).div_ceil(BINARY_THREADS), 1, 1])
     }
 
@@ -1263,7 +1363,9 @@ struct PcEmbed {
 impl Backend for VulkanBackend {
     type Buf = VkBuf;
 
-    fn execution_identity(&self) -> Option<Arc<()>> { Some(self.identity.clone()) }
+    fn execution_identity(&self) -> Option<Arc<()>> {
+        Some(self.identity.clone())
+    }
 
     fn join_execution(&self) -> Result<()> {
         let result = self.sync();
@@ -1281,16 +1383,31 @@ impl Backend for VulkanBackend {
 
     fn device_label(&self) -> Option<String> {
         // SAFETY: `inner.pdev` was enumerated from `inner.instance`, both live while `self` is.
-        let properties = unsafe { self.inner.instance.get_physical_device_properties(self.inner.pdev) };
+        let properties = unsafe {
+            self.inner
+                .instance
+                .get_physical_device_properties(self.inner.pdev)
+        };
         // SAFETY: deviceName is NUL-terminated within its fixed array per the spec, and
         // `properties` outlives the copy made by into_owned().
-        Some(unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }.to_string_lossy().into_owned())
+        Some(
+            unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 
     fn unified_memory(&self) -> bool {
         // SAFETY: `inner.pdev` was enumerated from `inner.instance`, both live while `self` is.
-        matches!(unsafe { self.inner.instance.get_physical_device_properties(self.inner.pdev) }.device_type,
-            vk::PhysicalDeviceType::INTEGRATED_GPU | vk::PhysicalDeviceType::CPU)
+        matches!(
+            unsafe {
+                self.inner
+                    .instance
+                    .get_physical_device_properties(self.inner.pdev)
+            }
+            .device_type,
+            vk::PhysicalDeviceType::INTEGRATED_GPU | vk::PhysicalDeviceType::CPU
+        )
     }
 
     fn total_device_bytes(&self) -> Option<usize> {
@@ -1299,21 +1416,35 @@ impl Backend for VulkanBackend {
     }
 
     fn available_device_bytes(&self) -> Result<Option<usize>> {
-        if !self.inner.memory_budget { return Ok(None); }
+        if !self.inner.memory_budget {
+            return Ok(None);
+        }
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
         // SAFETY: `inner.pdev` belongs to the live instance; `budget` is chained only when
         // `memory_budget` is set (VK_EXT_memory_budget supported by `pdev` and enabled), and
         // outlives the call.
-        unsafe { self.inner.instance.get_physical_device_memory_properties2(self.inner.pdev, &mut properties) };
+        unsafe {
+            self.inner
+                .instance
+                .get_physical_device_memory_properties2(self.inner.pdev, &mut properties)
+        };
         let heap = self.inner.mem.memory_types[self.device_type as usize].heap_index as usize;
         let free = budget.heap_budget[heap].saturating_sub(budget.heap_usage[heap]);
-        Ok(Some(usize::try_from(free).map_err(|_| Error::SizeOverflow)?))
+        Ok(Some(
+            usize::try_from(free).map_err(|_| Error::SizeOverflow)?,
+        ))
     }
 
     fn supports(&self, op: Operation) -> bool {
-        matches!(op, Operation::Scale | Operation::GeluTanhMul | Operation::Softcap
-            | Operation::RopeSplitHalf | Operation::WindowedAttention)
+        matches!(
+            op,
+            Operation::Scale
+                | Operation::GeluTanhMul
+                | Operation::Softcap
+                | Operation::RopeSplitHalf
+                | Operation::WindowedAttention
+        )
     }
 
     fn supports_weight_dtype(&self, dtype: crate::gguf::GgmlDType) -> bool {
@@ -1336,12 +1467,25 @@ impl Backend for VulkanBackend {
         self.launch_binary_f32("gelu_tanh_mul", a, b, y)
     }
 
-    fn rope_split_half(&self, x: &mut VkBuf, pos: u32, spec: &RopeSpec, factors: &VkBuf) -> Result<()> {
+    fn rope_split_half(
+        &self,
+        x: &mut VkBuf,
+        pos: u32,
+        spec: &RopeSpec,
+        factors: &VkBuf,
+    ) -> Result<()> {
         self.split_rope(x, pos, spec, factors)
     }
 
-    fn attn_windowed(&self, q: &VkBuf, kv: &KvView<VkBuf>, spec: &AttnSpec,
-        scale: f32, window: usize, o: &mut VkBuf) -> Result<()> {
+    fn attn_windowed(
+        &self,
+        q: &VkBuf,
+        kv: &KvView<VkBuf>,
+        spec: &AttnSpec,
+        scale: f32,
+        window: usize,
+        o: &mut VkBuf,
+    ) -> Result<()> {
         self.attention(q, kv, spec, scale, window, o)
     }
 
@@ -1452,13 +1596,27 @@ impl Backend for VulkanBackend {
     }
 
     fn qmatmul(&self, w: &QWeight<Self::Buf>, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
-        let shape::Matmul { n_out, n_in, n_tokens } = shape::matmul(&w.shape, x.len / 4, y.len / 4)?;
+        let shape::Matmul {
+            n_out,
+            n_in,
+            n_tokens,
+        } = shape::matmul(&w.shape, x.len / 4, y.len / 4)?;
         shape::kquant_aligned("qmatmul", w.dtype, n_in)?;
         let code = dtype_code::decoder_code(w.dtype)?;
         let int8 = self.int8.load(Ordering::Relaxed);
         if int8 != INT8_OFF && n_tokens > 1 && matches!(code, dtype_code::Q4K | dtype_code::Q6K) {
-            return self.qmatmul_int8(w, x, y, shape::Matmul { n_out, n_in, n_tokens },
-                code, int8 == INT8_DOT);
+            return self.qmatmul_int8(
+                w,
+                x,
+                y,
+                shape::Matmul {
+                    n_out,
+                    n_in,
+                    n_tokens,
+                },
+                code,
+                int8 == INT8_DOT,
+            );
         }
         let pc = PcGemv {
             w: w.buf.addr,
@@ -1474,11 +1632,23 @@ impl Backend for VulkanBackend {
         // (decode), per GEMM_BM x GEMM_BN output tile for several
         // (prefill). Float/Q5_K weights: one workgroup per (row, token).
         let (name, grid) = match (code, n_tokens) {
-            (dtype_code::Q4K | dtype_code::Q6K, 1) =>
-                ("gemv_q", [(n_out as u32).div_ceil(GEMV_NR), 1, 1]),
+            (dtype_code::Q4K | dtype_code::Q6K, 1) => {
+                ("gemv_q", [(n_out as u32).div_ceil(GEMV_NR), 1, 1])
+            }
             (dtype_code::Q4K | dtype_code::Q6K, _) => {
-                let name = if self.f16_weights() { "gemm_q_f16" } else { "gemm_q" };
-                (name, [(n_out as u32).div_ceil(GEMM_BM), (n_tokens as u32).div_ceil(GEMM_BN), 1])
+                let name = if self.f16_weights() {
+                    "gemm_q_f16"
+                } else {
+                    "gemm_q"
+                };
+                (
+                    name,
+                    [
+                        (n_out as u32).div_ceil(GEMM_BM),
+                        (n_tokens as u32).div_ceil(GEMM_BN),
+                        1,
+                    ],
+                )
             }
             _ => ("gemv_f", [n_out as u32, n_tokens as u32, 1]),
         };
@@ -1517,7 +1687,15 @@ impl Backend for VulkanBackend {
             dtype: code as u32,
             block_bytes: dtype_code::block_bytes(table.dtype) as u32,
         };
-        self.launch("embed", &push(&pc), [token_ids.len() as u32, (n_embd as u32).div_ceil(EMBED_DIM_THREADS), 1])
+        self.launch(
+            "embed",
+            &push(&pc),
+            [
+                token_ids.len() as u32,
+                (n_embd as u32).div_ceil(EMBED_DIM_THREADS),
+                1,
+            ],
+        )
     }
 
     fn rmsnorm(&self, w: &Self::Buf, x: &Self::Buf, y: &mut Self::Buf, eps: f32) -> Result<()> {
@@ -1533,7 +1711,15 @@ impl Backend for VulkanBackend {
         self.launch("rmsnorm", &push(&pc), [n_tokens as u32, 1, 1])
     }
 
-    fn add_rmsnorm(&self, w: &Self::Buf, a: &Self::Buf, b: &Self::Buf, sum: &mut Self::Buf, y: &mut Self::Buf, eps: f32) -> Result<()> {
+    fn add_rmsnorm(
+        &self,
+        w: &Self::Buf,
+        a: &Self::Buf,
+        b: &Self::Buf,
+        sum: &mut Self::Buf,
+        y: &mut Self::Buf,
+        eps: f32,
+    ) -> Result<()> {
         self.residual_norm(w, a, b, sum, y, eps)
     }
 
@@ -1545,7 +1731,10 @@ impl Backend for VulkanBackend {
         n_tokens: usize,
         spec: &RopeSpec,
     ) -> Result<()> {
-        let shape::Rope { n_q_heads, n_kv_heads } = shape::rope(spec, q.len / 4, k.len / 4, n_tokens)?;
+        let shape::Rope {
+            n_q_heads,
+            n_kv_heads,
+        } = shape::rope(spec, q.len / 4, k.len / 4, n_tokens)?;
         let (n_q, n_kv) = (n_q_heads as i32, n_kv_heads as i32);
         let pc = PcRope {
             q: q.addr,
@@ -1560,7 +1749,11 @@ impl Backend for VulkanBackend {
         self.launch(
             "rope",
             &push(&pc),
-            [pairs.div_ceil(ROPE_PAIR_THREADS), (n_q + n_kv) as u32, n_tokens as u32],
+            [
+                pairs.div_ceil(ROPE_PAIR_THREADS),
+                (n_q + n_kv) as u32,
+                n_tokens as u32,
+            ],
         )
     }
 

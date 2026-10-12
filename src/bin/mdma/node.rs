@@ -125,7 +125,8 @@ impl proto::node_server::Node for NodeService {
         &self,
         request: Request<proto::IdentifyRequest>,
     ) -> Result<Response<proto::NodeIdentity>, Status> {
-        self.policy.check(request.into_inner().requester.as_ref())
+        self.policy
+            .check(request.into_inner().requester.as_ref())
             .map_err(Status::failed_precondition)?;
         Ok(Response::new(version::local()))
     }
@@ -134,7 +135,8 @@ impl proto::node_server::Node for NodeService {
         &self,
         request: Request<proto::ScanCapabilitiesRequest>,
     ) -> Result<Response<proto::ResourceSnapshot>, Status> {
-        self.policy.check(request.into_inner().requester.as_ref())
+        self.policy
+            .check(request.into_inner().requester.as_ref())
             .map_err(Status::failed_precondition)?;
         let storage = self.storage.clone();
         let address = self.address;
@@ -175,7 +177,10 @@ fn peer_origin(peer: &str) -> Result<Uri, BoxError> {
 }
 
 async fn scan(args: ScanArgs) -> Result<(), BoxError> {
-    let policy = version::Policy::new(args.min_peer_version.as_deref(), args.require_peer_build.as_deref())?;
+    let policy = version::Policy::new(
+        args.min_peer_version.as_deref(),
+        args.require_peer_build.as_deref(),
+    )?;
     let peers = args
         .peers
         .split(',')
@@ -196,10 +201,10 @@ async fn scan(args: ScanArgs) -> Result<(), BoxError> {
                 println!(
                     "{}",
                     serde_json::json!({"peer": peer, "status": error.status(), "error": error.to_string(),
-                        "identity": match &error {
-                            version::QueryError::Rejected { identity, .. } => identity.clone(),
-                            version::QueryError::Unreachable(_) => None,
-                        }})
+                    "identity": match &error {
+                        version::QueryError::Rejected { identity, .. } => identity.clone(),
+                        version::QueryError::Unreachable(_) => None,
+                    }})
                 );
             }
         }
@@ -211,12 +216,16 @@ async fn scan(args: ScanArgs) -> Result<(), BoxError> {
     }
 }
 
-async fn query(peer: &str, policy: &version::Policy) -> Result<serde_json::Value, version::QueryError> {
+async fn query(
+    peer: &str,
+    policy: &version::Policy,
+) -> Result<serde_json::Value, version::QueryError> {
     // No extra latency probes or usable snapshots before compatibility succeeds.
     let mut resources = query_resources(peer, policy).await?;
     let origin = peer_origin(peer).map_err(|error| error.to_string())?;
     // Discovery endpoints are numeric. Do not add blocking DNS to latency probes.
-    let endpoint = origin.host()
+    let endpoint = origin
+        .host()
         .and_then(|host| host.to_string().trim_matches(['[', ']']).parse().ok())
         .map(|ip| std::net::SocketAddr::new(ip, origin.port_u16().unwrap_or(80)));
     let probe = async {
@@ -235,7 +244,10 @@ async fn query(peer: &str, policy: &version::Policy) -> Result<serde_json::Value
     Ok(resources)
 }
 
-async fn query_resources(peer: &str, policy: &version::Policy) -> Result<serde_json::Value, version::QueryError> {
+async fn query_resources(
+    peer: &str,
+    policy: &version::Policy,
+) -> Result<serde_json::Value, version::QueryError> {
     let origin = peer_origin(peer).map_err(|error| error.to_string())?;
     let connector = EasyHttpConnectorBuilder::new()
         .with_default_transport_connector()

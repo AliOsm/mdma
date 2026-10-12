@@ -1,9 +1,9 @@
 //! Model-specific tensor layouts, configuration, and layer execution.
 pub(super) mod gemma4;
-pub(super) mod llama;
-pub(super) mod qwen;
 pub(super) mod glm4;
+pub(super) mod llama;
 pub mod modernbert;
+pub(super) mod qwen;
 
 pub(super) enum Decoder<B: crate::backend::Backend> {
     Llama(llama::Llama<B>),

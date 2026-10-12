@@ -18,16 +18,31 @@ pub struct Addresses {
 
 impl Addresses {
     fn resolve(&self, reloc: &FieldOffset) -> Result<u64> {
-        let missing = |what: &str| Error::Link(format!("relocation at bit {} needs {what}", reloc.offset_bit));
+        let missing = |what: &str| {
+            Error::Link(format!(
+                "relocation at bit {} needs {what}",
+                reloc.offset_bit
+            ))
+        };
         let batched = |table: &HashMap<String, Vec<u64>>, kind: &str| {
-            let name = reloc.name.as_deref().ok_or_else(|| missing(&format!("a named {kind}")))?;
-            let addresses = table.get(name).ok_or_else(|| missing(&format!("{kind} {name:?}")))?;
-            addresses.get(reloc.batch).copied().ok_or_else(|| missing(&format!("batch {} of {kind} {name:?}", reloc.batch)))
+            let name = reloc
+                .name
+                .as_deref()
+                .ok_or_else(|| missing(&format!("a named {kind}")))?;
+            let addresses = table
+                .get(name)
+                .ok_or_else(|| missing(&format!("{kind} {name:?}")))?;
+            addresses
+                .get(reloc.batch)
+                .copied()
+                .ok_or_else(|| missing(&format!("batch {} of {kind} {name:?}", reloc.batch)))
         };
         match reloc.desc {
             Description::InputActivation => batched(&self.inputs, "input"),
             Description::OutputActivation => batched(&self.outputs, "output"),
-            Description::Parameter => self.parameter.ok_or_else(|| missing("the parameter address")),
+            Description::Parameter => self
+                .parameter
+                .ok_or_else(|| missing("the parameter address")),
             Description::Scratch => self.scratch.ok_or_else(|| missing("the scratch address")),
         }
     }
@@ -35,8 +50,14 @@ impl Addresses {
 
 /// The bits of a 32-bit field at `offset_bit`, if it lies inside `len` bytes.
 fn field_bits(len: usize, offset_bit: usize) -> Result<std::ops::Range<usize>> {
-    let end = offset_bit.checked_add(32).filter(|end| *end <= len * 8)
-        .ok_or_else(|| Error::Link(format!("32-bit field at bit {offset_bit} is outside {len} bytes")))?;
+    let end = offset_bit
+        .checked_add(32)
+        .filter(|end| *end <= len * 8)
+        .ok_or_else(|| {
+            Error::Link(format!(
+                "32-bit field at bit {offset_bit} is outside {len} bytes"
+            ))
+        })?;
     Ok(offset_bit..end)
 }
 
@@ -54,7 +75,11 @@ pub fn copy_u32(buf: &mut [u8], offset_bit: usize, value: u32) -> Result<()> {
 
 /// Reads the field `copy_u32` writes, for checks and tests.
 pub fn read_u32(buf: &[u8], offset_bit: usize) -> Result<u32> {
-    Ok(field_bits(buf.len(), offset_bit)?.enumerate().fold(0u32, |acc, (i, bit)| acc | (u32::from((buf[bit / 8] >> (bit % 8)) & 1) << i)))
+    Ok(field_bits(buf.len(), offset_bit)?
+        .enumerate()
+        .fold(0u32, |acc, (i, bit)| {
+            acc | (u32::from((buf[bit / 8] >> (bit % 8)) & 1) << i)
+        }))
 }
 
 /// The bitstream with every relocation resolved. Every relocation must resolve:
@@ -64,7 +89,11 @@ pub fn link(bitstream: &Bitstream, addresses: &Addresses) -> Result<Vec<u8>> {
     let mut data = bitstream.data.clone();
     for reloc in &bitstream.relocs {
         let address = addresses.resolve(reloc)?;
-        let half = if reloc.upper { (address >> 32) as u32 } else { address as u32 };
+        let half = if reloc.upper {
+            (address >> 32) as u32
+        } else {
+            address as u32
+        };
         copy_u32(&mut data, reloc.offset_bit, half)?;
     }
     Ok(data)

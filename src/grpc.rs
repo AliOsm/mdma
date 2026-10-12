@@ -5,10 +5,12 @@ mod observe;
 mod proto;
 
 use crate::backend::Backend;
-use crate::power::{DegradedLimits, PowerStatus, ServerState};
-use crate::registry::{Holder, Info, Kind, Lease, LeaseError, LoadError, Phase, Registry, Use, requested_ttl};
-use crate::sampler::SamplerConfig;
 use crate::memory::{MemoryDomain, NativeMemoryBudget};
+use crate::power::{DegradedLimits, PowerStatus, ServerState};
+use crate::registry::{
+    Holder, Info, Kind, Lease, LeaseError, LoadError, Phase, Registry, Use, requested_ttl,
+};
+use crate::sampler::SamplerConfig;
 use crate::session::{GeneratedToken, Session};
 use proto::mdma_server::Mdma;
 use rama::futures::FutureExt;
@@ -21,14 +23,15 @@ use tokio::sync::watch;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
+pub use proto::SamplerConfig as SynthesizeSamplerConfig;
 pub use proto::mdma_client::MdmaClient;
 pub use proto::mdma_server::MdmaServer;
-pub use proto::SamplerConfig as SynthesizeSamplerConfig;
 pub use proto::{
-    AcquireRequest, CatalogModel, CatalogView, DecideRequest, DecideResponse, LeaseStatus, ReleaseRequest, ReleaseResponse, RenewRequest, DeviceMemory, FederationPeer, FederationRoute,
-    FederationTopology, Host, IntrospectRequest, IntrospectResponse, MemorySnapshot, MemoryUsage,
-    ModelGeometry, ModelStatus, ServerSnapshot, SynthesizeAccepted, SynthesizeCompleted, SynthesizeRequest,
-    SynthesizeResponse, WatchRequest, WeightUpload,
+    AcquireRequest, CatalogModel, CatalogView, DecideRequest, DecideResponse, DeviceMemory,
+    FederationPeer, FederationRoute, FederationTopology, Host, IntrospectRequest,
+    IntrospectResponse, LeaseStatus, MemorySnapshot, MemoryUsage, ModelGeometry, ModelStatus,
+    ReleaseRequest, ReleaseResponse, RenewRequest, ServerSnapshot, SynthesizeAccepted,
+    SynthesizeCompleted, SynthesizeRequest, SynthesizeResponse, WatchRequest, WeightUpload,
 };
 
 pub struct MdmaService<B: Backend> {
@@ -86,9 +89,18 @@ impl Drop for Active {
 impl<B: Backend> MdmaService<B> {
     pub fn new(registry: Registry<B>, backend_name: &'static str) -> Self {
         Self {
-            backend: registry.backend().clone(), registry: Arc::new(registry), backend_name, shutdown: None, power: None, routes: None,
-            memory: None, active: Arc::default(), topology: None, operators: Arc::default(),
-            host: Arc::default(), max_output_tokens: usize::MAX,
+            backend: registry.backend().clone(),
+            registry: Arc::new(registry),
+            backend_name,
+            shutdown: None,
+            power: None,
+            routes: None,
+            memory: None,
+            active: Arc::default(),
+            topology: None,
+            operators: Arc::default(),
+            host: Arc::default(),
+            max_output_tokens: usize::MAX,
         }
     }
 
@@ -135,7 +147,11 @@ impl<B: Backend> MdmaService<B> {
     /// Follow the power watcher's state: smaller limits while `Degraded`,
     /// no new generations while `Critical`. Without it, always `Serving`.
     #[must_use]
-    pub fn with_power(mut self, status: watch::Receiver<PowerStatus>, limits: DegradedLimits) -> Self {
+    pub fn with_power(
+        mut self,
+        status: watch::Receiver<PowerStatus>,
+        limits: DegradedLimits,
+    ) -> Self {
         self.power = Some((status, limits));
         self
     }
@@ -173,33 +189,58 @@ impl<B: Backend> MdmaService<B> {
     }
 
     pub(crate) fn federation_local_names(&self) -> Vec<String> {
-        self.registry.names().into_iter().map(str::to_owned).collect()
+        self.registry
+            .names()
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     }
     pub(crate) fn set_federation_router(&mut self, router: crate::federation::routing::Router) {
         self.routes = Some(router);
     }
-    pub(crate) fn set_federation_topology(&mut self, topology: crate::federation::topology::Topology) {
+    pub(crate) fn set_federation_topology(
+        &mut self,
+        topology: crate::federation::topology::Topology,
+    ) {
         self.topology = Some(Arc::new(topology));
     }
 
     fn power_status(&self) -> PowerStatus {
-        self.power.as_ref().map(|(rx, _)| *rx.borrow()).unwrap_or_default()
+        self.power
+            .as_ref()
+            .map(|(rx, _)| *rx.borrow())
+            .unwrap_or_default()
     }
 
     fn shutting_down(&self) -> bool {
-        self.shutdown.as_ref().is_some_and(|guard| guard.cancelled().now_or_never().is_some())
+        self.shutdown
+            .as_ref()
+            .is_some_and(|guard| guard.cancelled().now_or_never().is_some())
     }
 
     /// Lifecycle/power readiness; memory admission depends on the request size.
     fn ready(&self) -> bool {
-        !self.shutting_down() && matches!(self.power_status().state, ServerState::Serving | ServerState::Degraded)
+        !self.shutting_down()
+            && matches!(
+                self.power_status().state,
+                ServerState::Serving | ServerState::Degraded
+            )
     }
 
     /// The listed name and what is known about it; `""` is the default.
     fn model(&self, name: &str) -> Result<(String, &Info), Status> {
-        let listed = self.registry.resolve(name)
-            .ok_or_else(|| Status::not_found(format!("no model named {name:?}; available: {}", self.registry.names().join(", "))))?;
-        Ok((listed.to_owned(), self.registry.info(listed).expect("resolved names are listed")))
+        let listed = self.registry.resolve(name).ok_or_else(|| {
+            Status::not_found(format!(
+                "no model named {name:?}; available: {}",
+                self.registry.names().join(", ")
+            ))
+        })?;
+        Ok((
+            listed.to_owned(),
+            self.registry
+                .info(listed)
+                .expect("resolved names are listed"),
+        ))
     }
 
     /// Refused before a load starts, not after it finishes.
@@ -214,7 +255,12 @@ impl<B: Backend> MdmaService<B> {
     /// `max_output_tokens`, refused while draining or critical, capped further
     /// while degraded. Returns the (max_tokens, n_ctx) to run with; `n_ctx` is
     /// the caller's cap.
-    fn admit(&self, prompt_tokens: impl FnOnce() -> Result<usize, Status>, max_tokens: usize, n_ctx: usize) -> Result<(usize, usize), Status> {
+    fn admit(
+        &self,
+        prompt_tokens: impl FnOnce() -> Result<usize, Status>,
+        max_tokens: usize,
+        n_ctx: usize,
+    ) -> Result<(usize, usize), Status> {
         if self.shutting_down() {
             return Err(Status::unavailable("server is shutting down"));
         }
@@ -224,7 +270,11 @@ impl<B: Backend> MdmaService<B> {
         match power.state {
             ServerState::Serving => Ok((max_tokens, n_ctx)),
             ServerState::Degraded => {
-                let limits = self.power.as_ref().map(|(_, limits)| *limits).unwrap_or_default();
+                let limits = self
+                    .power
+                    .as_ref()
+                    .map(|(_, limits)| *limits)
+                    .unwrap_or_default();
                 let n_ctx = n_ctx.min(limits.n_ctx);
                 let prompt_tokens = prompt_tokens()?;
                 if prompt_tokens > n_ctx {
@@ -243,7 +293,9 @@ impl<B: Backend> MdmaService<B> {
             ServerState::Critical => {
                 let percent = power.reading.and_then(|r| r.battery_percent);
                 let at = percent.map(|p| format!(" at {p}%")).unwrap_or_default();
-                Err(Status::unavailable(format!("server is on battery{at}; not accepting generations")))
+                Err(Status::unavailable(format!(
+                    "server is on battery{at}; not accepting generations"
+                )))
             }
             ServerState::Draining => Err(Status::unavailable("server is shutting down")),
         }
@@ -260,19 +312,31 @@ fn sampler_config_from_proto(cfg: Option<proto::SamplerConfig>) -> SamplerConfig
         temperature: cfg.temperature.unwrap_or(defaults.temperature),
         top_p: cfg.top_p.unwrap_or(defaults.top_p),
         min_p: cfg.min_p.unwrap_or(defaults.min_p),
-        repetition_penalty: cfg.repetition_penalty.unwrap_or(defaults.repetition_penalty),
-        repetition_window: cfg.repetition_window.map_or(defaults.repetition_window, |w| w as usize),
+        repetition_penalty: cfg
+            .repetition_penalty
+            .unwrap_or(defaults.repetition_penalty),
+        repetition_window: cfg
+            .repetition_window
+            .map_or(defaults.repetition_window, |w| w as usize),
     }
 }
 
 fn token_response(t: GeneratedToken) -> SynthesizeResponse {
-    SynthesizeResponse { token_id: t.token_id, text: t.text, ..SynthesizeResponse::default() }
+    SynthesizeResponse {
+        token_id: t.token_id,
+        text: t.text,
+        ..SynthesizeResponse::default()
+    }
 }
 
 fn load_status(error: LoadError) -> Status {
     match error {
-        LoadError::Memory(reason) => Status::resource_exhausted(format!("model does not fit now: {reason}")),
-        LoadError::Failed(reason) => Status::failed_precondition(format!("model cannot load: {reason}")),
+        LoadError::Memory(reason) => {
+            Status::resource_exhausted(format!("model does not fit now: {reason}"))
+        }
+        LoadError::Failed(reason) => {
+            Status::failed_precondition(format!("model cannot load: {reason}"))
+        }
     }
 }
 
@@ -282,13 +346,13 @@ fn native_status(error: crate::backend::Error) -> Status {
         return Status::resource_exhausted(error.to_string());
     }
     match error {
-        crate::backend::Error::ContextLimit { .. } =>
-            Status::resource_exhausted(error.to_string()),
+        crate::backend::Error::ContextLimit { .. } => Status::resource_exhausted(error.to_string()),
         _ => Status::internal(error.to_string()),
     }
 }
 
-pub(crate) type TokenStream = Pin<Box<dyn Stream<Item = Result<SynthesizeResponse, Status>> + Send + Sync + 'static>>;
+pub(crate) type TokenStream =
+    Pin<Box<dyn Stream<Item = Result<SynthesizeResponse, Status>> + Send + Sync + 'static>>;
 
 impl<B> Mdma for MdmaService<B>
 where
@@ -298,36 +362,64 @@ where
     type SynthesizeStream = TokenStream;
     type WatchStream = observe::SnapshotStream;
 
-    async fn synthesize(&self, req: Request<SynthesizeRequest>) -> Result<Response<Self::SynthesizeStream>, Status> {
+    async fn synthesize(
+        &self,
+        req: Request<SynthesizeRequest>,
+    ) -> Result<Response<Self::SynthesizeStream>, Status> {
         let active = Active::begin(&self.active);
         let response = self.synthesize_inner(req).await?;
-        Ok(response.map(|stream| Box::pin(stream.map(move |item| {
-            let _active = &active;
-            item
-        })) as TokenStream))
+        Ok(response.map(|stream| {
+            Box::pin(stream.map(move |item| {
+                let _active = &active;
+                item
+            })) as TokenStream
+        }))
     }
 
-    async fn decide(&self, req: Request<DecideRequest>) -> Result<Response<DecideResponse>, Status> {
+    async fn decide(
+        &self,
+        req: Request<DecideRequest>,
+    ) -> Result<Response<DecideResponse>, Status> {
         let _active = Active::begin(&self.active);
         self.decide_inner(req).await
     }
 
-    async fn introspect(&self, req: Request<IntrospectRequest>) -> Result<Response<IntrospectResponse>, Status> {
+    async fn introspect(
+        &self,
+        req: Request<IntrospectRequest>,
+    ) -> Result<Response<IntrospectResponse>, Status> {
         Ok(Response::new(self.status(&req)))
     }
 
-    async fn watch(&self, req: Request<WatchRequest>) -> Result<Response<Self::WatchStream>, Status> {
+    async fn watch(
+        &self,
+        req: Request<WatchRequest>,
+    ) -> Result<Response<Self::WatchStream>, Status> {
         Ok(Response::new(observe::watch(self.clone(), req)))
     }
 
     async fn acquire(&self, req: Request<AcquireRequest>) -> Result<Response<LeaseStatus>, Status> {
         let holder = holder(&req);
-        let AcquireRequest { model, ttl_ms, wait } = req.into_inner();
-        if let Some(router) = self.routes.as_ref().filter(|router| router.contains(&model)) {
+        let AcquireRequest {
+            model,
+            ttl_ms,
+            wait,
+        } = req.into_inner();
+        if let Some(router) = self
+            .routes
+            .as_ref()
+            .filter(|router| router.contains(&model))
+        {
             self.accepting()?;
             // The executor loads it; its catalog reports when it is resident.
-            let lease = router.lease(holder, &model, requested_ttl(ttl_ms)).map_err(lease_status)?;
-            let residency = if router.resident(&model) { Phase::Resident } else { Phase::Loading };
+            let lease = router
+                .lease(holder, &model, requested_ttl(ttl_ms))
+                .map_err(lease_status)?;
+            let residency = if router.resident(&model) {
+                Phase::Resident
+            } else {
+                Phase::Loading
+            };
             return Ok(Response::new(lease_reply(&lease, residency)));
         }
         let (name, _) = self.model(&model)?;
@@ -336,28 +428,48 @@ where
             // A lease is only granted once the model is loaded.
             self.load_model(&name).await?;
         }
-        let lease = self.registry.lease(holder, &name, requested_ttl(ttl_ms)).map_err(lease_status)?;
+        let lease = self
+            .registry
+            .lease(holder, &name, requested_ttl(ttl_ms))
+            .map_err(lease_status)?;
         Ok(Response::new(self.lease_status(&lease)))
     }
 
     async fn renew(&self, req: Request<RenewRequest>) -> Result<Response<LeaseStatus>, Status> {
         let holder = holder(&req);
         let RenewRequest { lease_id, ttl_ms } = req.into_inner();
-        match (self.registry.renew(&holder, &lease_id, requested_ttl(ttl_ms)), &self.routes) {
+        match (
+            self.registry
+                .renew(&holder, &lease_id, requested_ttl(ttl_ms)),
+            &self.routes,
+        ) {
             (Err(LeaseError::Unknown), Some(router)) => {
-                let lease = router.renew_lease(&holder, &lease_id, requested_ttl(ttl_ms)).map_err(lease_status)?;
-                let residency = if router.resident(&lease.model) { Phase::Resident } else { Phase::Loading };
+                let lease = router
+                    .renew_lease(&holder, &lease_id, requested_ttl(ttl_ms))
+                    .map_err(lease_status)?;
+                let residency = if router.resident(&lease.model) {
+                    Phase::Resident
+                } else {
+                    Phase::Loading
+                };
                 Ok(Response::new(lease_reply(&lease, residency)))
             }
-            (result, _) => Ok(Response::new(self.lease_status(&result.map_err(lease_status)?))),
+            (result, _) => Ok(Response::new(
+                self.lease_status(&result.map_err(lease_status)?),
+            )),
         }
     }
 
-    async fn release(&self, req: Request<ReleaseRequest>) -> Result<Response<ReleaseResponse>, Status> {
+    async fn release(
+        &self,
+        req: Request<ReleaseRequest>,
+    ) -> Result<Response<ReleaseResponse>, Status> {
         let holder = holder(&req);
         let id = &req.get_ref().lease_id;
         match (self.registry.release(&holder, id), &self.routes) {
-            (Err(LeaseError::Unknown), Some(router)) => router.release_lease(&holder, id).map_err(lease_status)?,
+            (Err(LeaseError::Unknown), Some(router)) => {
+                router.release_lease(&holder, id).map_err(lease_status)?;
+            }
             (result, _) => result.map_err(lease_status)?,
         }
         Ok(Response::new(ReleaseResponse {}))
@@ -367,7 +479,9 @@ where
 /// The client certificate behind a request; in-process callers share one.
 fn holder<T>(req: &Request<T>) -> Holder {
     use rama::extensions::ExtensionsRef;
-    let spki = req.extensions().get_ref::<rama::extensions::Ingress<rama::extensions::Extensions>>()
+    let spki = req
+        .extensions()
+        .get_ref::<rama::extensions::Ingress<rama::extensions::Extensions>>()
         .and_then(|ingress| ingress.get_ref::<crate::federation::tls::ClientSpki>())
         .map(|spki| spki.0.clone());
     Holder::Client(spki.unwrap_or_else(|| "local".into()))
@@ -386,7 +500,9 @@ fn lease_reply(lease: &Lease, residency: Phase) -> LeaseStatus {
 fn lease_status(error: LeaseError) -> Status {
     match error {
         LeaseError::Missing(_) | LeaseError::Unknown => Status::not_found(error.to_string()),
-        LeaseError::Limit(..) | LeaseError::Full(_) => Status::resource_exhausted(error.to_string()),
+        LeaseError::Limit(..) | LeaseError::Full(_) => {
+            Status::resource_exhausted(error.to_string())
+        }
     }
 }
 
@@ -395,10 +511,19 @@ where
     B: Backend + Send + Sync + 'static,
     B::Buf: Send + Sync,
 {
-    async fn synthesize_inner(&self, mut req: Request<SynthesizeRequest>) -> Result<Response<TokenStream>, Status> {
-        if let Some(router) = self.routes.as_ref().filter(|router| router.contains(&req.get_ref().model)) {
+    async fn synthesize_inner(
+        &self,
+        mut req: Request<SynthesizeRequest>,
+    ) -> Result<Response<TokenStream>, Status> {
+        if let Some(router) = self
+            .routes
+            .as_ref()
+            .filter(|router| router.contains(&req.get_ref().model))
+        {
             if req.get_ref().chat {
-                return Err(Status::invalid_argument("chat is not available for federated routes"));
+                return Err(Status::invalid_argument(
+                    "chat is not available for federated routes",
+                ));
             }
             let (cap, _) = self.admit(|| Ok(0), req.get_ref().max_tokens as usize, usize::MAX)?;
             req.get_mut().max_tokens = cap as u32;
@@ -406,12 +531,19 @@ where
         }
         let (name, info) = self.model(&req.get_ref().model)?;
         if info.kind == Kind::Laya {
-            return Err(Status::invalid_argument(format!("model {name:?} answers typed decisions; use Decide")));
+            return Err(Status::invalid_argument(format!(
+                "model {name:?} answers typed decisions; use Decide"
+            )));
         }
         let mut req = req.into_inner();
         if req.chat {
-            let format = info.chat_format.ok_or_else(|| Status::invalid_argument(format!("model {name:?} has no known chat format")))?;
-            req.prompt = format.conversation(Some(req.system.as_str()).filter(|s| !s.is_empty()), &req.prompt);
+            let format = info.chat_format.ok_or_else(|| {
+                Status::invalid_argument(format!("model {name:?} has no known chat format"))
+            })?;
+            req.prompt = format.conversation(
+                Some(req.system.as_str()).filter(|s| !s.is_empty()),
+                &req.prompt,
+            );
         } else if !req.system.is_empty() {
             return Err(Status::invalid_argument("`system` requires `chat`"));
         }
@@ -420,11 +552,24 @@ where
         let decoder = loaded.decoder().expect("GGUF models load decoders");
         let sampler_config = sampler_config_from_proto(req.sampler);
         let (max_tokens, n_ctx) = self.admit(
-            || decoder.tokenizer.try_encode(&req.prompt).map(|ids| ids.len()).map_err(native_status),
-            req.max_tokens as usize, info.n_ctx,
+            || {
+                decoder
+                    .tokenizer
+                    .try_encode(&req.prompt)
+                    .map(|ids| ids.len())
+                    .map_err(native_status)
+            },
+            req.max_tokens as usize,
+            info.n_ctx,
         )?;
         let guard = self.shutdown.clone().map(WeakShutdownGuard::upgrade);
-        let session = Session::new(self.backend.clone(), decoder.model.clone(), decoder.tokenizer.clone(), sampler_config, n_ctx);
+        let session = Session::new(
+            self.backend.clone(),
+            decoder.model.clone(),
+            decoder.tokenizer.clone(),
+            sampler_config,
+            n_ctx,
+        );
         if req.emit_events {
             let started = std::time::Instant::now();
             let (admission, running) = session
@@ -442,13 +587,26 @@ where
 
     /// A lease's answer, starting the load a waiting holder did not wait for.
     fn lease_status(&self, lease: &Lease) -> LeaseStatus {
-        let phase = self.registry.entries().find(|entry| entry.name == lease.model).map_or(Phase::Available, |entry| entry.phase);
+        let phase = self
+            .registry
+            .entries()
+            .find(|entry| entry.name == lease.model)
+            .map_or(Phase::Available, |entry| entry.phase);
         if phase == Phase::Available {
             let (registry, name) = (self.registry.clone(), lease.model.clone());
             // The outcome is recorded on the model and reported by Introspect.
-            drop(tokio::task::spawn_blocking(move || registry.acquire_blocking(&name).map(drop)));
+            drop(tokio::task::spawn_blocking(move || {
+                registry.acquire_blocking(&name).map(drop)
+            }));
         }
-        lease_reply(lease, if phase == Phase::Available { Phase::Loading } else { phase })
+        lease_reply(
+            lease,
+            if phase == Phase::Available {
+                Phase::Loading
+            } else {
+                phase
+            },
+        )
     }
 
     /// The loaded model, loading it on another thread if it is not.
@@ -463,24 +621,36 @@ where
             .map_err(load_status)
     }
 
-    async fn decide_inner(&self, req: Request<DecideRequest>) -> Result<Response<DecideResponse>, Status> {
-        if let Some(router) = self.routes.as_ref().filter(|router| router.contains(&req.get_ref().model)) {
+    async fn decide_inner(
+        &self,
+        req: Request<DecideRequest>,
+    ) -> Result<Response<DecideResponse>, Status> {
+        if let Some(router) = self
+            .routes
+            .as_ref()
+            .filter(|router| router.contains(&req.get_ref().model))
+        {
             self.admit(|| Ok(0), 0, usize::MAX)?;
             return router.decide(req).await;
         }
         let (name, info) = self.model(&req.get_ref().model)?;
         if info.kind == Kind::Gguf {
-            return Err(Status::invalid_argument(format!("model {name:?} generates text; use Synthesize")));
+            return Err(Status::invalid_argument(format!(
+                "model {name:?} generates text; use Synthesize"
+            )));
         }
         self.admit(|| Ok(0), 0, usize::MAX)?;
         let loaded = self.load_model(&name).await?;
         let predictor = loaded.laya().expect("Laya models load predictors");
         let req = req.into_inner();
-        let state: serde_json::Value = serde_json::from_str(&req.state_json).map_err(|e| Status::invalid_argument(format!("state_json: {e}")))?;
+        let state: serde_json::Value = serde_json::from_str(&req.state_json)
+            .map_err(|e| Status::invalid_argument(format!("state_json: {e}")))?;
         let questions = serde_json::from_str::<serde_json::Value>(&req.questions_json)
             .map_err(|e| Status::invalid_argument(format!("questions_json: {e}")))?;
         let serde_json::Value::Object(questions) = questions else {
-            return Err(Status::invalid_argument("questions_json must be an object keyed by question id"));
+            return Err(Status::invalid_argument(
+                "questions_json must be an object keyed by question id",
+            ));
         };
         let predictor = predictor.clone();
         let guard = self.shutdown.clone().map(WeakShutdownGuard::upgrade);
@@ -494,29 +664,48 @@ where
             crate::laya::Error::Question(_) => Status::invalid_argument(e.to_string()),
             other => Status::internal(other.to_string()),
         })?;
-        Ok(Response::new(DecideResponse { result_json: result.to_string() }))
+        Ok(Response::new(DecideResponse {
+            result_json: result.to_string(),
+        }))
     }
 
     fn status<T>(&self, req: &Request<T>) -> IntrospectResponse {
         let power = self.power_status();
-        let state = if self.shutting_down() { ServerState::Draining } else { power.state };
+        let state = if self.shutting_down() {
+            ServerState::Draining
+        } else {
+            power.state
+        };
         let ready = self.ready();
         let mut models = Vec::with_capacity(self.registry.names().len());
         let mut failed = false;
         for entry in self.registry.entries() {
             let info = entry.info;
             failed |= entry.phase == Phase::Failed;
-            let resident = if entry.phase == Phase::Resident { self.registry.resident(entry.name) } else { None };
+            let resident = if entry.phase == Phase::Resident {
+                self.registry.resident(entry.name)
+            } else {
+                None
+            };
             models.push(ModelStatus {
                 name: entry.name.to_owned(),
                 kind: info.kind.name().to_owned(),
-                backend: match info.kind { Kind::Gguf => self.backend_name, Kind::Laya => "cpu" }.to_owned(),
+                backend: match info.kind {
+                    Kind::Gguf => self.backend_name,
+                    Kind::Laya => "cpu",
+                }
+                .to_owned(),
                 architecture: info.architecture.clone(),
                 n_ctx: info.n_ctx as u32,
                 ready: ready && entry.phase != Phase::Failed,
                 weight_bytes: info.disk_bytes,
-                geometry: resident.as_ref().and_then(Use::decoder).and_then(|d| observe::geometry(&*self.backend, &d.model)),
-                chat_format: info.chat_format.map_or_else(String::new, |f| f.name().to_owned()),
+                geometry: resident
+                    .as_ref()
+                    .and_then(Use::decoder)
+                    .and_then(|d| observe::geometry(&*self.backend, &d.model)),
+                chat_format: info
+                    .chat_format
+                    .map_or_else(String::new, |f| f.name().to_owned()),
                 host: None,
                 class: info.class.as_str().to_owned(),
                 capabilities: crate::registry::Capability::names(&info.capabilities),
@@ -537,21 +726,31 @@ where
             state.name().to_ascii_lowercase()
         };
         IntrospectResponse {
-            ready: ready && models[..local].iter().any(|model| model.residency != Phase::Failed.as_str()),
-            model_architecture: default_status.map(|m| m.architecture.clone()).unwrap_or_default(),
+            ready: ready
+                && models[..local]
+                    .iter()
+                    .any(|model| model.residency != Phase::Failed.as_str()),
+            model_architecture: default_status
+                .map(|m| m.architecture.clone())
+                .unwrap_or_default(),
             backend: self.backend_name.to_string(),
             server_state: state_name,
             on_battery: power.reading.is_some_and(|r| r.on_battery),
-            battery_percent: power.reading.and_then(|r| r.battery_percent).map_or(-1, i32::from),
+            battery_percent: power
+                .reading
+                .and_then(|r| r.battery_percent)
+                .map_or(-1, i32::from),
             gpu_power_limit_mw: power.reading.and_then(|r| r.gpu).map_or(0, |g| g.limit_mw),
-            gpu_power_default_mw: power.reading.and_then(|r| r.gpu).map_or(0, |g| g.default_mw),
+            gpu_power_default_mw: power
+                .reading
+                .and_then(|r| r.gpu)
+                .map_or(0, |g| g.default_mw),
             default_model: default.to_owned(),
             models,
             host: Some(self.registry.live_host(&self.host)),
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests;

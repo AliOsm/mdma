@@ -1,8 +1,10 @@
-use std::assert_matches;
 use super::canonical_json::{self, Value};
-use super::catalog::{self, CatalogBody, Kind, Limits, ModelDescriptor, ServerState, VerifyContext};
+use super::catalog::{
+    self, CatalogBody, Kind, Limits, ModelDescriptor, ServerState, VerifyContext,
+};
 use super::server_id;
 use super::signing::{self, KeyPairHandle};
+use std::assert_matches;
 use std::collections::BTreeMap;
 
 // -- server_id -------------------------------------------------------------
@@ -15,28 +17,55 @@ fn server_id_accepts_spec_examples() {
 
 #[test]
 fn server_id_rejects_single_label() {
-    assert_eq!(server_id::validate("localhost"), Err(server_id::Error::TooFewLabels));
+    assert_eq!(
+        server_id::validate("localhost"),
+        Err(server_id::Error::TooFewLabels)
+    );
 }
 
 #[test]
 fn server_id_rejects_ip_literal() {
-    assert_eq!(server_id::validate("127.0.0.1"), Err(server_id::Error::IpLiteral));
+    assert_eq!(
+        server_id::validate("127.0.0.1"),
+        Err(server_id::Error::IpLiteral)
+    );
     assert_eq!(server_id::validate("::1"), Err(server_id::Error::IpLiteral));
 }
 
 #[test]
 fn server_id_rejects_port_scheme_and_trailing_dot() {
-    assert_eq!(server_id::validate("alice.example.net:8443"), Err(server_id::Error::HasPort));
-    assert_eq!(server_id::validate("https://alice.example.net"), Err(server_id::Error::HasScheme));
-    assert_eq!(server_id::validate("alice.example.net."), Err(server_id::Error::TrailingDot));
+    assert_eq!(
+        server_id::validate("alice.example.net:8443"),
+        Err(server_id::Error::HasPort)
+    );
+    assert_eq!(
+        server_id::validate("https://alice.example.net"),
+        Err(server_id::Error::HasScheme)
+    );
+    assert_eq!(
+        server_id::validate("alice.example.net."),
+        Err(server_id::Error::TrailingDot)
+    );
 }
 
 #[test]
 fn server_id_rejects_uppercase_and_bad_labels() {
-    assert_eq!(server_id::validate("Alice.example.net"), Err(server_id::Error::NotLowercase));
-    assert_eq!(server_id::validate("-alice.example.net"), Err(server_id::Error::LabelBoundary("-alice".to_string())));
-    assert_eq!(server_id::validate("alice..net"), Err(server_id::Error::EmptyLabel(String::new())));
-    assert_eq!(server_id::validate("ali ce.example.net"), Err(server_id::Error::InvalidLabelChar("ali ce".to_string())));
+    assert_eq!(
+        server_id::validate("Alice.example.net"),
+        Err(server_id::Error::NotLowercase)
+    );
+    assert_eq!(
+        server_id::validate("-alice.example.net"),
+        Err(server_id::Error::LabelBoundary("-alice".to_string()))
+    );
+    assert_eq!(
+        server_id::validate("alice..net"),
+        Err(server_id::Error::EmptyLabel(String::new()))
+    );
+    assert_eq!(
+        server_id::validate("ali ce.example.net"),
+        Err(server_id::Error::InvalidLabelChar("ali ce".to_string()))
+    );
 }
 
 #[test]
@@ -84,7 +113,10 @@ fn canonical_json_rejects_floats() {
 #[test]
 fn canonical_json_rejects_out_of_range_integers() {
     let err = canonical_json::parse(br#"{"a":9007199254740992}"#, 16).unwrap_err();
-    assert_eq!(err, canonical_json::Error::IntegerOutOfRange("9007199254740992".to_string()));
+    assert_eq!(
+        err,
+        canonical_json::Error::IntegerOutOfRange("9007199254740992".to_string())
+    );
 }
 
 #[test]
@@ -98,7 +130,10 @@ fn canonical_json_accepts_surrogate_pairs() {
     // U+1F600 GRINNING FACE, as a UTF-16 surrogate pair escape.
     let input = r#"{"a":"😀"}"#;
     let v = canonical_json::parse(input.as_bytes(), 16).unwrap();
-    assert_eq!(v.as_object().unwrap().get("a").unwrap().as_str(), Some("\u{1F600}"));
+    assert_eq!(
+        v.as_object().unwrap().get("a").unwrap().as_str(),
+        Some("\u{1F600}")
+    );
 }
 
 #[test]
@@ -106,7 +141,10 @@ fn canonical_json_decodes_u_escape_surrogate_pair() {
     // Same character as above, spelled as a \u-escaped UTF-16 surrogate pair.
     let input: &[u8] = b"{\"a\":\"\\ud83d\\ude00\"}";
     let v = canonical_json::parse(input, 16).unwrap();
-    assert_eq!(v.as_object().unwrap().get("a").unwrap().as_str(), Some("\u{1F600}"));
+    assert_eq!(
+        v.as_object().unwrap().get("a").unwrap().as_str(),
+        Some("\u{1F600}")
+    );
 }
 
 #[test]
@@ -120,7 +158,10 @@ fn canonical_json_rejects_unescaped_control_chars() {
 fn canonical_json_enforces_depth_limit() {
     let nested = "[".repeat(5) + &"]".repeat(5);
     assert!(canonical_json::parse(nested.as_bytes(), 5).is_ok());
-    assert_eq!(canonical_json::parse(nested.as_bytes(), 4).unwrap_err(), canonical_json::Error::TooDeep(4));
+    assert_eq!(
+        canonical_json::parse(nested.as_bytes(), 4).unwrap_err(),
+        canonical_json::Error::TooDeep(4)
+    );
 }
 
 #[test]
@@ -131,7 +172,11 @@ fn canonical_json_does_not_escape_non_ascii_or_slash() {
 
 #[test]
 fn canonical_json_object_rejects_duplicate_builder_keys() {
-    let err = Value::object(vec![("a".to_string(), Value::Null), ("a".to_string(), Value::Null)]).unwrap_err();
+    let err = Value::object(vec![
+        ("a".to_string(), Value::Null),
+        ("a".to_string(), Value::Null),
+    ])
+    .unwrap_err();
     assert_eq!(err, canonical_json::Error::DuplicateKey("a".to_string()));
 }
 
@@ -140,11 +185,23 @@ fn canonical_json_object_rejects_duplicate_builder_keys() {
 #[test]
 fn key_id_validation() {
     assert!(signing::validate_key_id("ed25519:prod-1").is_ok());
-    assert_eq!(signing::validate_key_id("rsa:prod-1"), Err(signing::KeyIdError::MissingPrefix));
-    assert_eq!(signing::validate_key_id("ed25519:"), Err(signing::KeyIdError::BadLabelLength));
-    assert_eq!(signing::validate_key_id("ed25519:Prod"), Err(signing::KeyIdError::BadLabelChar));
+    assert_eq!(
+        signing::validate_key_id("rsa:prod-1"),
+        Err(signing::KeyIdError::MissingPrefix)
+    );
+    assert_eq!(
+        signing::validate_key_id("ed25519:"),
+        Err(signing::KeyIdError::BadLabelLength)
+    );
+    assert_eq!(
+        signing::validate_key_id("ed25519:Prod"),
+        Err(signing::KeyIdError::BadLabelChar)
+    );
     let too_long = format!("ed25519:{}", "a".repeat(33));
-    assert_eq!(signing::validate_key_id(&too_long), Err(signing::KeyIdError::BadLabelLength));
+    assert_eq!(
+        signing::validate_key_id(&too_long),
+        Err(signing::KeyIdError::BadLabelLength)
+    );
 }
 
 #[test]
@@ -196,9 +253,15 @@ fn sample_descriptor() -> ModelDescriptor {
         ready: true,
         max_input_bytes: 4096,
         class: crate::registry::Class::Decision,
-        capabilities: vec![crate::registry::Capability::Reasoning, crate::registry::Capability::Vision],
+        capabilities: vec![
+            crate::registry::Capability::Reasoning,
+            crate::registry::Capability::Vision,
+        ],
         resident: true,
-        limits: Limits::Synthesize { n_ctx: 8192, max_output_tokens: 2048 },
+        limits: Limits::Synthesize {
+            n_ctx: 8192,
+            max_output_tokens: 2048,
+        },
     }
 }
 
@@ -236,7 +299,10 @@ fn descriptor_validation_accepts_sample() {
 #[test]
 fn descriptor_validation_rejects_output_over_context() {
     let mut d = sample_descriptor();
-    d.limits = Limits::Synthesize { n_ctx: 100, max_output_tokens: 200 };
+    d.limits = Limits::Synthesize {
+        n_ctx: 100,
+        max_output_tokens: 200,
+    };
     assert_eq!(d.validate(), Err(catalog::Error::InvalidField("limits")));
 }
 
@@ -244,7 +310,10 @@ fn descriptor_validation_rejects_output_over_context() {
 fn descriptor_validation_rejects_bad_digest() {
     let mut d = sample_descriptor();
     d.artifact_id = "sha256:not-hex".to_string();
-    assert_eq!(d.validate(), Err(catalog::Error::InvalidField("artifact_id")));
+    assert_eq!(
+        d.validate(),
+        Err(catalog::Error::InvalidField("artifact_id"))
+    );
 }
 
 #[test]
@@ -258,43 +327,78 @@ fn descriptor_round_trips_through_canonical() {
 #[test]
 fn residency_is_not_part_of_the_selection() {
     let loaded = sample_descriptor();
-    let on_disk = ModelDescriptor { resident: false, ..loaded.clone() };
+    let on_disk = ModelDescriptor {
+        resident: false,
+        ..loaded.clone()
+    };
     assert_ne!(loaded, on_disk);
     assert!(loaded.same_selection(&on_disk) && on_disk.same_selection(&loaded));
-    let swapped = ModelDescriptor { artifact_id: format!("sha256:{}", "c".repeat(64)), ..on_disk };
+    let swapped = ModelDescriptor {
+        artifact_id: format!("sha256:{}", "c".repeat(64)),
+        ..on_disk
+    };
     assert!(!loaded.same_selection(&swapped));
-    let Value::Object(mut obj) = loaded.to_canonical() else { unreachable!() };
+    let Value::Object(mut obj) = loaded.to_canonical() else {
+        unreachable!()
+    };
     obj.remove("resident");
-    assert_eq!(ModelDescriptor::from_canonical(&Value::Object(obj)).unwrap_err(), catalog::Error::MissingField("resident"));
+    assert_eq!(
+        ModelDescriptor::from_canonical(&Value::Object(obj)).unwrap_err(),
+        catalog::Error::MissingField("resident")
+    );
 }
 
 #[test]
 fn class_capabilities_and_host_are_closed_and_bounded() {
     let mut d = sample_descriptor();
     d.capabilities.reverse();
-    assert_eq!(d.validate(), Err(catalog::Error::InvalidField("capabilities")));
+    assert_eq!(
+        d.validate(),
+        Err(catalog::Error::InvalidField("capabilities"))
+    );
     let mut body = sample_body();
     body.host.cpu = "x".repeat(crate::host::MAX_FIELD_BYTES + 1);
     assert_eq!(body.validate(), Err(catalog::Error::InvalidField("host")));
 
     let descriptor = |key: &str, value: Value| {
-        let Value::Object(mut obj) = sample_descriptor().to_canonical() else { unreachable!() };
+        let Value::Object(mut obj) = sample_descriptor().to_canonical() else {
+            unreachable!()
+        };
         obj.insert(key.into(), value);
         ModelDescriptor::from_canonical(&Value::Object(obj)).unwrap_err()
     };
-    assert_eq!(descriptor("class", Value::String("llm".into())), catalog::Error::InvalidField("class"));
-    assert_eq!(descriptor("capabilities", Value::Array(vec![Value::String("telepathy".into())])), catalog::Error::InvalidField("capabilities"));
-    let Value::Object(mut body) = sample_body().to_canonical() else { unreachable!() };
-    let Some(Value::Object(host)) = body.get_mut("host") else { unreachable!() };
+    assert_eq!(
+        descriptor("class", Value::String("llm".into())),
+        catalog::Error::InvalidField("class")
+    );
+    assert_eq!(
+        descriptor(
+            "capabilities",
+            Value::Array(vec![Value::String("telepathy".into())])
+        ),
+        catalog::Error::InvalidField("capabilities")
+    );
+    let Value::Object(mut body) = sample_body().to_canonical() else {
+        unreachable!()
+    };
+    let Some(Value::Object(host)) = body.get_mut("host") else {
+        unreachable!()
+    };
     host.insert("serial".into(), Value::String("C02X".into()));
-    assert_eq!(CatalogBody::from_canonical(&Value::Object(body)).unwrap_err(), catalog::Error::UnknownField("serial".into()));
+    assert_eq!(
+        CatalogBody::from_canonical(&Value::Object(body)).unwrap_err(),
+        catalog::Error::UnknownField("serial".into())
+    );
 }
 
 #[test]
 fn body_validation_rejects_duplicate_model_names() {
     let mut body = sample_body();
     body.models.push(sample_descriptor());
-    assert_eq!(body.validate(), Err(catalog::Error::DuplicateModel("llama-70b".to_string())));
+    assert_eq!(
+        body.validate(),
+        Err(catalog::Error::DuplicateModel("llama-70b".to_string()))
+    );
 }
 
 #[test]
@@ -315,7 +419,10 @@ fn body_validation_rejects_lifetime_over_60s() {
 fn body_validation_rejects_bad_server_id() {
     let mut body = sample_body();
     body.origin = "localhost".to_string();
-    assert_eq!(body.validate(), Err(catalog::Error::ServerId(server_id::Error::TooFewLabels)));
+    assert_eq!(
+        body.validate(),
+        Err(catalog::Error::ServerId(server_id::Error::TooFewLabels))
+    );
 }
 
 #[test]
@@ -343,7 +450,10 @@ fn from_canonical_rejects_wrong_type() {
     let Value::Object(mut obj_map) = body.to_canonical() else {
         unreachable!()
     };
-    obj_map.insert("type".to_string(), Value::String("mdma.catalog.v2".to_string()));
+    obj_map.insert(
+        "type".to_string(),
+        Value::String("mdma.catalog.v2".to_string()),
+    );
     let err = CatalogBody::from_canonical(&Value::Object(obj_map)).unwrap_err();
     assert_eq!(err, catalog::Error::WrongType);
 }
@@ -395,7 +505,10 @@ fn verify_catalog_rejects_wrong_nonce() {
     let envelope = catalog::sign_catalog(&body, "ed25519:prod-1", &key_pair).unwrap();
     let mut ctx = verify_ctx(1_000_000);
     ctx.expected_nonce = &[9u8; 32];
-    assert_eq!(catalog::verify_signed_catalog(&envelope, &public_key, &ctx), Err(catalog::Error::NonceMismatch));
+    assert_eq!(
+        catalog::verify_signed_catalog(&envelope, &public_key, &ctx),
+        Err(catalog::Error::NonceMismatch)
+    );
 }
 
 #[test]
@@ -405,7 +518,10 @@ fn verify_catalog_rejects_expired() {
     let body = sample_body();
     let envelope = catalog::sign_catalog(&body, "ed25519:prod-1", &key_pair).unwrap();
     let ctx = verify_ctx(body.expires_at_ms);
-    assert_eq!(catalog::verify_signed_catalog(&envelope, &public_key, &ctx), Err(catalog::Error::Expired));
+    assert_eq!(
+        catalog::verify_signed_catalog(&envelope, &public_key, &ctx),
+        Err(catalog::Error::Expired)
+    );
 }
 
 #[test]
@@ -415,7 +531,10 @@ fn verify_catalog_rejects_issued_too_far_in_future() {
     let body = sample_body();
     let envelope = catalog::sign_catalog(&body, "ed25519:prod-1", &key_pair).unwrap();
     let ctx = verify_ctx(body.issued_at_ms - catalog::MAX_ISSUED_AT_SKEW_MS - 1);
-    assert_eq!(catalog::verify_signed_catalog(&envelope, &public_key, &ctx), Err(catalog::Error::IssuedInFuture));
+    assert_eq!(
+        catalog::verify_signed_catalog(&envelope, &public_key, &ctx),
+        Err(catalog::Error::IssuedInFuture)
+    );
 }
 
 #[test]
@@ -426,7 +545,10 @@ fn verify_catalog_rejects_key_outside_validity_window() {
     let envelope = catalog::sign_catalog(&body, "ed25519:prod-1", &key_pair).unwrap();
     let mut ctx = verify_ctx(1_000_000);
     ctx.key_valid_until_ms = 999_999; // expired before `now_ms`
-    assert_eq!(catalog::verify_signed_catalog(&envelope, &public_key, &ctx), Err(catalog::Error::KeyNotValid));
+    assert_eq!(
+        catalog::verify_signed_catalog(&envelope, &public_key, &ctx),
+        Err(catalog::Error::KeyNotValid)
+    );
 }
 
 #[test]
@@ -438,7 +560,13 @@ fn verify_catalog_rejects_wrong_origin() {
     let mut ctx = verify_ctx(1_000_000);
     ctx.expected_origin = "mallory.example.net";
     let err = catalog::verify_signed_catalog(&envelope, &public_key, &ctx).unwrap_err();
-    assert_eq!(err, catalog::Error::OriginMismatch { claimed: "alice.example.net".to_string(), authenticated: "mallory.example.net".to_string() });
+    assert_eq!(
+        err,
+        catalog::Error::OriginMismatch {
+            claimed: "alice.example.net".to_string(),
+            authenticated: "mallory.example.net".to_string()
+        }
+    );
 }
 
 #[test]
@@ -449,7 +577,12 @@ fn verify_catalog_rejects_oversized_body() {
     let mut envelope = catalog::sign_catalog(&body, "ed25519:prod-1", &key_pair).unwrap();
     envelope.body_json = vec![b' '; catalog::MAX_BODY_JSON_BYTES + 1];
     let ctx = verify_ctx(1_000_000);
-    assert_eq!(catalog::verify_signed_catalog(&envelope, &public_key, &ctx), Err(catalog::Error::BodyTooLarge(catalog::MAX_BODY_JSON_BYTES + 1)));
+    assert_eq!(
+        catalog::verify_signed_catalog(&envelope, &public_key, &ctx),
+        Err(catalog::Error::BodyTooLarge(
+            catalog::MAX_BODY_JSON_BYTES + 1
+        ))
+    );
 }
 
 #[test]
@@ -478,8 +611,10 @@ fn clock_skew_does_not_expand_signing_key_window_at_issuance() {
     let envelope = catalog::sign_catalog(&body, "ed25519:prod-1", &key).unwrap();
     let mut ctx = verify_ctx(body.issued_at_ms - 1);
     ctx.key_valid_until_ms = body.issued_at_ms;
-    assert_eq!(catalog::verify_signed_catalog(&envelope, &key.public_key_bytes(), &ctx),
-        Err(catalog::Error::KeyNotValid));
+    assert_eq!(
+        catalog::verify_signed_catalog(&envelope, &key.public_key_bytes(), &ctx),
+        Err(catalog::Error::KeyNotValid)
+    );
 }
 
 #[test]
@@ -489,6 +624,8 @@ fn clock_skew_does_not_make_a_future_signing_key_current() {
     let envelope = catalog::sign_catalog(&body, "ed25519:prod-1", &key).unwrap();
     let mut ctx = verify_ctx(body.issued_at_ms - 1);
     ctx.key_valid_from_ms = body.issued_at_ms;
-    assert_eq!(catalog::verify_signed_catalog(&envelope, &key.public_key_bytes(), &ctx),
-        Err(catalog::Error::KeyNotValid));
+    assert_eq!(
+        catalog::verify_signed_catalog(&envelope, &key.public_key_bytes(), &ctx),
+        Err(catalog::Error::KeyNotValid)
+    );
 }

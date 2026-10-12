@@ -53,9 +53,10 @@ fn battery_reading(description: &CFDictionary<CFString, CFType>) -> Option<Power
         _ => return None,
     };
     let battery_percent = match (number("Current Capacity"), number("Max Capacity")) {
-        (Some(current), Some(max)) if current >= 0 && max > 0 => {
-            Some(((u64::from(current.cast_unsigned()) * 100 / u64::from(max.cast_unsigned())).min(100)) as u8)
-        }
+        (Some(current), Some(max)) if current >= 0 && max > 0 => Some(
+            ((u64::from(current.cast_unsigned()) * 100 / u64::from(max.cast_unsigned())).min(100))
+                as u8,
+        ),
         _ => None,
     };
     Some(PowerReading {

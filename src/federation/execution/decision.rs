@@ -118,10 +118,15 @@ pub(super) fn prepare<B: Backend>(
     let bytes = predictor
         .prepared_workspace_bytes(&prepared)
         .map_err(laya_error)?;
-    let reservation = budget.reserve(bytes, crate::memory::MemoryCategory::Workspace).map_err(|error| native_error(&error))?;
+    let reservation = budget
+        .reserve(bytes, crate::memory::MemoryCategory::Workspace)
+        .map_err(|error| native_error(&error))?;
     let ids: Vec<_> = questions.into_iter().map(|(id, _)| id).collect();
     let predictor = predictor.clone();
-    let guard = native.shutdown.clone().map(rama::graceful::WeakShutdownGuard::upgrade);
+    let guard = native
+        .shutdown
+        .clone()
+        .map(rama::graceful::WeakShutdownGuard::upgrade);
     Ok(Prepared {
         job: Box::new(move |cancel, boundary| {
             let _reservation = reservation;

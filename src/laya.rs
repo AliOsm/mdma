@@ -18,9 +18,9 @@ pub mod tokenizer;
 pub use crate::model::weights;
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 pub(crate) mod compat_tests;
+#[cfg(test)]
+mod tests;
 
 pub use config::{AgentConfig, EncoderConfig};
 pub use model::DecisionModel;

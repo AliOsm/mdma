@@ -16,11 +16,17 @@ const MAX_POWER_DEBOUNCE: u32 = 100;
 /// The `MDMA_MODELS_DIR` folder, or none for control-only federation.
 #[derive(Debug)]
 pub(super) enum ModelsSource {
-    Dir { path: String, default: Option<String> },
+    Dir {
+        path: String,
+        default: Option<String>,
+    },
     ControlOnly,
 }
 
-#[expect(clippy::struct_field_names, reason = "`federation_config` mirrors MDMA_FEDERATION_CONFIG")]
+#[expect(
+    clippy::struct_field_names,
+    reason = "`federation_config` mirrors MDMA_FEDERATION_CONFIG"
+)]
 pub(super) struct Config {
     pub models: ModelsSource,
     pub listen: SocketAddress,
@@ -34,7 +40,10 @@ pub(super) struct Config {
     pub node: String,
     pub backend: String,
     /// Validated on every build so `MDMA_HIP_F32` typos fail startup; read by ROCm.
-    #[cfg_attr(not(any(feature = "rocm", test)), expect(dead_code, reason = "consumed only by the ROCm backend"))]
+    #[cfg_attr(
+        not(any(feature = "rocm", test)),
+        expect(dead_code, reason = "consumed only by the ROCm backend")
+    )]
     pub rocm_f32: bool,
     /// MDMA_N_CTX lowers every model's context; `None` uses each model's trained context.
     pub n_ctx: Option<usize>,
@@ -81,7 +90,11 @@ impl Config {
         };
         let optional_positive = |name: &str, max: u32| -> Result<Option<u32>, BoxError> {
             match env(name) {
-                Ok(value) => value.parse::<u32>().ok().filter(|n| (1..=max).contains(n)).map(Some)
+                Ok(value) => value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| (1..=max).contains(n))
+                    .map(Some)
                     .ok_or_else(|| format!("{name} must be between 1 and {max}").into()),
                 Err(VarError::NotPresent) => Ok(None),
                 Err(e) => Err(format!("{name}: {e}").into()),
@@ -89,7 +102,10 @@ impl Config {
         };
         let percentage = |name: &str, default: u8, max: u8| -> Result<u8, BoxError> {
             match env(name) {
-                Ok(value) => value.parse::<u8>().ok().filter(|p| *p <= max)
+                Ok(value) => value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|p| *p <= max)
                     .ok_or_else(|| format!("{name} must be between 0 and {max}").into()),
                 Err(VarError::NotPresent) => Ok(default),
                 Err(e) => Err(format!("{name}: {e}").into()),
@@ -100,20 +116,33 @@ impl Config {
             "auto" => {
                 let watch = WatchPolicy::default();
                 let degraded = DegradedLimits::default();
-                let critical_percent = percentage("MDMA_POWER_CRITICAL_PCT", watch.critical_percent, 99)?;
-                let gpu_cap_percent = percentage("MDMA_POWER_GPU_CAP_PCT", watch.gpu_cap_percent, 100)?;
+                let critical_percent =
+                    percentage("MDMA_POWER_CRITICAL_PCT", watch.critical_percent, 99)?;
+                let gpu_cap_percent =
+                    percentage("MDMA_POWER_GPU_CAP_PCT", watch.gpu_cap_percent, 100)?;
                 Some(PowerConfig {
                     watch: WatchPolicy {
-                        poll: Duration::from_secs(
-                            u64::from(positive("MDMA_POWER_POLL_SECS", watch.poll.as_secs() as u32, MAX_POWER_POLL_SECS)?)
-                        ),
-                        debounce: positive("MDMA_POWER_DEBOUNCE", watch.debounce, MAX_POWER_DEBOUNCE)?,
+                        poll: Duration::from_secs(u64::from(positive(
+                            "MDMA_POWER_POLL_SECS",
+                            watch.poll.as_secs() as u32,
+                            MAX_POWER_POLL_SECS,
+                        )?)),
+                        debounce: positive(
+                            "MDMA_POWER_DEBOUNCE",
+                            watch.debounce,
+                            MAX_POWER_DEBOUNCE,
+                        )?,
                         critical_percent,
                         gpu_cap_percent,
                     },
                     degraded: DegradedLimits {
-                        max_tokens: positive("MDMA_DEGRADED_MAX_TOKENS", degraded.max_tokens as u32, u32::MAX)? as usize,
-                        n_ctx: positive("MDMA_DEGRADED_N_CTX", degraded.n_ctx as u32, u32::MAX)? as usize,
+                        max_tokens: positive(
+                            "MDMA_DEGRADED_MAX_TOKENS",
+                            degraded.max_tokens as u32,
+                            u32::MAX,
+                        )? as usize,
+                        n_ctx: positive("MDMA_DEGRADED_N_CTX", degraded.n_ctx as u32, u32::MAX)?
+                            as usize,
                     },
                     gpu: None,
                 })
@@ -135,17 +164,29 @@ impl Config {
             ModelsSource::ControlOnly
         } else {
             let default = match env("MDMA_DEFAULT_MODEL") {
-                Ok(name) if name.trim().is_empty() => return Err("MDMA_DEFAULT_MODEL must not be empty".into()),
+                Ok(name) if name.trim().is_empty() => {
+                    return Err("MDMA_DEFAULT_MODEL must not be empty".into());
+                }
                 Ok(name) => Some(name.trim().to_owned()),
                 Err(VarError::NotPresent) => None,
                 Err(e) => return Err(format!("MDMA_DEFAULT_MODEL: {e}").into()),
             };
-            ModelsSource::Dir { path: required("MDMA_MODELS_DIR")?, default }
+            ModelsSource::Dir {
+                path: required("MDMA_MODELS_DIR")?,
+                default,
+            }
         };
         let byte_limit = |name: &str| -> Result<Option<usize>, BoxError> {
             match env(name) {
-                Ok(value) => Ok(Some(value.parse::<usize>().ok().filter(|n| *n > 0)
-                    .ok_or_else(|| format!("{name} must be a positive integer byte count fitting usize"))?)),
+                Ok(value) => Ok(Some(
+                    value
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .ok_or_else(|| {
+                            format!("{name} must be a positive integer byte count fitting usize")
+                        })?,
+                )),
                 Err(VarError::NotPresent) => Ok(None),
                 Err(e) => Err(format!("{name}: {e}").into()),
             }
@@ -155,12 +196,25 @@ impl Config {
         let host_buffer_bytes = byte_limit("MDMA_HOST_BUFFER_BYTES")?;
         let backend = optional("MDMA_BACKEND", "cpu")?;
         let rocm_f32 = flag("MDMA_HIP_F32")?;
-        if (device_buffer_bytes.is_some() || host_buffer_bytes.is_some()) && !matches!(backend.as_str(), "rocm" | "cuda" | "vulkan") {
-            return Err("MDMA_DEVICE_BUFFER_BYTES / MDMA_HOST_BUFFER_BYTES require rocm, cuda or vulkan".into());
+        if (device_buffer_bytes.is_some() || host_buffer_bytes.is_some())
+            && !matches!(backend.as_str(), "rocm" | "cuda" | "vulkan")
+        {
+            return Err(
+                "MDMA_DEVICE_BUFFER_BYTES / MDMA_HOST_BUFFER_BYTES require rocm, cuda or vulkan"
+                    .into(),
+            );
         }
         let warmup_rounds = match env("MDMA_WARMUP_ROUNDS") {
-            Ok(value) => value.parse::<u32>().ok().filter(|n| *n <= mdma::registry::MAX_WARMUP_ROUNDS)
-                .ok_or_else(|| format!("MDMA_WARMUP_ROUNDS must be between 0 and {}", mdma::registry::MAX_WARMUP_ROUNDS))?,
+            Ok(value) => value
+                .parse::<u32>()
+                .ok()
+                .filter(|n| *n <= mdma::registry::MAX_WARMUP_ROUNDS)
+                .ok_or_else(|| {
+                    format!(
+                        "MDMA_WARMUP_ROUNDS must be between 0 and {}",
+                        mdma::registry::MAX_WARMUP_ROUNDS
+                    )
+                })?,
             Err(VarError::NotPresent) => 1,
             Err(e) => return Err(format!("MDMA_WARMUP_ROUNDS: {e}").into()),
         };
@@ -191,7 +245,9 @@ impl Config {
             Err(e) => return Err(format!("MDMA_OPERATOR_SPKI: {e}").into()),
         };
         let node = match env("MDMA_NODE_NAME") {
-            Ok(name) if name.trim().is_empty() => return Err("MDMA_NODE_NAME must not be empty".into()),
+            Ok(name) if name.trim().is_empty() => {
+                return Err("MDMA_NODE_NAME must not be empty".into());
+            }
             Ok(name) => name.trim().to_owned(),
             Err(VarError::NotPresent) => sysinfo::System::host_name()
                 .map(|host| host.split('.').next().unwrap_or_default().to_owned())
@@ -199,7 +255,9 @@ impl Config {
             Err(e) => return Err(format!("MDMA_NODE_NAME: {e}").into()),
         };
         if control_only && (federation_config.is_none() || backend != "cpu") {
-            return Err("control-only federation requires MDMA_FEDERATION_CONFIG and cpu backend".into());
+            return Err(
+                "control-only federation requires MDMA_FEDERATION_CONFIG and cpu backend".into(),
+            );
         }
         Ok(Self {
             models,
@@ -219,7 +277,11 @@ impl Config {
             backend,
             rocm_f32,
             n_ctx: optional_positive("MDMA_N_CTX", u32::MAX)?.map(|n| n as usize),
-            max_output_tokens: positive("MDMA_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS, u32::MAX)? as usize,
+            max_output_tokens: positive(
+                "MDMA_MAX_OUTPUT_TOKENS",
+                DEFAULT_MAX_OUTPUT_TOKENS,
+                u32::MAX,
+            )? as usize,
             native_tensor_bytes,
             device_buffer_bytes,
             host_buffer_bytes,

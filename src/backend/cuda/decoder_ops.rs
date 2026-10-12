@@ -7,7 +7,10 @@ pub(super) const WINDOWED_MAX_HEAD_DIM: usize = 512;
 
 impl CudaBackend {
     /// op 0 scales, op 1 softcaps (unary_f32).
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes x on the device")]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the kernel writes x on the device"
+    )]
     pub(super) fn unary(&self, x: &mut CudaBuf, value: f32, op: i32) -> Result<()> {
         let n = shape::elems("unary", x.len)?;
         if n == 0 {
@@ -22,10 +25,16 @@ impl CudaBackend {
         )
     }
 
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes y on the device")]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the kernel writes y on the device"
+    )]
     pub(super) fn gelu(&self, a: &CudaBuf, b: &CudaBuf, y: &mut CudaBuf) -> Result<()> {
-        let n = shape::elementwise("gelu_tanh_mul", &[shape::elems("gelu", a.len)?,
-            shape::elems("gelu", b.len)?], &[shape::elems("gelu", y.len)?])?;
+        let n = shape::elementwise(
+            "gelu_tanh_mul",
+            &[shape::elems("gelu", a.len)?, shape::elems("gelu", b.len)?],
+            &[shape::elems("gelu", y.len)?],
+        )?;
         if n == 0 {
             return Ok(());
         }
@@ -38,8 +47,17 @@ impl CudaBackend {
         )
     }
 
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes x on the device")]
-    pub(super) fn split_rope(&self, x: &mut CudaBuf, pos: u32, spec: &RopeSpec, factors: &CudaBuf) -> Result<()> {
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the kernel writes x on the device"
+    )]
+    pub(super) fn split_rope(
+        &self,
+        x: &mut CudaBuf,
+        pos: u32,
+        spec: &RopeSpec,
+        factors: &CudaBuf,
+    ) -> Result<()> {
         self.eager_only("rope_split_half")?;
         let n = shape::elems("rope_split_half", x.len)?;
         shape::rope_split_half(n, shape::elems("rope_split_half", factors.len)?, spec)?;
@@ -54,16 +72,32 @@ impl CudaBackend {
         )
     }
 
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes o on the device")]
-    pub(super) fn attention_windowed(&self, q: &CudaBuf, kv: &KvView<CudaBuf>, spec: &AttnSpec,
-        scale: f32, window: usize, o: &mut CudaBuf) -> Result<()> {
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the kernel writes o on the device"
+    )]
+    pub(super) fn attention_windowed(
+        &self,
+        q: &CudaBuf,
+        kv: &KvView<CudaBuf>,
+        spec: &AttnSpec,
+        scale: f32,
+        window: usize,
+        o: &mut CudaBuf,
+    ) -> Result<()> {
         self.eager_only("attn_windowed")?;
         shape::attention_scale(scale)?;
         if !kv.k.len.is_multiple_of(2) || !kv.v.len.is_multiple_of(2) {
             return Err(Error::ShapeMismatch("attn: partial f16 KV element".into()));
         }
-        let shape::Attn { n_q, prefix } = shape::attn(spec, shape::elems("attn", q.len)?,
-            kv.len, kv.k.len / 2, kv.v.len / 2, shape::elems("attn", o.len)?)?;
+        let shape::Attn { n_q, prefix } = shape::attn(
+            spec,
+            shape::elems("attn", q.len)?,
+            kv.len,
+            kv.k.len / 2,
+            kv.v.len / 2,
+            shape::elems("attn", o.len)?,
+        )?;
         if spec.head_dim > WINDOWED_MAX_HEAD_DIM {
             return Err(Error::ShapeMismatch(format!(
                 "attn: head_dim {} exceeds {WINDOWED_MAX_HEAD_DIM}",
@@ -71,22 +105,38 @@ impl CudaBackend {
             )));
         }
         let (mut q_ptr, mut k_ptr, mut v_ptr, mut o_ptr) = (q.ptr, kv.k.ptr, kv.v.ptr, o.ptr);
-        let (mut hd, mut qh, mut kh) = (int(spec.head_dim)?, int(spec.n_q_heads)?, int(spec.n_kv_heads)?);
+        let (mut hd, mut qh, mut kh) = (
+            int(spec.head_dim)?,
+            int(spec.n_q_heads)?,
+            int(spec.n_kv_heads)?,
+        );
         let (mut prefix, mut scale) = (int(prefix)?, scale);
         let mut window = int(window.min(kv.len))?;
         self.launch(
             "attn_windowed_f16kv",
             [spec.n_q_heads as u32, n_q as u32, 1],
             [128, 1, 1],
-            &mut params!(q_ptr, k_ptr, v_ptr, o_ptr, hd, qh, kh, prefix, scale, window),
+            &mut params!(
+                q_ptr, k_ptr, v_ptr, o_ptr, hd, qh, kh, prefix, scale, window
+            ),
         )
     }
 
     /// Q5_K matvec (gemv_q5k): never the int8 or gemv_q paths, which only
     /// know Q4_K and Q6_K.
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes y on the device")]
-    pub(super) fn qmatmul_q5k(&self, w: &QWeight<CudaBuf>, x: &CudaBuf, y: &mut CudaBuf,
-        n_out: usize, n_in: usize, n_tokens: usize) -> Result<()> {
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the kernel writes y on the device"
+    )]
+    pub(super) fn qmatmul_q5k(
+        &self,
+        w: &QWeight<CudaBuf>,
+        x: &CudaBuf,
+        y: &mut CudaBuf,
+        n_out: usize,
+        n_in: usize,
+        n_tokens: usize,
+    ) -> Result<()> {
         shape::kquant_aligned("qmatmul", w.dtype, n_in)?;
         let (mut w_ptr, mut x_ptr, mut y_ptr) = (w.buf.ptr, x.ptr, y.ptr);
         let (mut n_out_i, mut n_in_i) = (int(n_out)?, int(n_in)?);

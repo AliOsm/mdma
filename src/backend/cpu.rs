@@ -1,7 +1,10 @@
 mod dequant;
 mod encoder;
 
-use super::{AttnSpec, Backend, EncoderSpec, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec, shape};
+use super::{
+    AttnSpec, Backend, EncoderSpec, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec,
+    shape,
+};
 use crate::gguf::GgmlDType;
 use dequant::dequantize_row;
 use rayon::prelude::*;
@@ -23,11 +26,10 @@ fn as_f32_mut(bytes: &mut [u8]) -> Result<&mut [f32]> {
 fn dequant_row_at(w: &QWeight<CpuBuf>, row: usize, n_cols: usize, out: &mut [f32]) -> Result<()> {
     let row_bytes = w.dtype.type_size() * (n_cols / w.dtype.block_size());
     let start = row * row_bytes;
-    let bytes = w
-        .buf
-        .0
-        .get(start..start + row_bytes)
-        .ok_or_else(|| Error::ShapeMismatch(format!("row {row} out of range for weight buffer")))?;
+    let bytes =
+        w.buf.0.get(start..start + row_bytes).ok_or_else(|| {
+            Error::ShapeMismatch(format!("row {row} out of range for weight buffer"))
+        })?;
     dequantize_row(w.dtype, bytes, out)
 }
 
@@ -70,42 +72,63 @@ fn apply_rope(buf: &mut [f32], pos: u32, n_tokens: usize, spec: &RopeSpec) {
 impl Backend for CpuBackend {
     type Buf = CpuBuf;
 
-    fn device_label(&self) -> Option<String> { Some("CPU".into()) }
+    fn device_label(&self) -> Option<String> {
+        Some("CPU".into())
+    }
 
     fn supports(&self, operation: Operation) -> bool {
         match operation {
-            Operation::Scale | Operation::GeluTanhMul | Operation::Softcap
-                | Operation::RopeSplitHalf | Operation::WindowedAttention | Operation::AddBias
-                | Operation::RopePartialInterleaved => true,
+            Operation::Scale
+            | Operation::GeluTanhMul
+            | Operation::Softcap
+            | Operation::RopeSplitHalf
+            | Operation::WindowedAttention
+            | Operation::AddBias
+            | Operation::RopePartialInterleaved => true,
         }
     }
 
     fn scale(&self, x: &mut CpuBuf, factor: f32) -> Result<()> {
-        if !factor.is_finite() { return Err(Error::ShapeMismatch("nonfinite scale".into())); }
-        for v in as_f32_mut(&mut x.0)? { *v *= factor; }
+        if !factor.is_finite() {
+            return Err(Error::ShapeMismatch("nonfinite scale".into()));
+        }
+        for v in as_f32_mut(&mut x.0)? {
+            *v *= factor;
+        }
         Ok(())
     }
 
     fn softcap(&self, x: &mut CpuBuf, cap: f32) -> Result<()> {
         shape::softcap(cap)?;
-        for v in as_f32_mut(&mut x.0)? { *v = (*v / cap).tanh() * cap; }
+        for v in as_f32_mut(&mut x.0)? {
+            *v = (*v / cap).tanh() * cap;
+        }
         Ok(())
     }
 
     fn gelu_tanh_mul(&self, a: &CpuBuf, b: &CpuBuf, y: &mut CpuBuf) -> Result<()> {
         let (a, b, y) = (as_f32(&a.0)?, as_f32(&b.0)?, as_f32_mut(&mut y.0)?);
         shape::elementwise("gelu_tanh_mul", &[a.len(), b.len()], &[y.len()])?;
-        for ((a, b), y) in a.iter().zip(b).zip(y) { *y = gelu_tanh(*a) * b; }
+        for ((a, b), y) in a.iter().zip(b).zip(y) {
+            *y = gelu_tanh(*a) * b;
+        }
         Ok(())
     }
 
-    fn rope_split_half(&self, x: &mut CpuBuf, pos: u32, spec: &RopeSpec, factors: &CpuBuf) -> Result<()> {
+    fn rope_split_half(
+        &self,
+        x: &mut CpuBuf,
+        pos: u32,
+        spec: &RopeSpec,
+        factors: &CpuBuf,
+    ) -> Result<()> {
         let x = as_f32_mut(&mut x.0)?;
         let factors = as_f32(&factors.0)?;
         shape::rope_split_half(x.len(), factors.len(), spec)?;
         for head in x.chunks_exact_mut(spec.head_dim) {
             for i in 0..spec.head_dim / 2 {
-                let angle = pos as f32 * spec.theta.powf(-2.0 * i as f32 / spec.head_dim as f32) / factors[i];
+                let angle = pos as f32 * spec.theta.powf(-2.0 * i as f32 / spec.head_dim as f32)
+                    / factors[i];
                 let (s, c) = angle.sin_cos();
                 let (a, b) = (head[i], head[i + spec.head_dim / 2]);
                 head[i] = a * c - b * s;
@@ -115,12 +138,26 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn attn_windowed(&self, q: &CpuBuf, kv: &KvView<CpuBuf>, spec: &AttnSpec, scale: f32, window: usize, o: &mut CpuBuf) -> Result<()> {
+    fn attn_windowed(
+        &self,
+        q: &CpuBuf,
+        kv: &KvView<CpuBuf>,
+        spec: &AttnSpec,
+        scale: f32,
+        window: usize,
+        o: &mut CpuBuf,
+    ) -> Result<()> {
         shape::attention_scale(scale)?;
         self.attention(q, kv, spec, window, scale, o)
     }
 
-    fn rope_partial_interleaved(&self, x: &mut CpuBuf, pos: u32, spec: &RopeSpec, rotary_dim: usize) -> Result<()> {
+    fn rope_partial_interleaved(
+        &self,
+        x: &mut CpuBuf,
+        pos: u32,
+        spec: &RopeSpec,
+        rotary_dim: usize,
+    ) -> Result<()> {
         let x = as_f32_mut(&mut x.0)?;
         shape::rope_partial_interleaved(x.len(), spec, rotary_dim)?;
         for head in x.chunks_exact_mut(spec.head_dim) {
@@ -155,7 +192,14 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn copy(&self, src: &Self::Buf, src_off: usize, dst: &mut Self::Buf, dst_off: usize, len: usize) -> Result<()> {
+    fn copy(
+        &self,
+        src: &Self::Buf,
+        src_off: usize,
+        dst: &mut Self::Buf,
+        dst_off: usize,
+        len: usize,
+    ) -> Result<()> {
         shape::range("copy", src_off, len, src.0.len())?;
         shape::range("copy", dst_off, len, dst.0.len())?;
         dst.0[dst_off..dst_off + len].copy_from_slice(&src.0[src_off..src_off + len]);
@@ -167,7 +211,11 @@ impl Backend for CpuBackend {
     fn qmatmul(&self, w: &QWeight<Self::Buf>, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
         let x_f32 = as_f32(&x.0)?;
         let y_f32 = as_f32_mut(&mut y.0)?;
-        let shape::Matmul { n_out, n_in, n_tokens } = shape::matmul(&w.shape, x_f32.len(), y_f32.len())?;
+        let shape::Matmul {
+            n_out,
+            n_in,
+            n_tokens,
+        } = shape::matmul(&w.shape, x_f32.len(), y_f32.len())?;
 
         // Rows in parallel, each dequantized once and dotted against every
         // token into a row-major [n_out, n_tokens] scratch (contiguous per
@@ -193,7 +241,12 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn embed(&self, table: &QWeight<Self::Buf>, token_ids: &[u32], out: &mut Self::Buf) -> Result<()> {
+    fn embed(
+        &self,
+        table: &QWeight<Self::Buf>,
+        token_ids: &[u32],
+        out: &mut Self::Buf,
+    ) -> Result<()> {
         let out_f32 = as_f32_mut(&mut out.0)?;
         let shape::Embed { n_embd, .. } = shape::embed(&table.shape, token_ids, out_f32.len())?;
         let mut row_f32 = vec![0f32; n_embd];
@@ -222,7 +275,14 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn rope(&self, q: &mut Self::Buf, k: &mut Self::Buf, pos: u32, n_tokens: usize, spec: &RopeSpec) -> Result<()> {
+    fn rope(
+        &self,
+        q: &mut Self::Buf,
+        k: &mut Self::Buf,
+        pos: u32,
+        n_tokens: usize,
+        spec: &RopeSpec,
+    ) -> Result<()> {
         let q_f32 = as_f32_mut(&mut q.0)?;
         let k_f32 = as_f32_mut(&mut k.0)?;
         shape::rope(spec, q_f32.len(), k_f32.len(), n_tokens)?;
@@ -248,7 +308,13 @@ impl Backend for CpuBackend {
     /// [0, prefix+i] inclusive -- standard causal masking, with the
     /// already-cached prefix always fully visible. n_q==1 (decode):
     /// the one query attends to all cached keys.
-    fn attn(&self, q: &Self::Buf, kv: &KvView<Self::Buf>, spec: &AttnSpec, o: &mut Self::Buf) -> Result<()> {
+    fn attn(
+        &self,
+        q: &Self::Buf,
+        kv: &KvView<Self::Buf>,
+        spec: &AttnSpec,
+        o: &mut Self::Buf,
+    ) -> Result<()> {
         self.attention(q, kv, spec, 0, 1.0 / (spec.head_dim as f32).sqrt(), o)
     }
 
@@ -265,7 +331,14 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn layernorm(&self, w: &Self::Buf, b: Option<&Self::Buf>, x: &Self::Buf, y: &mut Self::Buf, eps: f32) -> Result<()> {
+    fn layernorm(
+        &self,
+        w: &Self::Buf,
+        b: Option<&Self::Buf>,
+        x: &Self::Buf,
+        y: &mut Self::Buf,
+        eps: f32,
+    ) -> Result<()> {
         let b = b.map(|b| as_f32(&b.0)).transpose()?;
         encoder::layernorm(as_f32(&w.0)?, b, as_f32(&x.0)?, as_f32_mut(&mut y.0)?, eps)
     }
@@ -275,7 +348,12 @@ impl Backend for CpuBackend {
     }
 
     fn gelu(&self, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
-        encoder::map("gelu", as_f32(&x.0)?, as_f32_mut(&mut y.0)?, encoder::gelu_scalar)
+        encoder::map(
+            "gelu",
+            as_f32(&x.0)?,
+            as_f32_mut(&mut y.0)?,
+            encoder::gelu_scalar,
+        )
     }
 
     fn gelu_mul(&self, a: &Self::Buf, gate: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
@@ -286,7 +364,13 @@ impl Backend for CpuBackend {
         encoder::map("relu", as_f32(&x.0)?, as_f32_mut(&mut y.0)?, |v| v.max(0.0))
     }
 
-    fn rope_neox(&self, q: &mut Self::Buf, k: &mut Self::Buf, spec: &EncoderSpec, theta: f32) -> Result<()> {
+    fn rope_neox(
+        &self,
+        q: &mut Self::Buf,
+        k: &mut Self::Buf,
+        spec: &EncoderSpec,
+        theta: f32,
+    ) -> Result<()> {
         let q_f32 = as_f32_mut(&mut q.0)?;
         let k_f32 = as_f32_mut(&mut k.0)?;
         shape::rope_neox(spec, q_f32.len(), k_f32.len())?;
@@ -295,19 +379,49 @@ impl Backend for CpuBackend {
         Ok(())
     }
 
-    fn attn_bidir(&self, q: &Self::Buf, k: &Self::Buf, v: &Self::Buf, lens: &[u32], spec: &EncoderSpec, o: &mut Self::Buf) -> Result<()> {
-        encoder::attn_bidir(as_f32(&q.0)?, as_f32(&k.0)?, as_f32(&v.0)?, lens, spec, as_f32_mut(&mut o.0)?)
+    fn attn_bidir(
+        &self,
+        q: &Self::Buf,
+        k: &Self::Buf,
+        v: &Self::Buf,
+        lens: &[u32],
+        spec: &EncoderSpec,
+        o: &mut Self::Buf,
+    ) -> Result<()> {
+        encoder::attn_bidir(
+            as_f32(&q.0)?,
+            as_f32(&k.0)?,
+            as_f32(&v.0)?,
+            lens,
+            spec,
+            as_f32_mut(&mut o.0)?,
+        )
     }
 }
 
 impl CpuBackend {
     #[expect(clippy::unused_self, reason = "backend operations are methods")]
-    fn attention(&self, q: &CpuBuf, kv: &KvView<CpuBuf>, spec: &AttnSpec, window: usize, scale: f32, o: &mut CpuBuf) -> Result<()> {
+    fn attention(
+        &self,
+        q: &CpuBuf,
+        kv: &KvView<CpuBuf>,
+        spec: &AttnSpec,
+        window: usize,
+        scale: f32,
+        o: &mut CpuBuf,
+    ) -> Result<()> {
         let q_f32 = as_f32(&q.0)?;
         let k_f32 = as_f32(&kv.k.0)?;
         let v_f32 = as_f32(&kv.v.0)?;
         let o_f32 = as_f32_mut(&mut o.0)?;
-        let shape::Attn { n_q, prefix } = shape::attn(spec, q_f32.len(), kv.len, k_f32.len(), v_f32.len(), o_f32.len())?;
+        let shape::Attn { n_q, prefix } = shape::attn(
+            spec,
+            q_f32.len(),
+            kv.len,
+            k_f32.len(),
+            v_f32.len(),
+            o_f32.len(),
+        )?;
 
         let per_token = spec.n_q_heads * spec.head_dim;
         let group = spec.n_q_heads / spec.n_kv_heads;
@@ -316,7 +430,11 @@ impl CpuBackend {
         o_f32[..n_q * per_token].fill(0.0);
         for i in 0..n_q {
             let visible = prefix + i + 1; // exclusive upper bound, causal
-            let first = if window == 0 { 0 } else { visible.saturating_sub(window) };
+            let first = if window == 0 {
+                0
+            } else {
+                visible.saturating_sub(window)
+            };
             let mut scores = vec![0f32; visible - first];
             for qh in 0..spec.n_q_heads {
                 let kvh = qh / group;
@@ -325,7 +443,8 @@ impl CpuBackend {
 
                 for (offset, score) in scores.iter_mut().enumerate() {
                     let t = first + offset;
-                    let k_vec = &k_f32[t * kv_row + kvh * spec.head_dim..t * kv_row + (kvh + 1) * spec.head_dim];
+                    let k_vec = &k_f32
+                        [t * kv_row + kvh * spec.head_dim..t * kv_row + (kvh + 1) * spec.head_dim];
                     *score = q_vec.iter().zip(k_vec).map(|(a, b)| a * b).sum::<f32>() * scale;
                 }
                 softmax_inplace(&mut scores);
@@ -333,7 +452,8 @@ impl CpuBackend {
                 let o_vec = &mut o_f32[q_start..q_start + spec.head_dim];
                 for (offset, &weight) in scores.iter().enumerate() {
                     let t = first + offset;
-                    let v_vec = &v_f32[t * kv_row + kvh * spec.head_dim..t * kv_row + (kvh + 1) * spec.head_dim];
+                    let v_vec = &v_f32
+                        [t * kv_row + kvh * spec.head_dim..t * kv_row + (kvh + 1) * spec.head_dim];
                     for (o_val, v_val) in o_vec.iter_mut().zip(v_vec) {
                         *o_val += weight * v_val;
                     }
@@ -342,7 +462,6 @@ impl CpuBackend {
         }
         Ok(())
     }
-
 }
 
 #[cfg(test)]

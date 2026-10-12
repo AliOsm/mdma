@@ -22,12 +22,25 @@ pub(crate) fn tiny_tokenizer_with_decode_piece(id: u32, piece: String) -> Tokeni
 
 pub(crate) fn tiny_tokenizer_with_eos(eos_id: Option<u32>) -> Tokenizer {
     let pieces: Vec<String> = (0u8..128).map(|b| (b as char).to_string()).collect();
-    let piece_to_id = pieces.iter().enumerate().map(|(id, piece)| (piece.clone(), id as u32)).collect();
+    let piece_to_id = pieces
+        .iter()
+        .enumerate()
+        .map(|(id, piece)| (piece.clone(), id as u32))
+        .collect();
     Tokenizer {
-        pieces, piece_to_id, scores: vec![0.0; 128],
-        bos_id: None, eos_id, unk_id: None,
-        add_bos: false, add_space_prefix: false,
-        merge_ranks: None, specials: Vec::new(), stop_ids: Vec::new(), byte_bpe: None, chat: None,
+        pieces,
+        piece_to_id,
+        scores: vec![0.0; 128],
+        bos_id: None,
+        eos_id,
+        unk_id: None,
+        add_bos: false,
+        add_space_prefix: false,
+        merge_ranks: None,
+        specials: Vec::new(),
+        stop_ids: Vec::new(),
+        byte_bpe: None,
+        chat: None,
     }
 }
 
@@ -37,7 +50,11 @@ fn load() -> Tokenizer {
 }
 
 fn strip_bos(tok: &Tokenizer, ids: Vec<u32>) -> Vec<u32> {
-    if ids.first().copied() == tok.bos_id { ids[1..].to_vec() } else { ids }
+    if ids.first().copied() == tok.bos_id {
+        ids[1..].to_vec()
+    } else {
+        ids
+    }
 }
 
 fn gemma_tokenizer(merges: &[&str]) -> Option<Tokenizer> {
@@ -48,13 +65,26 @@ fn gemma_tokenizer(merges: &[&str]) -> Option<Tokenizer> {
     let mut fixture = Fixture::new(1, 8);
     for (key, value) in [
         ("model", Value::String("gemma4".into())),
-        ("tokens", Value::Array(pieces.map(|piece| Value::String(piece.into())).into())),
+        (
+            "tokens",
+            Value::Array(pieces.map(|piece| Value::String(piece.into())).into()),
+        ),
         ("scores", Value::Array(vec![Value::F32(0.0); pieces.len()])),
-        ("merges", Value::Array(merges.iter().map(|pair| Value::String((*pair).into())).collect())),
+        (
+            "merges",
+            Value::Array(
+                merges
+                    .iter()
+                    .map(|pair| Value::String((*pair).into()))
+                    .collect(),
+            ),
+        ),
         ("add_bos_token", Value::Bool(false)),
         ("add_space_prefix", Value::Bool(false)),
     ] {
-        fixture.metadata.insert(format!("tokenizer.ggml.{key}"), value);
+        fixture
+            .metadata
+            .insert(format!("tokenizer.ggml.{key}"), value);
     }
     let file = fixture.write();
     Tokenizer::from_gguf(&GgufModel::open(file.path()).unwrap())
@@ -95,7 +125,9 @@ fn encode_decode_roundtrip_ascii() {
 fn matches_llama_cpp_reference_ids() {
     let tok = load();
     let ids = tok.encode("The quick brown fox jumps over the lazy dog.");
-    let expected: Vec<u32> = vec![1, 918, 4131, 14018, 38648, 34256, 1053, 410, 15810, 5718, 281];
+    let expected: Vec<u32> = vec![
+        1, 918, 4131, 14018, 38648, 34256, 1053, 410, 15810, 5718, 281,
+    ];
     assert_eq!(ids, expected);
 }
 

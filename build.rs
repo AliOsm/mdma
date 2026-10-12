@@ -45,8 +45,14 @@ fn embed_info_plists() {
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     let version = std::env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     for (bin, why) in [
-        ("mdma-serve", "mdma-serve reads the model catalogs of your enrolled federation peers and runs requests on them."),
-        ("mdma-fed", "mdma-fed reads a federation peer's signed model catalog to set up routes to it."),
+        (
+            "mdma-serve",
+            "mdma-serve reads the model catalogs of your enrolled federation peers and runs requests on them.",
+        ),
+        (
+            "mdma-fed",
+            "mdma-fed reads a federation peer's signed model catalog to set up routes to it.",
+        ),
     ] {
         let plist = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -64,8 +70,12 @@ fn embed_info_plists() {
 "#
         );
         let path = out.join(format!("{bin}.Info.plist"));
-        std::fs::write(&path, plist).unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
-        println!("cargo::rustc-link-arg-bin={bin}=-Wl,-sectcreate,__TEXT,__info_plist,{}", path.display());
+        std::fs::write(&path, plist)
+            .unwrap_or_else(|e| panic!("failed to write {}: {e}", path.display()));
+        println!(
+            "cargo::rustc-link-arg-bin={bin}=-Wl,-sectcreate,__TEXT,__info_plist,{}",
+            path.display()
+        );
     }
 }
 
@@ -77,12 +87,16 @@ fn build_identity() {
     println!("cargo::rerun-if-changed=Cargo.lock");
     let git = |args: &[&str]| -> Option<String> {
         let output = Command::new("git").args(args).output().ok()?;
-        output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
     };
     // Never attribute a source archive to an unrelated enclosing repository.
-    let root = git(&["rev-parse", "--show-toplevel"])
-        .and_then(|path| std::fs::canonicalize(path).ok());
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR for build scripts");
+    let root =
+        git(&["rev-parse", "--show-toplevel"]).and_then(|path| std::fs::canonicalize(path).ok());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("Cargo sets CARGO_MANIFEST_DIR for build scripts");
     let manifest = std::fs::canonicalize(manifest_dir).ok();
     let id = if root.is_some() && root == manifest {
         let branch = git(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_default();
@@ -95,17 +109,31 @@ fn build_identity() {
             }
         }
         git(&["rev-parse", "HEAD"]).map(|sha| {
-            if Command::new("git").args(["diff-index", "--quiet", "HEAD", "--"])
-                .status().is_ok_and(|status| status.success()) { sha }
-            else { format!("{sha}-dirty") }
+            if Command::new("git")
+                .args(["diff-index", "--quiet", "HEAD", "--"])
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                sha
+            } else {
+                format!("{sha}-dirty")
+            }
         })
     } else {
         None
     };
-    let id = std::env::var("MDMA_BUILD_ID").ok().or(id).unwrap_or_else(|| "unknown".into());
-    assert!(!id.is_empty() && id.len() <= 128
-        && id.bytes().all(|c| c.is_ascii_alphanumeric() || b"._+-".contains(&c)),
-        "MDMA_BUILD_ID must be a 1..128 character build token");
+    let id = std::env::var("MDMA_BUILD_ID")
+        .ok()
+        .or(id)
+        .unwrap_or_else(|| "unknown".into());
+    assert!(
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._+-".contains(&c)),
+        "MDMA_BUILD_ID must be a 1..128 character build token"
+    );
     println!("cargo::rustc-env=MDMA_BUILD_ID={id}");
 }
 
@@ -128,14 +156,23 @@ fn build_hip_kernels() {
     let status = std::process::Command::new(&hipcc)
         .args(["-fno-gpu-rdc", "-fPIC", "--genco", "-O3"])
         .arg(format!("--offload-arch={arch}"))
-        .arg(format!("-DBLOCK_Q4K_PACKED_BYTES={}", packed_abi::Q4K_BLOCK_BYTES))
-        .arg(format!("-DQ4K_PACKED_QUANTS_OFFSET={}", packed_abi::Q4K_QUANTS_OFFSET))
+        .arg(format!(
+            "-DBLOCK_Q4K_PACKED_BYTES={}",
+            packed_abi::Q4K_BLOCK_BYTES
+        ))
+        .arg(format!(
+            "-DQ4K_PACKED_QUANTS_OFFSET={}",
+            packed_abi::Q4K_QUANTS_OFFSET
+        ))
         .arg(format!("-DDT_Q4K_PACKED={}", packed_abi::Q4K_DTYPE_TAG))
         .args(["-o", &out_path, src])
         .status()
         .unwrap_or_else(|e| panic!("failed to run {hipcc}: {e} - is ROCm installed at /opt/rocm?"));
 
-    assert!(status.success(), "hipcc failed compiling {src} (arch {arch})");
+    assert!(
+        status.success(),
+        "hipcc failed compiling {src} (arch {arch})"
+    );
 
     println!("cargo::rustc-env=MDMA_HIP_KERNELS_HSACO={out_path}");
     println!("cargo::rustc-env=MDMA_HIP_ARCH_BUILT={arch}");
@@ -153,10 +190,24 @@ fn build_level0_kernels() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let stem = format!("{out_dir}/level0");
     let status = std::process::Command::new(&ocloc)
-        .args(["compile", "-file", src, "-device", &device, "-output", &stem, "-output_no_suffix", "-options", "-cl-std=CL2.0"])
+        .args([
+            "compile",
+            "-file",
+            src,
+            "-device",
+            &device,
+            "-output",
+            &stem,
+            "-output_no_suffix",
+            "-options",
+            "-cl-std=CL2.0",
+        ])
         .status()
         .unwrap_or_else(|e| panic!("failed to run {ocloc}: {e}"));
-    assert!(status.success(), "ocloc failed compiling {src} for {device}");
+    assert!(
+        status.success(),
+        "ocloc failed compiling {src} for {device}"
+    );
     let bin = format!("{stem}.bin");
     println!("cargo::rustc-env=MDMA_L0_ZEBIN={bin}");
     println!("cargo::rustc-link-lib=ze_loader");
@@ -174,7 +225,11 @@ fn build_vulkan_kernels() {
     let glslang = std::env::var("GLSLANG").unwrap_or_else(|_| "glslangValidator".to_string());
     let out_dir = format!("{}/vk", std::env::var("OUT_DIR").expect("OUT_DIR"));
     std::fs::create_dir_all(&out_dir).expect("create spv dir");
-    let mut entries: Vec<_> = std::fs::read_dir(dir).expect("kernel dir").flatten().map(|e| e.path()).collect();
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .expect("kernel dir")
+        .flatten()
+        .map(|e| e.path())
+        .collect();
     entries.sort();
     let defines = [
         ("BINARY_THREADS", vulkan_abi::BINARY_THREADS),
@@ -196,18 +251,32 @@ fn build_vulkan_kernels() {
         if path.extension().and_then(|e| e.to_str()) != Some("comp") {
             continue;
         }
-        let stem = path.file_stem().and_then(|stem| stem.to_str())
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
             .unwrap_or_else(|| panic!("shader path {} has no UTF-8 file stem", path.display()));
         let out = format!("{out_dir}/{stem}.spv");
         let mut command = std::process::Command::new(&glslang);
-        command.args(["-V", "--target-env", "vulkan1.2", &format!("-I{dir}"), "-o", &out]);
+        command.args([
+            "-V",
+            "--target-env",
+            "vulkan1.2",
+            &format!("-I{dir}"),
+            "-o",
+            &out,
+        ]);
         for (name, value) in defines {
             command.arg(format!("-D{name}={value}u"));
         }
-        let status = command.arg(&path)
+        let status = command
+            .arg(&path)
             .status()
             .unwrap_or_else(|e| panic!("failed to run {glslang}: {e}"));
-        assert!(status.success(), "{glslang} failed compiling {}", path.display());
+        assert!(
+            status.success(),
+            "{glslang} failed compiling {}",
+            path.display()
+        );
     }
     println!("cargo::rustc-env=MDMA_VK_SPV_DIR={out_dir}");
 }
@@ -227,12 +296,24 @@ fn build_cuda_kernels() {
     let clang = std::env::var("CLANG").unwrap_or_else(|_| "clang".to_string());
     let out_path = format!("{}/kernels.ptx", std::env::var("OUT_DIR").expect("OUT_DIR"));
     let status = std::process::Command::new(&clang)
-        .args(["--cuda-device-only", "-nocudainc", "-nocudalib", "--cuda-feature=+ptx80", "-O3", "-S"])
+        .args([
+            "--cuda-device-only",
+            "-nocudainc",
+            "-nocudalib",
+            "--cuda-feature=+ptx80",
+            "-O3",
+            "-S",
+        ])
         .arg(format!("--cuda-gpu-arch={arch}"))
         .args(["-o", &out_path, src])
         .status()
-        .unwrap_or_else(|e| panic!("failed to run {clang}: {e} -- needs clang with the NVPTX target"));
-    assert!(status.success(), "{clang} failed compiling {src} for {arch}");
+        .unwrap_or_else(|e| {
+            panic!("failed to run {clang}: {e} -- needs clang with the NVPTX target")
+        });
+    assert!(
+        status.success(),
+        "{clang} failed compiling {src} for {arch}"
+    );
     println!("cargo::rustc-env=MDMA_CUDA_PTX={out_path}");
     // The host gates sm_80-only paths (int8 mma.sync) on the built arch too.
     println!("cargo::rustc-env=MDMA_CUDA_ARCH_BUILT={arch}");

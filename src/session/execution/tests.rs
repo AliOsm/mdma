@@ -1,10 +1,10 @@
 use super::*;
-use std::assert_matches;
 use crate::backend::{AttnSpec, Backend, Error, KvView, Pool, QWeight, Result, RopeSpec};
 use crate::kv_cache::KvCache;
+use crate::memory::NativeMemoryBudget;
 use crate::model::Workspace;
 use crate::model::decoder::{Decoder, EagerDecoder};
-use crate::memory::NativeMemoryBudget;
+use std::assert_matches;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
 
@@ -63,7 +63,9 @@ impl Backend for CountingBackend {
     fn join_execution(&self) -> Result<()> {
         self.joins.fetch_add(1, SeqCst);
         let hook = self.on_join.lock().unwrap().take();
-        if let Some(hook) = hook { hook(); }
+        if let Some(hook) = hook {
+            hook();
+        }
         if self.fail_join.load(SeqCst) {
             return Err(Error::Backend("injected device join failure".into()));
         }
@@ -74,13 +76,23 @@ impl Backend for CountingBackend {
         if self.half_kv { 2 } else { 4 }
     }
 
-    fn decoder<'a>(&'a self, model: &'a Model<Self>, kv: &'a mut KvCache<Self>, ws: &'a mut Workspace<Self>) -> Result<Box<dyn Decoder + 'a>> {
+    fn decoder<'a>(
+        &'a self,
+        model: &'a Model<Self>,
+        kv: &'a mut KvCache<Self>,
+        ws: &'a mut Workspace<Self>,
+    ) -> Result<Box<dyn Decoder + 'a>> {
         self.decoders.fetch_add(1, SeqCst);
         if self.fail_decoder.load(SeqCst) {
             return Err(Error::Backend("injected decoder failure".into()));
         }
         Ok(Box::new(DropDecoder {
-            inner: EagerDecoder { backend: self, model, kv, ws },
+            inner: EagerDecoder {
+                backend: self,
+                model,
+                kv,
+                ws,
+            },
             on_drop: self.on_decoder_drop.lock().unwrap().take(),
         }))
     }
@@ -102,7 +114,14 @@ impl Backend for CountingBackend {
     fn download(&self, src: &Self::Buf, offset: usize, dst: &mut [u8]) -> Result<()> {
         CpuBackend.download(src, offset, dst)
     }
-    fn copy(&self, src: &Self::Buf, src_off: usize, dst: &mut Self::Buf, dst_off: usize, len: usize) -> Result<()> {
+    fn copy(
+        &self,
+        src: &Self::Buf,
+        src_off: usize,
+        dst: &mut Self::Buf,
+        dst_off: usize,
+        len: usize,
+    ) -> Result<()> {
         CpuBackend.copy(src, src_off, dst, dst_off, len)
     }
     fn qmatmul(&self, w: &QWeight<Self::Buf>, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
@@ -111,7 +130,9 @@ impl Backend for CountingBackend {
     fn embed(&self, table: &QWeight<Self::Buf>, tokens: &[u32], out: &mut Self::Buf) -> Result<()> {
         self.embeds.lock().unwrap().push(tokens.to_vec());
         let hook = self.on_embed.lock().unwrap().take();
-        if let Some(hook) = hook { hook(); }
+        if let Some(hook) = hook {
+            hook();
+        }
         CpuBackend.embed(table, tokens, out)
     }
     fn rmsnorm(&self, w: &Self::Buf, x: &Self::Buf, y: &mut Self::Buf, eps: f32) -> Result<()> {
@@ -120,10 +141,23 @@ impl Backend for CountingBackend {
     fn add(&self, a: &Self::Buf, b: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
         CpuBackend.add(a, b, y)
     }
-    fn rope(&self, q: &mut Self::Buf, k: &mut Self::Buf, pos: u32, n_tokens: usize, spec: &RopeSpec) -> Result<()> {
+    fn rope(
+        &self,
+        q: &mut Self::Buf,
+        k: &mut Self::Buf,
+        pos: u32,
+        n_tokens: usize,
+        spec: &RopeSpec,
+    ) -> Result<()> {
         CpuBackend.rope(q, k, pos, n_tokens, spec)
     }
-    fn attn(&self, q: &Self::Buf, kv: &KvView<Self::Buf>, spec: &AttnSpec, out: &mut Self::Buf) -> Result<()> {
+    fn attn(
+        &self,
+        q: &Self::Buf,
+        kv: &KvView<Self::Buf>,
+        spec: &AttnSpec,
+        out: &mut Self::Buf,
+    ) -> Result<()> {
         CpuBackend.attn(q, kv, spec, out)
     }
     fn silu_mul(&self, gate: &Self::Buf, up: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
@@ -136,7 +170,11 @@ fn tiny_session(n_ctx: usize) -> Session<CountingBackend> {
     let model = Arc::new(crate::model::tests::tiny_model(&*backend));
     backend.reset();
     let tokenizer = Arc::new(crate::tokenizer::tests::tiny_tokenizer());
-    let config = SamplerConfig { temperature: 0.0, repetition_penalty: 1.0, ..SamplerConfig::default() };
+    let config = SamplerConfig {
+        temperature: 0.0,
+        repetition_penalty: 1.0,
+        ..SamplerConfig::default()
+    };
     Session::new(backend, model, tokenizer, config, n_ctx)
 }
 
@@ -146,7 +184,9 @@ fn kv_bytes(session: &Session<CountingBackend>, rows: usize) -> usize {
 }
 
 fn budget_session(extra: usize) -> (Session<CountingBackend>, NativeMemoryBudget, usize) {
-    let file = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer().write();
+    let file = crate::gguf::tests::Fixture::new(1, 8)
+        .with_tokenizer()
+        .write();
     let mut gguf = GgufModel::open(file.path()).unwrap();
     let weights = crate::model::memory::weight_bytes(&gguf).unwrap();
     let budget = NativeMemoryBudget::new(weights + extra);
@@ -154,8 +194,16 @@ fn budget_session(extra: usize) -> (Session<CountingBackend>, NativeMemoryBudget
     let model = Arc::new(Model::load_with_budget(&*backend, &mut gguf, &budget).unwrap());
     let tokenizer = Arc::new(crate::tokenizer::tests::tiny_tokenizer());
     backend.reset();
-    let config = SamplerConfig { temperature: 0.0, repetition_penalty: 1.0, ..SamplerConfig::default() };
-    (Session::new(backend, model, tokenizer, config, 64), budget, weights)
+    let config = SamplerConfig {
+        temperature: 0.0,
+        repetition_penalty: 1.0,
+        ..SamplerConfig::default()
+    };
+    (
+        Session::new(backend, model, tokenizer, config, 64),
+        budget,
+        weights,
+    )
 }
 
 fn request_bytes(prompt: usize, output: usize) -> usize {
@@ -165,7 +213,10 @@ fn request_bytes(prompt: usize, output: usize) -> usize {
 
 #[test]
 fn budget_kv_sizing_uses_the_backends_element_width() {
-    let backend = CountingBackend { half_kv: true, ..CountingBackend::default() };
+    let backend = CountingBackend {
+        half_kv: true,
+        ..CountingBackend::default()
+    };
     let model = crate::model::tests::tiny_model(&backend);
     let bytes = model.kv_bytes(&backend, 7).unwrap();
     let _kv = model.new_kv_cache(&backend, 7).unwrap();
@@ -188,20 +239,37 @@ async fn budget_stays_charged_until_cancelled_decoder_teardown_finishes() {
         started.send(()).unwrap();
         wait.recv_timeout(Duration::from_secs(5)).unwrap();
     }));
-    let mut stream = session.generate_guarded("abc", 40, CancellationToken::new(), Some(shutdown.guard_weak().upgrade())).unwrap();
+    let mut stream = session
+        .generate_guarded(
+            "abc",
+            40,
+            CancellationToken::new(),
+            Some(shutdown.guard_weak().upgrade()),
+        )
+        .unwrap();
     assert!(stream.next().await.unwrap().is_ok());
     tokio::time::timeout(Duration::from_secs(2), async {
         while session.backend.decoders.load(SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     drop(stream);
-    tokio::time::timeout(Duration::from_secs(2), tearing_down).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(2), tearing_down)
+        .await
+        .unwrap()
+        .unwrap();
     let held = budget.used();
-    let rejected = session.generate("abc", 4, CancellationToken::new()).map(|_| ());
+    let rejected = session
+        .generate("abc", 4, CancellationToken::new())
+        .map(|_| ());
     release.send(()).unwrap();
     trigger.cancel();
-    shutdown.shutdown_with_limit(Duration::from_secs(2)).await.unwrap();
+    shutdown
+        .shutdown_with_limit(Duration::from_secs(2))
+        .await
+        .unwrap();
     assert_eq!(held, weights + peak);
     assert_matches!(rejected, Err(Error::MemoryBudget { .. }));
     assert_eq!(budget.used(), weights);
@@ -211,11 +279,19 @@ async fn budget_stays_charged_until_cancelled_decoder_teardown_finishes() {
 async fn budget_rejects_before_allocation_and_exact_peak_succeeds() {
     let peak = request_bytes(3, 4);
     let (session, budget, weights) = budget_session(peak - 1);
-    assert_matches!(session.generate("abc", 4, CancellationToken::new()).map(|_| ()), Err(Error::MemoryBudget { .. }));
+    assert_matches!(
+        session
+            .generate("abc", 4, CancellationToken::new())
+            .map(|_| ()),
+        Err(Error::MemoryBudget { .. })
+    );
     assert_eq!(session.backend.allocations.load(SeqCst), 0);
     assert_eq!(budget.used(), weights);
     let (session, budget, weights) = budget_session(peak);
-    assert_eq!(generate(&session, "abc", 4).await, generate(&tiny_session(64), "abc", 4).await);
+    assert_eq!(
+        generate(&session, "abc", 4).await,
+        generate(&tiny_session(64), "abc", 4).await
+    );
     assert_eq!(session.backend.allocations.load(SeqCst), 2 + 13 + 13);
     assert_eq!(budget.used(), weights);
     drop(session);
@@ -227,9 +303,16 @@ async fn budget_refunds_partial_allocation_and_decoder_failures() {
     for allocation in [1, 2, 4, 16, 28, 0] {
         let (session, budget, weights) = budget_session(request_bytes(3, 4));
         let session = session.with_prefix_reuse();
-        session.backend.fail_nth_allocation.store(allocation, SeqCst);
+        session
+            .backend
+            .fail_nth_allocation
+            .store(allocation, SeqCst);
         session.backend.fail_decoder.store(allocation == 0, SeqCst);
-        let items: Vec<_> = session.generate("abc", 4, CancellationToken::new()).unwrap().collect().await;
+        let items: Vec<_> = session
+            .generate("abc", 4, CancellationToken::new())
+            .unwrap()
+            .collect()
+            .await;
         assert!(items.last().unwrap().is_err(), "allocation {allocation}");
         assert_eq!(budget.used(), weights, "allocation {allocation}");
         let lease = crate::session::prefix::PromptLease::reserve(session.prefix.clone());
@@ -251,11 +334,24 @@ async fn budget_keeps_idle_prefix_kv_charged_but_not_workspace() {
     assert_eq!(budget.used(), weights + kv_bytes(&session, 6));
     session.backend.reset();
     assert_eq!(generate(&session, "abc", 4).await, expected);
-    assert_eq!(session.backend.kv_bytes.load(SeqCst), 0, "KV lease must not be charged twice");
-    assert_eq!(session.backend.allocations.load(SeqCst), 13, "exact prefix needs decode workspace only");
+    assert_eq!(
+        session.backend.kv_bytes.load(SeqCst),
+        0,
+        "KV lease must not be charged twice"
+    );
+    assert_eq!(
+        session.backend.allocations.load(SeqCst),
+        13,
+        "exact prefix needs decode workspace only"
+    );
     assert_eq!(budget.used(), weights + kv_bytes(&session, 6));
     // A failed larger admission returns the old prefix without freeing its charge.
-    assert_matches!(session.generate("abcdefgh", 4, CancellationToken::new()).map(|_| ()), Err(Error::MemoryBudget { .. }));
+    assert_matches!(
+        session
+            .generate("abcdefgh", 4, CancellationToken::new())
+            .map(|_| ()),
+        Err(Error::MemoryBudget { .. })
+    );
     assert_eq!(budget.used(), weights + kv_bytes(&session, 6));
     session.clear_prefix_cache();
     assert_eq!(budget.used(), weights);
@@ -266,7 +362,14 @@ async fn budget_precancelled_request_needs_no_spare_bytes() {
     let (session, budget, weights) = budget_session(0);
     let cancel = CancellationToken::new();
     cancel.cancel();
-    assert!(session.generate("abc", 4, cancel).unwrap().collect::<Vec<_>>().await.is_empty());
+    assert!(
+        session
+            .generate("abc", 4, cancel)
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .is_empty()
+    );
     assert_eq!(session.backend.allocations.load(SeqCst), 0);
     assert_eq!(budget.used(), weights);
 }
@@ -276,11 +379,21 @@ fn budget_is_shared_while_queued_and_refunded_after_disconnect_cleanup() {
     use rama::graceful::Shutdown;
     use std::time::Duration;
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
     rt.block_on(async {
         let peak = request_bytes(3, 4);
         let (session, budget, weights) = budget_session(peak);
-        let other = Session::new(session.backend.clone(), session.model.clone(), session.tokenizer.clone(), session.sampler_config.clone(), 64);
+        let other = Session::new(
+            session.backend.clone(),
+            session.model.clone(),
+            session.tokenizer.clone(),
+            session.sampler_config.clone(),
+            64,
+        );
         let trigger = CancellationToken::new();
         let shutdown = Shutdown::new(trigger.clone().cancelled_owned());
         let (release, wait) = std::sync::mpsc::channel();
@@ -290,16 +403,35 @@ fn budget_is_shared_while_queued_and_refunded_after_disconnect_cleanup() {
             wait.recv_timeout(Duration::from_secs(5)).unwrap();
         });
         ready.recv_timeout(Duration::from_secs(5)).unwrap();
-        let stream = session.generate_guarded("abc", 4, CancellationToken::new(), Some(shutdown.guard_weak().upgrade())).unwrap();
+        let stream = session
+            .generate_guarded(
+                "abc",
+                4,
+                CancellationToken::new(),
+                Some(shutdown.guard_weak().upgrade()),
+            )
+            .unwrap();
         assert_eq!(budget.used(), weights + peak);
-        assert_matches!(other.generate("abc", 4, CancellationToken::new()).map(|_| ()), Err(Error::MemoryBudget { .. }));
+        assert_matches!(
+            other
+                .generate("abc", 4, CancellationToken::new())
+                .map(|_| ()),
+            Err(Error::MemoryBudget { .. })
+        );
         assert_eq!(session.backend.allocations.load(SeqCst), 0);
         drop(stream);
-        assert_eq!(budget.used(), weights + peak, "disconnect cannot refund memory still owned by a worker");
+        assert_eq!(
+            budget.used(),
+            weights + peak,
+            "disconnect cannot refund memory still owned by a worker"
+        );
         release.send(()).unwrap();
         blocker.await.unwrap();
         trigger.cancel();
-        shutdown.shutdown_with_limit(Duration::from_secs(2)).await.unwrap();
+        shutdown
+            .shutdown_with_limit(Duration::from_secs(2))
+            .await
+            .unwrap();
         assert_eq!(budget.used(), weights);
         assert_eq!(session.backend.allocations.load(SeqCst), 0);
         assert_eq!(generate(&other, "abc", 4).await.len(), 4);
@@ -308,8 +440,12 @@ fn budget_is_shared_while_queued_and_refunded_after_disconnect_cleanup() {
 }
 
 async fn generate(session: &Session<CountingBackend>, prompt: &str, max_tokens: usize) -> Vec<u32> {
-    session.generate(prompt, max_tokens, CancellationToken::new()).unwrap()
-        .map(|token| token.unwrap().token_id).collect().await
+    session
+        .generate(prompt, max_tokens, CancellationToken::new())
+        .unwrap()
+        .map(|token| token.unwrap().token_id)
+        .collect()
+        .await
 }
 
 #[tokio::test]
@@ -333,17 +469,24 @@ async fn generation_forwards_only_tokens_needed_for_the_next_sample() {
     assert_eq!(session.backend.allocations.load(SeqCst), 2 + 13 + 13);
     let embeds = session.backend.embeds.lock().unwrap();
     assert_eq!(embeds[0], [97, 98, 99]);
-    assert_eq!(embeds[1..], ids[..3].iter().map(|&id| vec![id]).collect::<Vec<_>>());
+    assert_eq!(
+        embeds[1..],
+        ids[..3].iter().map(|&id| vec![id]).collect::<Vec<_>>()
+    );
 
     let cpu = CpuBackend;
     let model = crate::model::tests::tiny_model(&cpu);
     let mut kv = model.new_kv_cache(&cpu, 64).unwrap();
     let mut prefill = model.alloc_workspace(&cpu, 3).unwrap();
     let mut ws = model.alloc_workspace(&cpu, 1).unwrap();
-    let mut logits = model.prefill(&cpu, &mut kv, &mut prefill, &[97, 98, 99], 0).unwrap();
+    let mut logits = model
+        .prefill(&cpu, &mut kv, &mut prefill, &[97, 98, 99], 0)
+        .unwrap();
     for (step, &id) in ids.iter().enumerate() {
         assert_eq!(id, crate::sampler::greedy(&logits));
-        logits = model.forward(&cpu, &mut kv, &mut ws, id, 3 + step as u32).unwrap();
+        logits = model
+            .forward(&cpu, &mut kv, &mut ws, id, 3 + step as u32)
+            .unwrap();
     }
 }
 
@@ -364,10 +507,21 @@ async fn zero_output_warms_prefix_without_a_decoder() {
 async fn context_limits_reject_invalid_prompts_before_allocation_and_cap_output() {
     let session = tiny_session(6);
     for (prompt, output) in [("", 1), ("abcdefg", 0), ("abcdef", 1)] {
-        assert!(session.generate(prompt, output, CancellationToken::new()).is_err());
+        assert!(
+            session
+                .generate(prompt, output, CancellationToken::new())
+                .is_err()
+        );
     }
-    assert_matches!(session.generate("abcdefg", 0, CancellationToken::new()).map(|_| ()),
-        Err(Error::ContextLimit { prompt_tokens: 7, n_ctx: 6 }));
+    assert_matches!(
+        session
+            .generate("abcdefg", 0, CancellationToken::new())
+            .map(|_| ()),
+        Err(Error::ContextLimit {
+            prompt_tokens: 7,
+            n_ctx: 6
+        })
+    );
     assert_eq!(session.backend.allocations.load(SeqCst), 0);
     assert_eq!(generate(&session, "abcd", usize::MAX).await.len(), 2);
     assert_eq!(session.backend.kv_bytes.load(SeqCst), kv_bytes(&session, 5));
@@ -382,7 +536,10 @@ async fn context_limits_reject_invalid_prompts_before_allocation_and_cap_output(
 async fn model_context_bounds_large_session_limit_without_overflow() {
     let session = tiny_session(usize::MAX);
     assert_eq!(generate(&session, "abc", usize::MAX).await.len(), 61);
-    assert_eq!(session.backend.kv_bytes.load(SeqCst), kv_bytes(&session, 63));
+    assert_eq!(
+        session.backend.kv_bytes.load(SeqCst),
+        kv_bytes(&session, 63)
+    );
 }
 
 #[tokio::test]
@@ -408,7 +565,14 @@ async fn precancelled_requests_allocate_nothing() {
     let session = tiny_session(64);
     let cancel = CancellationToken::new();
     cancel.cancel();
-    assert!(session.generate("abc", 4, cancel).unwrap().collect::<Vec<_>>().await.is_empty());
+    assert!(
+        session
+            .generate("abc", 4, cancel)
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+            .is_empty()
+    );
     assert_eq!(session.backend.allocations.load(SeqCst), 0);
 }
 
@@ -417,7 +581,11 @@ fn allocation_waits_for_worker_and_queued_disconnect_skips_it() {
     use rama::graceful::Shutdown;
     use std::time::Duration;
 
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(1).build().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
     rt.block_on(async {
         for disconnect in [false, true] {
             let session = tiny_session(64);
@@ -430,7 +598,12 @@ fn allocation_waits_for_worker_and_queued_disconnect_skips_it() {
                 wait.recv().unwrap();
             });
             ready.recv().unwrap();
-            let mut stream = Some(session.generate_guarded("abc", 4, CancellationToken::new(), Some(shutdown.guard_weak().upgrade())));
+            let mut stream = Some(session.generate_guarded(
+                "abc",
+                4,
+                CancellationToken::new(),
+                Some(shutdown.guard_weak().upgrade()),
+            ));
             let before_release = session.backend.allocations.load(SeqCst);
             if disconnect {
                 drop(stream.take());
@@ -441,7 +614,10 @@ fn allocation_waits_for_worker_and_queued_disconnect_skips_it() {
                 assert_eq!(stream.unwrap().collect::<Vec<_>>().await.len(), 4);
             }
             trigger.cancel();
-            shutdown.shutdown_with_limit(Duration::from_secs(2)).await.unwrap();
+            shutdown
+                .shutdown_with_limit(Duration::from_secs(2))
+                .await
+                .unwrap();
             assert_eq!(before_release, 0, "no allocation on the async caller");
             assert_eq!(session.backend.allocations.load(SeqCst) == 0, disconnect);
         }
@@ -452,12 +628,20 @@ fn allocation_waits_for_worker_and_queued_disconnect_skips_it() {
 async fn worker_failures_are_streamed_and_do_not_retain_a_prefix() {
     let session = tiny_session(64).with_prefix_reuse();
     session.backend.fail_allocation.store(true, SeqCst);
-    let items: Vec<_> = session.generate("abc", 4, CancellationToken::new()).unwrap().collect().await;
+    let items: Vec<_> = session
+        .generate("abc", 4, CancellationToken::new())
+        .unwrap()
+        .collect()
+        .await;
     assert_eq!(items.len(), 1);
     assert_matches!(items[0].as_ref().map(|_| ()), Err(Error::Backend(message)) if message == "injected allocation failure");
     session.backend.fail_allocation.store(false, SeqCst);
     session.backend.fail_decoder.store(true, SeqCst);
-    let items: Vec<_> = session.generate("abc", 4, CancellationToken::new()).unwrap().collect().await;
+    let items: Vec<_> = session
+        .generate("abc", 4, CancellationToken::new())
+        .unwrap()
+        .collect()
+        .await;
     assert_eq!(items.len(), 2);
     assert!(items[0].is_ok());
     assert_matches!(items[1].as_ref().map(|_| ()), Err(Error::Backend(message)) if message == "injected decoder failure");
@@ -470,8 +654,10 @@ async fn concurrent_requests_keep_independent_kv_and_match_serial_output() {
     let session = tiny_session(64).with_prefix_reuse();
     let expected = generate(&session, "abc", 4).await;
     let (a, b, c, d) = tokio::join!(
-        generate(&session, "abc", 4), generate(&session, "abc", 4),
-        generate(&session, "abc", 4), generate(&session, "abc", 4),
+        generate(&session, "abc", 4),
+        generate(&session, "abc", 4),
+        generate(&session, "abc", 4),
+        generate(&session, "abc", 4),
     );
     for ids in <[_; 4]>::from((a, b, c, d)) {
         assert_eq!(ids, expected);

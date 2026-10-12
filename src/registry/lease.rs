@@ -86,12 +86,28 @@ pub(crate) fn ttl(requested: Option<Duration>) -> Duration {
 impl Table {
     /// A new lease, or the holder's existing one on the same model renewed.
     /// The flag says whether the lease is new.
-    pub(super) fn take(&self, holder: Holder, model: String, slot: usize, requested: Option<Duration>) -> Result<(Lease, bool), LeaseError> {
+    pub(super) fn take(
+        &self,
+        holder: Holder,
+        model: String,
+        slot: usize,
+        requested: Option<Duration>,
+    ) -> Result<(Lease, bool), LeaseError> {
         let ttl = ttl(requested);
         let mut leases = self.leases.lock().expect("lease table lock poisoned");
-        if let Some((id, held)) = leases.iter_mut().find(|(_, held)| held.holder == holder && held.slot == slot) {
+        if let Some((id, held)) = leases
+            .iter_mut()
+            .find(|(_, held)| held.holder == holder && held.slot == slot)
+        {
             held.expires = Instant::now() + ttl;
-            return Ok((Lease { id: id.clone(), model: held.model.clone(), ttl }, false));
+            return Ok((
+                Lease {
+                    id: id.clone(),
+                    model: held.model.clone(),
+                    ttl,
+                },
+                false,
+            ));
         }
         let mine = leases.values().filter(|held| held.holder == holder).count();
         if mine >= holder.cap() {
@@ -101,21 +117,45 @@ impl Table {
             return Err(LeaseError::Full(leases.len()));
         }
         let id = new_id();
-        leases.insert(id.clone(), Held { holder, model: model.clone(), slot, expires: Instant::now() + ttl });
+        leases.insert(
+            id.clone(),
+            Held {
+                holder,
+                model: model.clone(),
+                slot,
+                expires: Instant::now() + ttl,
+            },
+        );
         Ok((Lease { id, model, ttl }, true))
     }
 
-    pub(super) fn renew(&self, holder: &Holder, id: &str, requested: Option<Duration>) -> Result<Lease, LeaseError> {
+    pub(super) fn renew(
+        &self,
+        holder: &Holder,
+        id: &str,
+        requested: Option<Duration>,
+    ) -> Result<Lease, LeaseError> {
         let ttl = ttl(requested);
         let mut leases = self.leases.lock().expect("lease table lock poisoned");
-        let held = leases.get_mut(id).filter(|held| held.holder == *holder).ok_or(LeaseError::Unknown)?;
+        let held = leases
+            .get_mut(id)
+            .filter(|held| held.holder == *holder)
+            .ok_or(LeaseError::Unknown)?;
         held.expires = Instant::now() + ttl;
-        Ok(Lease { id: id.to_owned(), model: held.model.clone(), ttl })
+        Ok(Lease {
+            id: id.to_owned(),
+            model: held.model.clone(),
+            ttl,
+        })
     }
 
     pub(super) fn model(&self, holder: &Holder, id: &str) -> Result<String, LeaseError> {
         let leases = self.leases.lock().expect("lease table lock poisoned");
-        leases.get(id).filter(|held| held.holder == *holder).map(|held| held.model.clone()).ok_or(LeaseError::Unknown)
+        leases
+            .get(id)
+            .filter(|held| held.holder == *holder)
+            .map(|held| held.model.clone())
+            .ok_or(LeaseError::Unknown)
     }
 
     /// The released lease's slot.

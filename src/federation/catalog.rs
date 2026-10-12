@@ -91,8 +91,14 @@ impl Kind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limits {
-    Synthesize { n_ctx: u32, max_output_tokens: u32 },
-    Decide { max_questions: u32, max_result_bytes: u32 },
+    Synthesize {
+        n_ctx: u32,
+        max_output_tokens: u32,
+    },
+    Decide {
+        max_questions: u32,
+        max_result_bytes: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -122,7 +128,10 @@ pub enum Error {
     #[error("catalog type must be \"mdma.catalog.v1\"")]
     WrongType,
     #[error("origin {claimed:?} does not match authenticated peer {authenticated:?}")]
-    OriginMismatch { claimed: String, authenticated: String },
+    OriginMismatch {
+        claimed: String,
+        authenticated: String,
+    },
     #[error("destination {0:?} does not match local identity")]
     DestinationMismatch(String),
     #[error("nonce does not match the outstanding poll challenge")]
@@ -160,14 +169,22 @@ pub struct ModelDescriptor {
 impl ModelDescriptor {
     /// The same model and limits, whether or not it is loaded right now.
     pub fn same_selection(&self, other: &Self) -> bool {
-        *self == Self { resident: self.resident, ..other.clone() }
+        *self
+            == Self {
+                resident: self.resident,
+                ..other.clone()
+            }
     }
 
     pub fn validate(&self) -> Result<(), Error> {
         if self.model.is_empty() || self.model.len() > MAX_MODEL_NAME_BYTES {
             return Err(Error::InvalidField("model"));
         }
-        if !self.model.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) {
+        if !self
+            .model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
             return Err(Error::InvalidField("model"));
         }
         validate_digest(&self.artifact_id).map_err(|()| Error::InvalidField("artifact_id"))?;
@@ -185,12 +202,24 @@ impl ModelDescriptor {
             return Err(Error::InvalidField("capabilities"));
         }
         match (self.kind, &self.limits) {
-            (Kind::Gguf, Limits::Synthesize { n_ctx, max_output_tokens }) => {
+            (
+                Kind::Gguf,
+                Limits::Synthesize {
+                    n_ctx,
+                    max_output_tokens,
+                },
+            ) => {
                 if *n_ctx == 0 || *max_output_tokens == 0 || *max_output_tokens > *n_ctx {
                     return Err(Error::InvalidField("limits"));
                 }
             }
-            (Kind::Laya, Limits::Decide { max_questions, max_result_bytes }) => {
+            (
+                Kind::Laya,
+                Limits::Decide {
+                    max_questions,
+                    max_result_bytes,
+                },
+            ) => {
                 if *max_questions == 0 || *max_questions > MAX_DECIDE_QUESTIONS {
                     return Err(Error::InvalidField("limits"));
                 }
@@ -205,35 +234,72 @@ impl ModelDescriptor {
 
     pub(crate) fn to_canonical(&self) -> Value {
         let limits = match self.limits {
-            Limits::Synthesize { n_ctx, max_output_tokens } => BTreeMap::from([
+            Limits::Synthesize {
+                n_ctx,
+                max_output_tokens,
+            } => BTreeMap::from([
                 ("n_ctx".to_string(), Value::Integer(i64::from(n_ctx))),
-                ("max_output_tokens".to_string(), Value::Integer(i64::from(max_output_tokens))),
+                (
+                    "max_output_tokens".to_string(),
+                    Value::Integer(i64::from(max_output_tokens)),
+                ),
             ]),
-            Limits::Decide { max_questions, max_result_bytes } => BTreeMap::from([
-                ("max_questions".to_string(), Value::Integer(i64::from(max_questions))),
-                ("max_result_bytes".to_string(), Value::Integer(i64::from(max_result_bytes))),
+            Limits::Decide {
+                max_questions,
+                max_result_bytes,
+            } => BTreeMap::from([
+                (
+                    "max_questions".to_string(),
+                    Value::Integer(i64::from(max_questions)),
+                ),
+                (
+                    "max_result_bytes".to_string(),
+                    Value::Integer(i64::from(max_result_bytes)),
+                ),
             ]),
         };
         let fields: Vec<(String, Value)> = vec![
             ("model".into(), Value::String(self.model.clone())),
             ("kind".into(), Value::String(self.kind.as_str().into())),
-            ("artifact_id".into(), Value::String(self.artifact_id.clone())),
+            (
+                "artifact_id".into(),
+                Value::String(self.artifact_id.clone()),
+            ),
             ("profile_id".into(), Value::String(self.profile_id.clone())),
-            ("architecture".into(), Value::String(self.architecture.clone())),
+            (
+                "architecture".into(),
+                Value::String(self.architecture.clone()),
+            ),
             ("backend".into(), Value::String(self.backend.clone())),
-            ("operations".into(), Value::Array(vec![Value::String(self.kind.operation().into())])),
+            (
+                "operations".into(),
+                Value::Array(vec![Value::String(self.kind.operation().into())]),
+            ),
             ("ready".into(), Value::Bool(self.ready)),
-            ("max_input_bytes".into(), Value::Integer(i64::from(self.max_input_bytes))),
+            (
+                "max_input_bytes".into(),
+                Value::Integer(i64::from(self.max_input_bytes)),
+            ),
             ("limits".into(), Value::Object(limits)),
             ("class".into(), Value::String(self.class.as_str().into())),
-            ("capabilities".into(), Value::Array(self.capabilities.iter().map(|c| Value::String(c.as_str().into())).collect())),
+            (
+                "capabilities".into(),
+                Value::Array(
+                    self.capabilities
+                        .iter()
+                        .map(|c| Value::String(c.as_str().into()))
+                        .collect(),
+                ),
+            ),
             ("resident".into(), Value::Bool(self.resident)),
         ];
         Value::object(fields).expect("static field set has no duplicate keys")
     }
 
     pub(crate) fn from_canonical(value: &Value) -> Result<Self, Error> {
-        let obj = value.as_object().ok_or(Error::InvalidField("model descriptor"))?;
+        let obj = value
+            .as_object()
+            .ok_or(Error::InvalidField("model descriptor"))?;
         reject_unknown_fields(
             obj,
             &[
@@ -262,17 +328,29 @@ impl ModelDescriptor {
         let profile_id = field_str(obj, "profile_id")?;
         let architecture = field_str(obj, "architecture")?;
         let backend = field_str(obj, "backend")?;
-        let operations = obj.get("operations").and_then(Value::as_array).ok_or(Error::MissingField("operations"))?;
+        let operations = obj
+            .get("operations")
+            .and_then(Value::as_array)
+            .ok_or(Error::MissingField("operations"))?;
         if operations.len() != 1 || operations[0].as_str() != Some(kind.operation()) {
             return Err(Error::InvalidField("operations"));
         }
-        let ready = obj.get("ready").and_then(Value::as_bool).ok_or(Error::MissingField("ready"))?;
+        let ready = obj
+            .get("ready")
+            .and_then(Value::as_bool)
+            .ok_or(Error::MissingField("ready"))?;
         let max_input_bytes = field_u32(obj, "max_input_bytes")?;
-        let limits_obj = obj.get("limits").and_then(Value::as_object).ok_or(Error::MissingField("limits"))?;
+        let limits_obj = obj
+            .get("limits")
+            .and_then(Value::as_object)
+            .ok_or(Error::MissingField("limits"))?;
         let limits = match kind {
             Kind::Gguf => {
                 reject_unknown_fields(limits_obj, &["n_ctx", "max_output_tokens"])?;
-                Limits::Synthesize { n_ctx: field_u32(limits_obj, "n_ctx")?, max_output_tokens: field_u32(limits_obj, "max_output_tokens")? }
+                Limits::Synthesize {
+                    n_ctx: field_u32(limits_obj, "n_ctx")?,
+                    max_output_tokens: field_u32(limits_obj, "max_output_tokens")?,
+                }
             }
             Kind::Laya => {
                 reject_unknown_fields(limits_obj, &["max_questions", "max_result_bytes"])?;
@@ -283,12 +361,35 @@ impl ModelDescriptor {
             }
         };
         let class = Class::parse(&field_str(obj, "class")?).ok_or(Error::InvalidField("class"))?;
-        let capabilities = obj.get("capabilities").and_then(Value::as_array).ok_or(Error::MissingField("capabilities"))?
+        let capabilities = obj
+            .get("capabilities")
+            .and_then(Value::as_array)
+            .ok_or(Error::MissingField("capabilities"))?
             .iter()
-            .map(|c| c.as_str().and_then(Capability::parse).ok_or(Error::InvalidField("capabilities")))
+            .map(|c| {
+                c.as_str()
+                    .and_then(Capability::parse)
+                    .ok_or(Error::InvalidField("capabilities"))
+            })
             .collect::<Result<Vec<_>, _>>()?;
-        let resident = obj.get("resident").and_then(Value::as_bool).ok_or(Error::MissingField("resident"))?;
-        let descriptor = Self { model, kind, artifact_id, profile_id, architecture, backend, ready, max_input_bytes, limits, class, capabilities, resident };
+        let resident = obj
+            .get("resident")
+            .and_then(Value::as_bool)
+            .ok_or(Error::MissingField("resident"))?;
+        let descriptor = Self {
+            model,
+            kind,
+            artifact_id,
+            profile_id,
+            architecture,
+            backend,
+            ready,
+            max_input_bytes,
+            limits,
+            class,
+            capabilities,
+            resident,
+        };
         descriptor.validate()?;
         Ok(descriptor)
     }
@@ -301,22 +402,53 @@ fn host_to_canonical(host: &Host) -> Value {
         ("os_name".into(), Value::String(host.os_name.clone())),
         ("arch".into(), Value::String(host.arch.clone())),
         ("cpu".into(), Value::String(host.cpu.clone())),
-        ("memory_bytes".into(), Value::Integer(host.memory_bytes.cast_signed())),
+        (
+            "memory_bytes".into(),
+            Value::Integer(host.memory_bytes.cast_signed()),
+        ),
         ("device".into(), Value::String(host.device.clone())),
-        ("memory_available_bytes".into(), Value::Integer(host.memory_available_bytes.cast_signed())),
-        ("device_memory_bytes".into(), Value::Integer(host.device_memory_bytes.cast_signed())),
-        ("device_available_bytes".into(), Value::Integer(host.device_available_bytes.cast_signed())),
-        ("disk_bytes".into(), Value::Integer(host.disk_bytes.cast_signed())),
-        ("disk_available_bytes".into(), Value::Integer(host.disk_available_bytes.cast_signed())),
+        (
+            "memory_available_bytes".into(),
+            Value::Integer(host.memory_available_bytes.cast_signed()),
+        ),
+        (
+            "device_memory_bytes".into(),
+            Value::Integer(host.device_memory_bytes.cast_signed()),
+        ),
+        (
+            "device_available_bytes".into(),
+            Value::Integer(host.device_available_bytes.cast_signed()),
+        ),
+        (
+            "disk_bytes".into(),
+            Value::Integer(host.disk_bytes.cast_signed()),
+        ),
+        (
+            "disk_available_bytes".into(),
+            Value::Integer(host.disk_available_bytes.cast_signed()),
+        ),
     ];
     Value::object(fields).expect("static field set has no duplicate keys")
 }
 
 fn host_from_canonical(obj: &BTreeMap<String, Value>) -> Result<Host, Error> {
-    reject_unknown_fields(obj, &[
-        "name", "os", "os_name", "arch", "cpu", "memory_bytes", "device", "memory_available_bytes",
-        "device_memory_bytes", "device_available_bytes", "disk_bytes", "disk_available_bytes",
-    ])?;
+    reject_unknown_fields(
+        obj,
+        &[
+            "name",
+            "os",
+            "os_name",
+            "arch",
+            "cpu",
+            "memory_bytes",
+            "device",
+            "memory_available_bytes",
+            "device_memory_bytes",
+            "device_available_bytes",
+            "disk_bytes",
+            "disk_available_bytes",
+        ],
+    )?;
     Ok(Host {
         name: field_str(obj, "name")?,
         os: field_str(obj, "os")?,
@@ -335,7 +467,11 @@ fn host_from_canonical(obj: &BTreeMap<String, Value>) -> Result<Host, Error> {
 
 fn validate_digest(s: &str) -> Result<(), ()> {
     let hex = s.strip_prefix("sha256:").ok_or(())?;
-    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return Err(());
     }
     Ok(())
@@ -351,16 +487,25 @@ fn reject_unknown_fields(obj: &BTreeMap<String, Value>, expected: &[&str]) -> Re
 }
 
 fn field_str(obj: &BTreeMap<String, Value>, name: &'static str) -> Result<String, Error> {
-    obj.get(name).and_then(Value::as_str).map(str::to_string).ok_or(Error::MissingField(name))
+    obj.get(name)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or(Error::MissingField(name))
 }
 
 fn field_u32(obj: &BTreeMap<String, Value>, name: &'static str) -> Result<u32, Error> {
-    let n = obj.get(name).and_then(Value::as_integer).ok_or(Error::MissingField(name))?;
+    let n = obj
+        .get(name)
+        .and_then(Value::as_integer)
+        .ok_or(Error::MissingField(name))?;
     u32::try_from(n).map_err(|_| Error::InvalidField(name))
 }
 
 fn field_u64(obj: &BTreeMap<String, Value>, name: &'static str) -> Result<u64, Error> {
-    let n = obj.get(name).and_then(Value::as_integer).ok_or(Error::MissingField(name))?;
+    let n = obj
+        .get(name)
+        .and_then(Value::as_integer)
+        .ok_or(Error::MissingField(name))?;
     u64::try_from(n).map_err(|_| Error::InvalidField(name))
 }
 
@@ -388,7 +533,9 @@ impl CatalogBody {
         if self.nonce.len() != NONCE_BYTES {
             return Err(Error::InvalidField("nonce"));
         }
-        if self.expires_at_ms <= self.issued_at_ms || self.expires_at_ms - self.issued_at_ms > MAX_CATALOG_LIFETIME_MS {
+        if self.expires_at_ms <= self.issued_at_ms
+            || self.expires_at_ms - self.issued_at_ms > MAX_CATALOG_LIFETIME_MS
+        {
             return Err(Error::BadLifetime);
         }
         if self.models.len() > MAX_DESCRIPTORS {
@@ -414,12 +561,35 @@ impl CatalogBody {
         let fields: Vec<(String, Value)> = vec![
             ("type".into(), Value::String(CATALOG_TYPE.into())),
             ("origin".into(), Value::String(self.origin.clone())),
-            ("destination".into(), Value::String(self.destination.clone())),
-            ("nonce".into(), Value::String(URL_SAFE_NO_PAD.encode(&self.nonce))),
-            ("issued_at_ms".into(), Value::Integer(self.issued_at_ms.cast_signed())),
-            ("expires_at_ms".into(), Value::Integer(self.expires_at_ms.cast_signed())),
-            ("server_state".into(), Value::String(self.server_state.as_str().into())),
-            ("models".into(), Value::Array(self.models.iter().map(ModelDescriptor::to_canonical).collect())),
+            (
+                "destination".into(),
+                Value::String(self.destination.clone()),
+            ),
+            (
+                "nonce".into(),
+                Value::String(URL_SAFE_NO_PAD.encode(&self.nonce)),
+            ),
+            (
+                "issued_at_ms".into(),
+                Value::Integer(self.issued_at_ms.cast_signed()),
+            ),
+            (
+                "expires_at_ms".into(),
+                Value::Integer(self.expires_at_ms.cast_signed()),
+            ),
+            (
+                "server_state".into(),
+                Value::String(self.server_state.as_str().into()),
+            ),
+            (
+                "models".into(),
+                Value::Array(
+                    self.models
+                        .iter()
+                        .map(ModelDescriptor::to_canonical)
+                        .collect(),
+                ),
+            ),
             ("host".into(), host_to_canonical(&self.host)),
         ];
         Value::object(fields).expect("static field set has no duplicate keys")
@@ -427,20 +597,54 @@ impl CatalogBody {
 
     pub fn from_canonical(value: &Value) -> Result<Self, Error> {
         let obj = value.as_object().ok_or(Error::InvalidField("body"))?;
-        reject_unknown_fields(obj, &["type", "origin", "destination", "nonce", "issued_at_ms", "expires_at_ms", "server_state", "models", "host"])?;
+        reject_unknown_fields(
+            obj,
+            &[
+                "type",
+                "origin",
+                "destination",
+                "nonce",
+                "issued_at_ms",
+                "expires_at_ms",
+                "server_state",
+                "models",
+                "host",
+            ],
+        )?;
         if field_str(obj, "type")? != CATALOG_TYPE {
             return Err(Error::WrongType);
         }
         let origin = field_str(obj, "origin")?;
         let destination = field_str(obj, "destination")?;
-        let nonce = URL_SAFE_NO_PAD.decode(field_str(obj, "nonce")?).map_err(|_| Error::InvalidField("nonce"))?;
+        let nonce = URL_SAFE_NO_PAD
+            .decode(field_str(obj, "nonce")?)
+            .map_err(|_| Error::InvalidField("nonce"))?;
         let issued_at_ms = field_u64(obj, "issued_at_ms")?;
         let expires_at_ms = field_u64(obj, "expires_at_ms")?;
         let server_state = ServerState::parse(&field_str(obj, "server_state")?)?;
-        let models_v = obj.get("models").and_then(Value::as_array).ok_or(Error::MissingField("models"))?;
-        let models = models_v.iter().map(ModelDescriptor::from_canonical).collect::<Result<Vec<_>, _>>()?;
-        let host = host_from_canonical(obj.get("host").and_then(Value::as_object).ok_or(Error::MissingField("host"))?)?;
-        let body = Self { origin, destination, nonce, issued_at_ms, expires_at_ms, server_state, models, host };
+        let models_v = obj
+            .get("models")
+            .and_then(Value::as_array)
+            .ok_or(Error::MissingField("models"))?;
+        let models = models_v
+            .iter()
+            .map(ModelDescriptor::from_canonical)
+            .collect::<Result<Vec<_>, _>>()?;
+        let host = host_from_canonical(
+            obj.get("host")
+                .and_then(Value::as_object)
+                .ok_or(Error::MissingField("host"))?,
+        )?;
+        let body = Self {
+            origin,
+            destination,
+            nonce,
+            issued_at_ms,
+            expires_at_ms,
+            server_state,
+            models,
+            host,
+        };
         body.validate()?;
         Ok(body)
     }
@@ -471,7 +675,11 @@ pub struct VerifyContext<'a> {
 
 /// Signs `body` under `key_id`, producing the envelope a `ScanCapabilities`
 /// response carries.
-pub fn sign_catalog(body: &CatalogBody, key_id: &str, key_pair: &KeyPairHandle) -> Result<SignedCatalogEnvelope, Error> {
+pub fn sign_catalog(
+    body: &CatalogBody,
+    key_id: &str,
+    key_pair: &KeyPairHandle,
+) -> Result<SignedCatalogEnvelope, Error> {
     body.validate()?;
     signing::validate_key_id(key_id).map_err(Error::KeyId)?;
     let value = body.to_canonical();
@@ -480,14 +688,22 @@ pub fn sign_catalog(body: &CatalogBody, key_id: &str, key_pair: &KeyPairHandle) 
         return Err(Error::BodyTooLarge(body_json.len()));
     }
     let signature = signing::sign(key_pair, &value, key_id);
-    Ok(SignedCatalogEnvelope { key_id: key_id.to_string(), body_json, signature })
+    Ok(SignedCatalogEnvelope {
+        key_id: key_id.to_string(),
+        body_json,
+        signature,
+    })
 }
 
 /// Verifies `envelope` end to end: size bound, canonical re-encoding,
 /// signature, origin/destination/nonce match, timestamp and key-validity
 /// windows, and body/descriptor schema. Returns the verified body on
 /// success.
-pub fn verify_signed_catalog(envelope: &SignedCatalogEnvelope, public_key: &[u8; 32], ctx: &VerifyContext) -> Result<CatalogBody, Error> {
+pub fn verify_signed_catalog(
+    envelope: &SignedCatalogEnvelope,
+    public_key: &[u8; 32],
+    ctx: &VerifyContext,
+) -> Result<CatalogBody, Error> {
     if envelope.body_json.len() > MAX_BODY_JSON_BYTES {
         return Err(Error::BodyTooLarge(envelope.body_json.len()));
     }
@@ -496,10 +712,14 @@ pub fn verify_signed_catalog(envelope: &SignedCatalogEnvelope, public_key: &[u8;
     if value.encode().into_bytes() != envelope.body_json {
         return Err(Error::NotCanonical);
     }
-    signing::verify(public_key, &value, &envelope.key_id, &envelope.signature).map_err(|_| Error::BadSignature)?;
+    signing::verify(public_key, &value, &envelope.key_id, &envelope.signature)
+        .map_err(|_| Error::BadSignature)?;
     let body = CatalogBody::from_canonical(&value)?;
     if body.origin != ctx.expected_origin {
-        return Err(Error::OriginMismatch { claimed: body.origin, authenticated: ctx.expected_origin.to_string() });
+        return Err(Error::OriginMismatch {
+            claimed: body.origin,
+            authenticated: ctx.expected_origin.to_string(),
+        });
     }
     if body.destination != ctx.expected_destination {
         return Err(Error::DestinationMismatch(body.destination));
@@ -528,5 +748,7 @@ pub fn verify_signed_catalog(envelope: &SignedCatalogEnvelope, public_key: &[u8;
 /// key's local validity window. Subsequent wall-clock adjustments cannot
 /// extend it.
 pub fn effective_expiry_ms(body: &CatalogBody, ctx: &VerifyContext) -> u64 {
-    body.expires_at_ms.min(ctx.now_ms.saturating_add(MAX_CATALOG_LIFETIME_MS)).min(ctx.key_valid_until_ms)
+    body.expires_at_ms
+        .min(ctx.now_ms.saturating_add(MAX_CATALOG_LIFETIME_MS))
+        .min(ctx.key_valid_until_ms)
 }

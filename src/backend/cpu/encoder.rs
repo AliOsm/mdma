@@ -4,7 +4,13 @@
 use super::softmax_inplace;
 use crate::backend::{EncoderSpec, Result, shape};
 
-pub(super) fn layernorm(w: &[f32], b: Option<&[f32]>, x: &[f32], y: &mut [f32], eps: f32) -> Result<()> {
+pub(super) fn layernorm(
+    w: &[f32],
+    b: Option<&[f32]>,
+    x: &[f32],
+    y: &mut [f32],
+    eps: f32,
+) -> Result<()> {
     let dim = w.len();
     shape::layernorm(dim, b.map(<[f32]>::len), x.len(), y.len())?;
     for (row, out) in x.chunks_exact(dim).zip(y.chunks_exact_mut(dim)) {
@@ -32,7 +38,9 @@ pub(super) fn add_bias(b: &[f32], y: &mut [f32]) -> Result<()> {
 pub(super) fn gelu_scalar(x: f32) -> f32 {
     let z = f64::from(x) / std::f64::consts::SQRT_2;
     let t = 1.0 / (1.0 + 0.3275911 * z.abs());
-    let poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    let poly = t
+        * (0.254829592
+            + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
     let erf = (1.0 - poly * (-z * z).exp()).copysign(z);
     (0.5 * f64::from(x) * (1.0 + erf)) as f32
 }
@@ -59,7 +67,9 @@ pub(super) fn gelu_mul(a: &[f32], gate: &[f32], y: &mut [f32]) -> Result<()> {
 pub(super) fn rope_neox(buf: &mut [f32], spec: &EncoderSpec, theta: f32) {
     let row = spec.n_heads * spec.head_dim;
     let half = spec.head_dim / 2;
-    let inv_freq: Vec<f32> = (0..half).map(|i| theta.powf(-((2 * i) as f32) / spec.head_dim as f32)).collect();
+    let inv_freq: Vec<f32> = (0..half)
+        .map(|i| theta.powf(-((2 * i) as f32) / spec.head_dim as f32))
+        .collect();
     for (r, token) in buf.chunks_exact_mut(row).enumerate() {
         let pos = (r % spec.seq_len) as f32;
         for head in token.chunks_exact_mut(spec.head_dim) {
@@ -73,7 +83,14 @@ pub(super) fn rope_neox(buf: &mut [f32], spec: &EncoderSpec, theta: f32) {
     }
 }
 
-pub(super) fn attn_bidir(q: &[f32], k: &[f32], v: &[f32], lens: &[u32], spec: &EncoderSpec, o: &mut [f32]) -> Result<()> {
+pub(super) fn attn_bidir(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    lens: &[u32],
+    spec: &EncoderSpec,
+    o: &mut [f32],
+) -> Result<()> {
     shape::attn_bidir(spec, lens, q.len(), k.len(), v.len(), o.len())?;
     let row = spec.n_heads * spec.head_dim;
     let per_seq = row * spec.seq_len;
@@ -93,7 +110,12 @@ pub(super) fn attn_bidir(q: &[f32], k: &[f32], v: &[f32], lens: &[u32], spec: &E
                 let q_vec = &q[at(i)..at(i) + spec.head_dim];
                 let scores = &mut scores[lo..hi];
                 for (t, s) in (lo..hi).zip(scores.iter_mut()) {
-                    *s = q_vec.iter().zip(&k[at(t)..at(t) + spec.head_dim]).map(|(a, b)| a * b).sum::<f32>() * scale;
+                    *s = q_vec
+                        .iter()
+                        .zip(&k[at(t)..at(t) + spec.head_dim])
+                        .map(|(a, b)| a * b)
+                        .sum::<f32>()
+                        * scale;
                 }
                 softmax_inplace(scores);
                 let o_vec = &mut o[at(i)..at(i) + spec.head_dim];

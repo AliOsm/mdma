@@ -201,7 +201,11 @@ where
         if cancelled() {
             return Ok(WorkerEnd::Cancelled);
         }
-        let state = self.lease.state.as_mut().expect("allocate populated the prompt state");
+        let state = self
+            .lease
+            .state
+            .as_mut()
+            .expect("allocate populated the prompt state");
         let (logits, _) = state.prefill_reserved(
             &*self.backend,
             &self.model,

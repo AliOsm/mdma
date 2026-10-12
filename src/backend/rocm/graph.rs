@@ -1,8 +1,11 @@
-use super::{ATT_DECODE_HEAD_DIM, ATT_DECODE_MAX_KV, DeviceMemory, HipBackend, Q8Scratch, Q8_1_BLOCK, Result, Stream, hip_err};
+use super::{
+    ATT_DECODE_HEAD_DIM, ATT_DECODE_MAX_KV, DeviceMemory, HipBackend, Q8_1_BLOCK, Q8Scratch,
+    Result, Stream, hip_err,
+};
 use crate::kv_cache::KvCache;
+use crate::memory::{product, sum};
 use crate::model::decoder::{Decoder, EagerDecoder};
 use crate::model::{Model, Workspace};
-use crate::memory::{product, sum};
 use rocm_rs::hip::bindings as hip;
 use std::ptr;
 
@@ -44,8 +47,16 @@ impl<'a> Capture<'a> {
         // borrows for 'a; its backend was just created in GraphState::capture, so no other
         // thread can use it. ThreadLocal mode confines capture restrictions to this thread.
         // A successful begin is paired with exactly one end, in finish() or Drop (`active`).
-        check(unsafe { hip::hipStreamBeginCapture(stream.as_raw(), hip::hipStreamCaptureMode_hipStreamCaptureModeThreadLocal) })?;
-        Ok(Self { stream, active: true })
+        check(unsafe {
+            hip::hipStreamBeginCapture(
+                stream.as_raw(),
+                hip::hipStreamCaptureMode_hipStreamCaptureModeThreadLocal,
+            )
+        })?;
+        Ok(Self {
+            stream,
+            active: true,
+        })
     }
 
     fn finish(mut self) -> Result<Graph> {
@@ -97,19 +108,35 @@ struct GraphState {
 }
 
 impl GraphState {
-    fn capture(eager: &HipBackend, model: &Model<HipBackend>, kv: &mut KvCache<HipBackend>, ws: &mut Workspace<HipBackend>) -> Result<Self> {
+    fn capture(
+        eager: &HipBackend,
+        model: &Model<HipBackend>,
+        kv: &mut KvCache<HipBackend>,
+        ws: &mut Workspace<HipBackend>,
+    ) -> Result<Self> {
         model.validate_decode(kv, ws, 0, 0)?;
         let mut backend = HipBackend::new()?;
         backend.buffers = eager.buffers.clone();
         backend.profile_owner = false;
         backend.health = eager.health.clone();
-        backend.replay = Some(ReplayParams { mem: DeviceMemory::new(2, &backend.buffers)?, capacity: kv.capacity() });
+        backend.replay = Some(ReplayParams {
+            mem: DeviceMemory::new(2, &backend.buffers)?,
+            capacity: kv.capacity(),
+        });
         let width = model.config().n_embd.max(model.config().n_ff);
-        let cap = sum([width, product(&[width.div_ceil(Q8_1_BLOCK as usize), size_of::<[f32; 2]>()])?])?;
+        let cap = sum([
+            width,
+            product(&[width.div_ceil(Q8_1_BLOCK as usize), size_of::<[f32; 2]>()])?,
+        ])?;
         *backend.q8_scratch.get_mut().unwrap() = Q8Scratch {
-            mem: Some(DeviceMemory::new(cap, &backend.buffers)?), cap, cached: None,
+            mem: Some(DeviceMemory::new(cap, &backend.buffers)?),
+            cap,
+            cached: None,
         };
-        backend.reserve_attn_scratch(HipBackend::attn_partials_bytes(model.config().n_heads, kv.capacity())?, model.config().n_kv_heads)?;
+        backend.reserve_attn_scratch(
+            HipBackend::attn_partials_bytes(model.config().n_heads, kv.capacity())?,
+            model.config().n_kv_heads,
+        )?;
         // Finish any previous prefill/default-stream writes before capture/replay.
         rocm_rs::hip::device_synchronize().map_err(hip_err)?;
         let saved_len = kv.len();
@@ -125,8 +152,19 @@ impl GraphState {
         // from here on; the error-node and log outputs are optional (null, size 0). The
         // captured kernels embed raw pointers to model/kv/ws buffers and to this backend's
         // module, params and pre-reserved scratch, which forward() must keep alive.
-        check(unsafe { hip::hipGraphInstantiate(&mut executable.0, graph.0, ptr::null_mut(), ptr::null_mut(), 0) })?;
-        Ok(Self { executable, backend })
+        check(unsafe {
+            hip::hipGraphInstantiate(
+                &mut executable.0,
+                graph.0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+            )
+        })?;
+        Ok(Self {
+            executable,
+            backend,
+        })
     }
 }
 
@@ -159,7 +197,9 @@ impl Decoder for HipDecoder<'_> {
         check(unsafe {
             hip::hipMemcpyAsync(
                 backend.replay.as_ref().unwrap().mem.as_ptr(),
-                params.as_ptr().cast(), size_of_val(&params), hip::hipMemcpyKind_hipMemcpyHostToDevice,
+                params.as_ptr().cast(),
+                size_of_val(&params),
+                hip::hipMemcpyKind_hipMemcpyHostToDevice,
                 stream.as_raw(),
             )
         })?;
@@ -169,8 +209,9 @@ impl Decoder for HipDecoder<'_> {
         // reserved before capture and never regrown (growth starts with hipDeviceSynchronize, which HIP rejects
         // during capture). Device-side indexing by params is bounded by validate_decode and the capacity checks
         // rope_kv_write/kv_write ran at capture time.
-        let result = check(unsafe { hip::hipGraphLaunch(self.state.executable.0, stream.as_raw()) })
-            .and_then(|()| self.model.download_logits(backend, self.ws));
+        let result =
+            check(unsafe { hip::hipGraphLaunch(self.state.executable.0, stream.as_raw()) })
+                .and_then(|()| self.model.download_logits(backend, self.ws));
         if result.is_err() {
             let _ = backend.health.check(stream.synchronize().map_err(hip_err));
         }
@@ -185,19 +226,39 @@ impl Decoder for HipDecoder<'_> {
 }
 
 pub(super) fn decoder<'a>(
-    backend: &'a HipBackend, model: &'a Model<HipBackend>,
-    kv: &'a mut KvCache<HipBackend>, ws: &'a mut Workspace<HipBackend>,
+    backend: &'a HipBackend,
+    model: &'a Model<HipBackend>,
+    kv: &'a mut KvCache<HipBackend>,
+    ws: &'a mut Workspace<HipBackend>,
 ) -> Result<Box<dyn Decoder + 'a>> {
     // Fixed head dimension and bounded LDS are the initially validated path.
     let enabled = backend.graphs_enabled;
-    if enabled && model.supports_graph_decode() && !backend.f32_compute && model.config().head_dim == ATT_DECODE_HEAD_DIM
-        && (1..=ATT_DECODE_MAX_KV).contains(&kv.capacity()) {
+    if enabled
+        && model.supports_graph_decode()
+        && !backend.f32_compute
+        && model.config().head_dim == ATT_DECODE_HEAD_DIM
+        && (1..=ATT_DECODE_MAX_KV).contains(&kv.capacity())
+    {
         match GraphState::capture(backend, model, kv, ws) {
-            Ok(state) => return Ok(Box::new(HipDecoder { state, model, kv, ws })),
-            Err(error) => eprintln!("mdma: HIP graph capture unavailable, using eager decode: {error}"),
+            Ok(state) => {
+                return Ok(Box::new(HipDecoder {
+                    state,
+                    model,
+                    kv,
+                    ws,
+                }));
+            }
+            Err(error) => {
+                eprintln!("mdma: HIP graph capture unavailable, using eager decode: {error}")
+            }
         }
     }
-    Ok(Box::new(EagerDecoder { backend, model, kv, ws }))
+    Ok(Box::new(EagerDecoder {
+        backend,
+        model,
+        kv,
+        ws,
+    }))
 }
 
 #[cfg(test)]

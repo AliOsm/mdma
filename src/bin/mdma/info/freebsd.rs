@@ -55,11 +55,16 @@ pub(super) fn collect(dmi_file: Option<&Path>) -> io::Result<Report> {
     }
     let mut accelerators = pci::coral(&text);
     for accelerator in &mut accelerators {
-        let unit = accelerator.device_node.as_deref().and_then(|node| node.strip_prefix("/dev/apex"));
+        let unit = accelerator
+            .device_node
+            .as_deref()
+            .and_then(|node| node.strip_prefix("/dev/apex"));
         match unit {
             Some(unit) => {
                 let name = format!("dev.apex.{unit}.temperature");
-                accelerator.temperature_c = sysctls(&[&name]).get(&name).and_then(|value| celsius(value));
+                accelerator.temperature_c = sysctls(&[&name])
+                    .get(&name)
+                    .and_then(|value| celsius(value));
             }
             None => warnings.push(format!(
                 "Coral PCIe device {} has no apex driver attached; load the apex kernel module.",
@@ -90,7 +95,12 @@ pub(super) fn collect(dmi_file: Option<&Path>) -> io::Result<Report> {
 
 /// The apex driver reports temperature as a sysctl string such as `69.5C`.
 fn celsius(value: &str) -> Option<f64> {
-    value.trim().strip_suffix('C')?.parse::<f64>().ok().filter(|c| c.is_finite())
+    value
+        .trim()
+        .strip_suffix('C')?
+        .parse::<f64>()
+        .ok()
+        .filter(|c| c.is_finite())
 }
 
 fn number(values: &BTreeMap<String, String>, key: &str) -> Option<u64> {

@@ -40,12 +40,19 @@ impl AgentConfig {
     pub fn from_json(text: &str) -> Result<Self> {
         let raw: serde_json::Value = serde_json::from_str(text)?;
         if raw.get("encoder").is_none() || raw.get("head_layers").is_none() {
-            return Err(Error::Config("Laya config must specify encoder and head_layers".into()));
+            return Err(Error::Config(
+                "Laya config must specify encoder and head_layers".into(),
+            ));
         }
         let cfg: Self = serde_json::from_value(raw)?;
-        let temps = cfg.temperature.iter().chain(cfg.temperature_by_options.values());
+        let temps = cfg
+            .temperature
+            .iter()
+            .chain(cfg.temperature_by_options.values());
         if temps.into_iter().any(|t| !t.is_finite() || *t <= 0.0) {
-            return Err(Error::Config("calibration temperatures must be finite and positive".into()));
+            return Err(Error::Config(
+                "calibration temperatures must be finite and positive".into(),
+            ));
         }
         Ok(cfg)
     }
@@ -63,9 +70,16 @@ pub struct Checkpoint {
 impl Checkpoint {
     /// Reads and cross-validates both configs of a checkpoint directory.
     pub fn open(dir: &Path) -> Result<Self> {
-        for name in ["model.safetensors", "rl_agent_config.json", "encoder/config.json"] {
+        for name in [
+            "model.safetensors",
+            "rl_agent_config.json",
+            "encoder/config.json",
+        ] {
             if !dir.join(name).is_file() {
-                return Err(Error::Checkpoint(format!("not a complete Laya checkpoint: {} is missing", dir.join(name).display())));
+                return Err(Error::Checkpoint(format!(
+                    "not a complete Laya checkpoint: {} is missing",
+                    dir.join(name).display()
+                )));
             }
         }
         Self::from_sources(
@@ -77,8 +91,13 @@ impl Checkpoint {
     pub(super) fn from_sources(agent: &str, encoder: &str) -> Result<Self> {
         let agent = AgentConfig::from_json(agent)?;
         let encoder = EncoderConfig::from_json(encoder)?;
-        if !(4 < agent.head_max_len && agent.head_max_len < agent.max_len && agent.max_len <= encoder.max_position_embeddings) {
-            return Err(Error::Config("expected 4 < head_max_len < max_len <= max_position_embeddings".into()));
+        if !(4 < agent.head_max_len
+            && agent.head_max_len < agent.max_len
+            && agent.max_len <= encoder.max_position_embeddings)
+        {
+            return Err(Error::Config(
+                "expected 4 < head_max_len < max_len <= max_position_embeddings".into(),
+            ));
         }
         Ok(Self { encoder, agent })
     }

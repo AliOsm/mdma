@@ -37,16 +37,27 @@ impl ChatFormat {
             ("[INST]", false, ChatFormat::Inst),
         ];
         let template = template?;
-        if let Some(&(marker, token, format)) = MARKERS.iter().find(|(marker, ..)| template.contains(marker)) {
+        if let Some(&(marker, token, format)) = MARKERS
+            .iter()
+            .find(|(marker, ..)| template.contains(marker))
+        {
             return (!token || known(marker)).then_some(format);
         }
-        let zephyr = template.contains("<|user|>") && template.contains("<|assistant|>") && !template.contains("[gMASK]");
+        let zephyr = template.contains("<|user|>")
+            && template.contains("<|assistant|>")
+            && !template.contains("[gMASK]");
         zephyr.then_some(Self::Zephyr)
     }
 
     /// (system turn open/close if the format has a system role, user turn
     /// open/close, start of the assistant's reply).
-    const fn turns(self) -> (Option<(&'static str, &'static str)>, (&'static str, &'static str), &'static str) {
+    const fn turns(
+        self,
+    ) -> (
+        Option<(&'static str, &'static str)>,
+        (&'static str, &'static str),
+        &'static str,
+    ) {
         match self {
             Self::ChatMl => (
                 Some(("<|im_start|>system\n", "<|im_end|>\n")),
@@ -54,12 +65,23 @@ impl ChatFormat {
                 "<|im_start|>assistant\n",
             ),
             Self::Llama3 => (
-                Some(("<|start_header_id|>system<|end_header_id|>\n\n", "<|eot_id|>")),
+                Some((
+                    "<|start_header_id|>system<|end_header_id|>\n\n",
+                    "<|eot_id|>",
+                )),
                 ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
                 "<|start_header_id|>assistant<|end_header_id|>\n\n",
             ),
-            Self::Zephyr => (Some(("<|system|>\n", "</s>\n")), ("<|user|>\n", "</s>\n"), "<|assistant|>\n"),
-            Self::Gemma => (None, ("<start_of_turn>user\n", "<end_of_turn>\n"), "<start_of_turn>model\n"),
+            Self::Zephyr => (
+                Some(("<|system|>\n", "</s>\n")),
+                ("<|user|>\n", "</s>\n"),
+                "<|assistant|>\n",
+            ),
+            Self::Gemma => (
+                None,
+                ("<start_of_turn>user\n", "<end_of_turn>\n"),
+                "<start_of_turn>model\n",
+            ),
             Self::Gemma4 => (None, ("<|turn>user\n", "<turn|>\n"), "<|turn>model\n"),
             Self::Inst => (None, ("[INST] ", " [/INST]"), ""),
         }
@@ -74,7 +96,9 @@ impl ChatFormat {
     pub fn conversation(self, system: Option<&str>, text: &str) -> String {
         let (system_turn, (open, close), reply) = self.turns();
         match (system, system_turn) {
-            (Some(system), Some((s_open, s_close))) => format!("{s_open}{system}{s_close}{open}{text}{close}{reply}"),
+            (Some(system), Some((s_open, s_close))) => {
+                format!("{s_open}{system}{s_close}{open}{text}{close}{reply}")
+            }
             (Some(system), None) => format!("{open}{system}\n\n{text}{close}{reply}"),
             (None, _) => format!("{open}{text}{close}{reply}"),
         }

@@ -42,10 +42,20 @@ pub enum Direction {
 /// What the program's descriptors will ask the host interface to move, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hint {
-    Instruction { chunk: usize },
-    Dma { direction: Direction, desc: Description, name: Option<String>, offset: usize, size: usize },
+    Instruction {
+        chunk: usize,
+    },
+    Dma {
+        direction: Direction,
+        desc: Description,
+        name: Option<String>,
+        offset: usize,
+        size: usize,
+    },
     /// Scalar-core interrupt 0..=3; 0 is the completion interrupt.
-    Interrupt { id: u8 },
+    Interrupt {
+        id: u8,
+    },
     Fence,
 }
 
@@ -89,9 +99,13 @@ pub struct Executable {
 }
 
 impl Executable {
-    pub fn input(&self, name: &str) -> Option<&Layer> { self.inputs.iter().find(|layer| layer.name == name) }
+    pub fn input(&self, name: &str) -> Option<&Layer> {
+        self.inputs.iter().find(|layer| layer.name == name)
+    }
 
-    pub fn output(&self, name: &str) -> Option<&Layer> { self.outputs.iter().find(|layer| layer.name == name) }
+    pub fn output(&self, name: &str) -> Option<&Layer> {
+        self.outputs.iter().find(|layer| layer.name == name)
+    }
 
     /// Checks what the runtime relies on: whole instruction words, hints that point
     /// at existing chunks and inside their layers, relocations inside the bitstream
@@ -106,32 +120,62 @@ impl Executable {
         }
         for (i, chunk) in self.bitstreams.iter().enumerate() {
             if chunk.data.is_empty() || chunk.data.len() % WORD_BYTES != 0 {
-                return Err(fail(format!("bitstream {i} has {} bytes, not a whole number of {WORD_BYTES}-byte words", chunk.data.len())));
+                return Err(fail(format!(
+                    "bitstream {i} has {} bytes, not a whole number of {WORD_BYTES}-byte words",
+                    chunk.data.len()
+                )));
             }
             for reloc in &chunk.relocs {
-                let end = reloc.offset_bit.checked_add(32).ok_or_else(|| fail(format!("bitstream {i}: relocation bit offset overflows")))?;
+                let end = reloc.offset_bit.checked_add(32).ok_or_else(|| {
+                    fail(format!("bitstream {i}: relocation bit offset overflows"))
+                })?;
                 if end > chunk.data.len() * 8 {
-                    return Err(fail(format!("bitstream {i}: relocation at bit {} is outside {} bytes", reloc.offset_bit, chunk.data.len())));
+                    return Err(fail(format!(
+                        "bitstream {i}: relocation at bit {} is outside {} bytes",
+                        reloc.offset_bit,
+                        chunk.data.len()
+                    )));
                 }
                 if reloc.batch >= self.batch_size {
-                    return Err(fail(format!("bitstream {i}: relocation batch {} of {}", reloc.batch, self.batch_size)));
+                    return Err(fail(format!(
+                        "bitstream {i}: relocation batch {} of {}",
+                        reloc.batch, self.batch_size
+                    )));
                 }
-                self.check_layer(reloc.desc, reloc.name.as_deref()).map_err(|what| fail(format!("bitstream {i}: relocation {what}")))?;
+                self.check_layer(reloc.desc, reloc.name.as_deref())
+                    .map_err(|what| fail(format!("bitstream {i}: relocation {what}")))?;
             }
         }
         for (i, hint) in self.hints.iter().enumerate() {
             match hint {
                 Hint::Instruction { chunk } if *chunk >= self.bitstreams.len() => {
-                    return Err(fail(format!("hint {i} names instruction chunk {chunk} of {}", self.bitstreams.len())));
+                    return Err(fail(format!(
+                        "hint {i} names instruction chunk {chunk} of {}",
+                        self.bitstreams.len()
+                    )));
                 }
-                Hint::Dma { desc, name, offset, size, .. } => {
-                    let layer_size = self.check_layer(*desc, name.as_deref()).map_err(|what| fail(format!("hint {i}: {what}")))?;
-                    let end = offset.checked_add(*size).ok_or_else(|| fail(format!("hint {i}: DMA extent overflows")))?;
+                Hint::Dma {
+                    desc,
+                    name,
+                    offset,
+                    size,
+                    ..
+                } => {
+                    let layer_size = self
+                        .check_layer(*desc, name.as_deref())
+                        .map_err(|what| fail(format!("hint {i}: {what}")))?;
+                    let end = offset
+                        .checked_add(*size)
+                        .ok_or_else(|| fail(format!("hint {i}: DMA extent overflows")))?;
                     if *size == 0 || end > layer_size {
-                        return Err(fail(format!("hint {i}: DMA of {size} bytes at {offset} is outside the {layer_size}-byte {desc:?}")));
+                        return Err(fail(format!(
+                            "hint {i}: DMA of {size} bytes at {offset} is outside the {layer_size}-byte {desc:?}"
+                        )));
                     }
                 }
-                Hint::Interrupt { id } if *id >= INTERRUPTS => return Err(fail(format!("hint {i}: interrupt {id} of {INTERRUPTS}"))),
+                Hint::Interrupt { id } if *id >= INTERRUPTS => {
+                    return Err(fail(format!("hint {i}: interrupt {id} of {INTERRUPTS}")));
+                }
                 _ => {}
             }
         }
@@ -139,18 +183,32 @@ impl Executable {
     }
 
     /// The byte size of the buffer a relocation or hint refers to.
-    fn check_layer(&self, desc: Description, name: Option<&str>) -> std::result::Result<usize, String> {
+    fn check_layer(
+        &self,
+        desc: Description,
+        name: Option<&str>,
+    ) -> std::result::Result<usize, String> {
         match (desc, name) {
-            (Description::InputActivation, Some(name)) => {
-                self.input(name).map(|layer| layer.size_bytes).ok_or_else(|| format!("names unknown input {name:?}"))
-            }
-            (Description::OutputActivation, Some(name)) => {
-                self.output(name).map(|layer| layer.size_bytes).ok_or_else(|| format!("names unknown output {name:?}"))
-            }
+            (Description::InputActivation, Some(name)) => self
+                .input(name)
+                .map(|layer| layer.size_bytes)
+                .ok_or_else(|| format!("names unknown input {name:?}")),
+            (Description::OutputActivation, Some(name)) => self
+                .output(name)
+                .map(|layer| layer.size_bytes)
+                .ok_or_else(|| format!("names unknown output {name:?}")),
             // A program that does not carry its parameters gets them from the runtime, which checks the extent then.
-            (Description::Parameter, None) => Ok(if self.parameters.is_empty() { usize::MAX } else { self.parameters.len() }),
+            (Description::Parameter, None) => Ok(if self.parameters.is_empty() {
+                usize::MAX
+            } else {
+                self.parameters.len()
+            }),
             (Description::Scratch, None) => {
-                if self.scratch_size == 0 { Err("refers to scratch memory this program does not declare".into()) } else { Ok(self.scratch_size) }
+                if self.scratch_size == 0 {
+                    Err("refers to scratch memory this program does not declare".into())
+                } else {
+                    Ok(self.scratch_size)
+                }
             }
             (desc, Some(name)) => Err(format!("{desc:?} must not carry a name ({name:?})")),
             (desc, None) => Err(format!("{desc:?} needs a layer name")),

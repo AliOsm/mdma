@@ -90,8 +90,14 @@ fn test_gpu(device: &str, health: gpu::Health) -> gpu::Gpu {
 #[test]
 fn gpu_device_modes_and_kernel_identity_are_in_the_canonical_digest() {
     let executor = fake_executor();
-    let first = ExecutionProfile::gpu(executor.clone(), test_gpu("device-a", gpu::Health::default()));
-    let second = ExecutionProfile::gpu(executor.clone(), test_gpu("device-b", gpu::Health::default()));
+    let first = ExecutionProfile::gpu(
+        executor.clone(),
+        test_gpu("device-a", gpu::Health::default()),
+    );
+    let second = ExecutionProfile::gpu(
+        executor.clone(),
+        test_gpu("device-b", gpu::Health::default()),
+    );
     assert_ne!(first.as_str(), second.as_str());
     let mut changed = test_gpu("device-a", gpu::Health::default());
     let Value::Object(ref mut modes) = changed.modes else {

@@ -134,5 +134,12 @@ where
     B: Backend + Send + Sync + 'static,
     B::Buf: Send + Sync,
 {
-    launch_inner(prepared, claim, cancel, guard, (), std::sync::Arc::new(|| true))
+    launch_inner(
+        prepared,
+        claim,
+        cancel,
+        guard,
+        (),
+        std::sync::Arc::new(|| true),
+    )
 }

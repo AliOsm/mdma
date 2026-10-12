@@ -2,12 +2,12 @@
 //!
 //! Callers select the device, rounding mode and tolerance.
 
-pub(crate) mod encoder;
+#[cfg(any(feature = "rocm", feature = "vulkan", feature = "cuda"))]
+mod decoder_attention;
 mod decoder_ops;
 #[cfg(any(feature = "rocm", feature = "vulkan", feature = "cuda"))]
 mod decoder_weights;
-#[cfg(any(feature = "rocm", feature = "vulkan", feature = "cuda"))]
-mod decoder_attention;
+pub(crate) mod encoder;
 pub(crate) mod generation;
 pub(crate) mod graph;
 pub(crate) mod parity;
@@ -20,18 +20,42 @@ use crate::gguf::{GgmlDType, GgufModel};
 pub(crate) struct NoUpload;
 impl Backend for NoUpload {
     type Buf = CpuBuf;
-    fn supports(&self, op: Operation) -> bool { CpuBackend.supports(op) }
-    fn alloc(&self, _: usize, _: Pool) -> Result<CpuBuf> { panic!("allocated before rejection") }
-    fn upload(&self, _: &mut CpuBuf, _: usize, _: &[u8]) -> Result<()> { panic!("uploaded before rejection") }
-    fn download(&self, _: &CpuBuf, _: usize, _: &mut [u8]) -> Result<()> { unreachable!() }
-    fn copy(&self, _: &CpuBuf, _: usize, _: &mut CpuBuf, _: usize, _: usize) -> Result<()> { unreachable!() }
-    fn qmatmul(&self, _: &QWeight<CpuBuf>, _: &CpuBuf, _: &mut CpuBuf) -> Result<()> { unreachable!() }
-    fn embed(&self, _: &QWeight<CpuBuf>, _: &[u32], _: &mut CpuBuf) -> Result<()> { unreachable!() }
-    fn rmsnorm(&self, _: &CpuBuf, _: &CpuBuf, _: &mut CpuBuf, _: f32) -> Result<()> { unreachable!() }
-    fn add(&self, _: &CpuBuf, _: &CpuBuf, _: &mut CpuBuf) -> Result<()> { unreachable!() }
-    fn rope(&self, _: &mut CpuBuf, _: &mut CpuBuf, _: u32, _: usize, _: &RopeSpec) -> Result<()> { unreachable!() }
-    fn attn(&self, _: &CpuBuf, _: &KvView<CpuBuf>, _: &AttnSpec, _: &mut CpuBuf) -> Result<()> { unreachable!() }
-    fn silu_mul(&self, _: &CpuBuf, _: &CpuBuf, _: &mut CpuBuf) -> Result<()> { unreachable!() }
+    fn supports(&self, op: Operation) -> bool {
+        CpuBackend.supports(op)
+    }
+    fn alloc(&self, _: usize, _: Pool) -> Result<CpuBuf> {
+        panic!("allocated before rejection")
+    }
+    fn upload(&self, _: &mut CpuBuf, _: usize, _: &[u8]) -> Result<()> {
+        panic!("uploaded before rejection")
+    }
+    fn download(&self, _: &CpuBuf, _: usize, _: &mut [u8]) -> Result<()> {
+        unreachable!()
+    }
+    fn copy(&self, _: &CpuBuf, _: usize, _: &mut CpuBuf, _: usize, _: usize) -> Result<()> {
+        unreachable!()
+    }
+    fn qmatmul(&self, _: &QWeight<CpuBuf>, _: &CpuBuf, _: &mut CpuBuf) -> Result<()> {
+        unreachable!()
+    }
+    fn embed(&self, _: &QWeight<CpuBuf>, _: &[u32], _: &mut CpuBuf) -> Result<()> {
+        unreachable!()
+    }
+    fn rmsnorm(&self, _: &CpuBuf, _: &CpuBuf, _: &mut CpuBuf, _: f32) -> Result<()> {
+        unreachable!()
+    }
+    fn add(&self, _: &CpuBuf, _: &CpuBuf, _: &mut CpuBuf) -> Result<()> {
+        unreachable!()
+    }
+    fn rope(&self, _: &mut CpuBuf, _: &mut CpuBuf, _: u32, _: usize, _: &RopeSpec) -> Result<()> {
+        unreachable!()
+    }
+    fn attn(&self, _: &CpuBuf, _: &KvView<CpuBuf>, _: &AttnSpec, _: &mut CpuBuf) -> Result<()> {
+        unreachable!()
+    }
+    fn silu_mul(&self, _: &CpuBuf, _: &CpuBuf, _: &mut CpuBuf) -> Result<()> {
+        unreachable!()
+    }
 }
 
 /// Path to the optional Bespoke-MiniCheck-7B-Q4_K_M model.
@@ -71,7 +95,10 @@ pub(crate) fn f16_round(v: &[f32]) -> Vec<f32> {
 /// Upload little-endian halves to the KV pool. Callers must explicitly
 /// round their CPU reference and use this only for f16-cache scenarios.
 pub(crate) fn upload_f16_kv<B: Backend>(backend: &B, values: &[f32]) -> B::Buf {
-    let bytes: Vec<u8> = values.iter().flat_map(|&x| half::f16::from_f32(x).to_le_bytes()).collect();
+    let bytes: Vec<u8> = values
+        .iter()
+        .flat_map(|&x| half::f16::from_f32(x).to_le_bytes())
+        .collect();
     let mut buf = backend.alloc(bytes.len(), Pool::Kv).unwrap();
     backend.upload(&mut buf, 0, &bytes).unwrap();
     buf
@@ -94,7 +121,11 @@ pub(crate) fn find_tensor(fixture: &std::path::Path, dtype: GgmlDType) -> (Strin
 
 pub(crate) fn cpu_qmatmul(dtype: GgmlDType, w: &[u8], shape: &[usize], x: &[f32]) -> Vec<f32> {
     let cpu = CpuBackend;
-    let w_cpu = QWeight { dtype, shape: shape.to_vec(), buf: CpuBuf(w.to_vec()) };
+    let w_cpu = QWeight {
+        dtype,
+        shape: shape.to_vec(),
+        buf: CpuBuf(w.to_vec()),
+    };
     let x_cpu = CpuBuf(bytes(x));
     let n_tokens = x.len() / shape[1];
     let mut y_cpu = cpu.alloc(n_tokens * shape[0] * 4, Pool::Scratch).unwrap();
@@ -103,11 +134,21 @@ pub(crate) fn cpu_qmatmul(dtype: GgmlDType, w: &[u8], shape: &[usize], x: &[f32]
 }
 
 /// Execute a matmul on the configured backend and read back its output.
-pub(crate) fn qmatmul<B: Backend>(gpu: &B, dtype: GgmlDType, w: &[u8], shape: &[usize], x: &[f32]) -> Vec<f32> {
+pub(crate) fn qmatmul<B: Backend>(
+    gpu: &B,
+    dtype: GgmlDType,
+    w: &[u8],
+    shape: &[usize],
+    x: &[f32],
+) -> Vec<f32> {
     let n_tokens = x.len() / shape[1];
     let mut w_buf = gpu.alloc(w.len(), Pool::Weights).unwrap();
     gpu.upload(&mut w_buf, 0, w).unwrap();
-    let w_gpu = QWeight { dtype, shape: shape.to_vec(), buf: w_buf };
+    let w_gpu = QWeight {
+        dtype,
+        shape: shape.to_vec(),
+        buf: w_buf,
+    };
     let mut x_buf = gpu.alloc(x.len() * 4, Pool::Scratch).unwrap();
     gpu.upload(&mut x_buf, 0, &bytes(x)).unwrap();
     let mut y_buf = gpu.alloc(n_tokens * shape[0] * 4, Pool::Scratch).unwrap();
@@ -118,8 +159,19 @@ pub(crate) fn qmatmul<B: Backend>(gpu: &B, dtype: GgmlDType, w: &[u8], shape: &[
 }
 
 /// A backend against the CPU oracle on the same weights and activations.
-pub(crate) fn qmatmul_matches_cpu<B: Backend>(gpu: &B, dtype: GgmlDType, w: &[u8], shape: &[usize], x: &[f32], tol: f32) {
-    close(&qmatmul(gpu, dtype, w, shape, x), &cpu_qmatmul(dtype, w, shape, x), tol);
+pub(crate) fn qmatmul_matches_cpu<B: Backend>(
+    gpu: &B,
+    dtype: GgmlDType,
+    w: &[u8],
+    shape: &[usize],
+    x: &[f32],
+    tol: f32,
+) {
+    close(
+        &qmatmul(gpu, dtype, w, shape, x),
+        &cpu_qmatmul(dtype, w, shape, x),
+        tol,
+    );
 }
 
 /// The first `max_rows` rows of the fixture's first `dtype` tensor with
@@ -127,7 +179,9 @@ pub(crate) fn qmatmul_matches_cpu<B: Backend>(gpu: &B, dtype: GgmlDType, w: &[u8
 #[allow(dead_code)]
 pub(crate) fn real_tensor_rows(dtype: GgmlDType, max_rows: usize) -> (Vec<u8>, Vec<usize>) {
     let (name, shape) = find_tensor(fixture(), dtype);
-    let &[n_out, n_in] = shape.as_slice() else { panic!("rank {shape:?}") };
+    let &[n_out, n_in] = shape.as_slice() else {
+        panic!("rank {shape:?}")
+    };
     let n_out = n_out.min(max_rows);
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let raw = gguf.read_tensor_bytes(&name).expect("read tensor");
@@ -138,7 +192,9 @@ pub(crate) fn real_tensor_rows(dtype: GgmlDType, max_rows: usize) -> (Vec<u8>, V
 /// One token of asymmetric activations in (-1, 1).
 #[allow(dead_code)]
 pub(crate) fn activation_row(n_in: usize) -> Vec<f32> {
-    (0..n_in).map(|i| ((i * 17 % 255) as f32 - 127.0) / 128.0).collect()
+    (0..n_in)
+        .map(|i| ((i * 17 % 255) as f32 - 127.0) / 128.0)
+        .collect()
 }
 
 /// 32 real rows of the fixture's `dtype` tensor, one token, against the CPU.
@@ -156,11 +212,17 @@ mod tests {
     fn conversions_preserve_values_and_f16_rounding() {
         let values = [1.0f32, -2.5, 0.0, -0.0, 0.3333];
         assert_eq!(
-            f32s(&bytes(&values)).iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            f32s(&bytes(&values))
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             values.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
         );
         // Adjacent halves around one, plus a negative value and signed zero.
-        assert_eq!(f16_round(&[1.0004, 1.0008, -2.0008]), [1.0, 1.0009766, -2.0]);
+        assert_eq!(
+            f16_round(&[1.0004, 1.0008, -2.0008]),
+            [1.0, 1.0009766, -2.0]
+        );
         assert_eq!(f16_round(&[-0.0])[0].to_bits(), (-0.0f32).to_bits());
     }
 
@@ -194,8 +256,14 @@ mod tests {
         let x = [2.0, -1.0, 0.5, -1.0, 2.0, 1.0];
         let expected = [5.5, 0.0, -2.0, 0.0];
         for tokens in [1, 2] {
-            assert_eq!(cpu_qmatmul(GgmlDType::F32, &w, &[2, 3], &x[..3 * tokens]), expected[..2 * tokens]);
-            assert_eq!(qmatmul(&CpuBackend, GgmlDType::F32, &w, &[2, 3], &x[..3 * tokens]), expected[..2 * tokens]);
+            assert_eq!(
+                cpu_qmatmul(GgmlDType::F32, &w, &[2, 3], &x[..3 * tokens]),
+                expected[..2 * tokens]
+            );
+            assert_eq!(
+                qmatmul(&CpuBackend, GgmlDType::F32, &w, &[2, 3], &x[..3 * tokens]),
+                expected[..2 * tokens]
+            );
         }
     }
 }

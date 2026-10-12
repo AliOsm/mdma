@@ -3,21 +3,22 @@ use super::proto::{
     DeviceMemory, FederationTopology, MemorySnapshot, MemoryUsage, ModelGeometry, ServerSnapshot,
     WatchRequest, WeightUpload,
 };
-use crate::federation::tls::ClientSpki;
-use rama::extensions::{Extensions, ExtensionsRef, Ingress as TransportIngress};
 use super::{MdmaService, MemoryDomain};
 use crate::backend::Backend;
+use crate::federation::tls::ClientSpki;
 use crate::model::Model;
 use crate::registry::{Kind, Phase};
+use rama::extensions::{Extensions, ExtensionsRef, Ingress as TransportIngress};
 use rama::http::grpc::{Request, Status};
 use std::pin::Pin;
 use std::time::Duration;
-use tokio::time::{Instant, MissedTickBehavior};
 use tokio::sync::mpsc;
+use tokio::time::{Instant, MissedTickBehavior};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
 
-pub(crate) type SnapshotStream = Pin<Box<dyn Stream<Item = Result<ServerSnapshot, Status>> + Send + Sync + 'static>>;
+pub(crate) type SnapshotStream =
+    Pin<Box<dyn Stream<Item = Result<ServerSnapshot, Status>> + Send + Sync + 'static>>;
 
 const DEFAULT_INTERVAL: Duration = Duration::from_secs(1);
 const MIN_INTERVAL_MS: u32 = 250;
@@ -28,7 +29,9 @@ pub(super) fn interval(requested_ms: u32) -> Duration {
     if requested_ms == 0 {
         return DEFAULT_INTERVAL;
     }
-    Duration::from_millis(u64::from(requested_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS)))
+    Duration::from_millis(u64::from(
+        requested_ms.clamp(MIN_INTERVAL_MS, MAX_INTERVAL_MS),
+    ))
 }
 
 fn saturating<T: TryInto<u32>>(n: T) -> u32 {
@@ -45,7 +48,12 @@ pub(super) fn geometry<B: Backend>(backend: &B, model: &Model<B>) -> Option<Mode
         n_kv_heads: saturating(config.n_kv_heads),
         head_dim: saturating(config.head_dim),
         kv_bytes_per_token: model.kv_bytes(backend, 1).ok()? as u64,
-        layer_kv_widths: model.kv_widths().ok()?.into_iter().map(saturating).collect(),
+        layer_kv_widths: model
+            .kv_widths()
+            .ok()?
+            .into_iter()
+            .map(saturating)
+            .collect(),
     })
 }
 
@@ -55,9 +63,18 @@ where
     B::Buf: Send + Sync,
 {
     pub(super) fn memory_snapshot(&self) -> MemorySnapshot {
-        let budget = self.memory.as_ref().map(crate::memory::NativeMemoryBudget::snapshot).unwrap_or_default();
+        let budget = self
+            .memory
+            .as_ref()
+            .map(crate::memory::NativeMemoryBudget::snapshot)
+            .unwrap_or_default();
         let buffers = self.backend.buffer_budget();
-        let usage = |domain| buffers.map(|b| MemoryUsage { used_bytes: b.used(domain) as u64, limit_bytes: b.limit(domain).unwrap_or(0) as u64 });
+        let usage = |domain| {
+            buffers.map(|b| MemoryUsage {
+                used_bytes: b.used(domain) as u64,
+                limit_bytes: b.limit(domain).unwrap_or(0) as u64,
+            })
+        };
         // Aliases share one loaded model.
         let mut uploads: Vec<(usize, WeightUpload)> = Vec::new();
         for entry in self.registry.entries() {
@@ -68,8 +85,11 @@ where
                 upload.models.push(entry.name.to_owned());
                 continue;
             }
-            let reserved = self.registry.resident(entry.name)
-                .and_then(|loaded| loaded.decoder().and_then(|decoder| decoder.model.weight_reservation_bytes()));
+            let reserved = self.registry.resident(entry.name).and_then(|loaded| {
+                loaded
+                    .decoder()
+                    .and_then(|decoder| decoder.model.weight_reservation_bytes())
+            });
             let upload = WeightUpload {
                 upload_id: saturating(uploads.len()),
                 bytes: reserved.map_or(entry.info.disk_bytes, |bytes| bytes as u64),
@@ -79,7 +99,11 @@ where
             uploads.push((entry.upload, upload));
         }
         MemorySnapshot {
-            limit_bytes: if budget.limit == usize::MAX { 0 } else { budget.limit as u64 },
+            limit_bytes: if budget.limit == usize::MAX {
+                0
+            } else {
+                budget.limit as u64
+            },
             used_bytes: budget.used as u64,
             weights_bytes: budget.weights as u64,
             kv_bytes: budget.kv as u64,
@@ -87,9 +111,17 @@ where
             device_buffers: usage(MemoryDomain::Device),
             host_buffers: usage(MemoryDomain::Host),
             device: Some(DeviceMemory {
-                name: self.backend.device_label().unwrap_or_else(|| self.backend_name.to_owned()),
+                name: self
+                    .backend
+                    .device_label()
+                    .unwrap_or_else(|| self.backend_name.to_owned()),
                 unified_memory: self.backend.unified_memory(),
-                available_bytes: self.backend.available_device_bytes().ok().flatten().map(|bytes| bytes as u64),
+                available_bytes: self
+                    .backend
+                    .available_device_bytes()
+                    .ok()
+                    .flatten()
+                    .map(|bytes| bytes as u64),
             }),
             weights: uploads.into_iter().map(|(_, upload)| upload).collect(),
             active_requests: saturating(self.active.load(std::sync::atomic::Ordering::Relaxed)),
@@ -98,13 +130,18 @@ where
 
     /// Topology for operator pins only.
     pub(super) fn federation<T>(&self, req: &Request<T>) -> FederationTopology {
-        let caller = req.extensions().get_ref::<TransportIngress<Extensions>>()
+        let caller = req
+            .extensions()
+            .get_ref::<TransportIngress<Extensions>>()
             .and_then(|ingress| ingress.get_ref::<ClientSpki>());
         if !caller.is_some_and(|spki| self.operators.contains(&spki.0)) {
             return FederationTopology::default();
         }
         self.topology.as_ref().map_or_else(
-            || FederationTopology { authorized: true, ..FederationTopology::default() },
+            || FederationTopology {
+                authorized: true,
+                ..FederationTopology::default()
+            },
             |topology| topology.snapshot(),
         )
     }
@@ -119,7 +156,10 @@ where
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
         let mut power = service.power.as_ref().map(|(rx, _)| rx.clone());
-        let mut trust = service.topology.as_ref().map(|topology| topology.subscribe());
+        let mut trust = service
+            .topology
+            .as_ref()
+            .map(|topology| topology.subscribe());
         let mut models = service.registry.subscribe();
         let shutdown = service.shutdown.clone();
         let mut ticker = tokio::time::interval(every);

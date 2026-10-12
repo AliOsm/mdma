@@ -8,7 +8,9 @@ pub const MAX_ITERATIONS: usize = 32;
 
 pub fn validate(bytes: usize, iterations: usize) -> Result<()> {
     if bytes == 0 || bytes > MAX_BYTES || iterations == 0 || iterations > MAX_ITERATIONS {
-        return Err(Error::ShapeMismatch("memory bench requires 1..=256 MiB bytes and 1..=32 iterations".into()));
+        return Err(Error::ShapeMismatch(
+            "memory bench requires 1..=256 MiB bytes and 1..=32 iterations".into(),
+        ));
     }
     Ok(())
 }
@@ -22,14 +24,27 @@ pub struct Measurement {
     pub payload_gb_per_second: f64,
 }
 
-fn measured(operation: &'static str, bytes: usize, iterations: usize,
-    work: impl FnOnce() -> Result<()>) -> Result<Measurement> {
+fn measured(
+    operation: &'static str,
+    bytes: usize,
+    iterations: usize,
+    work: impl FnOnce() -> Result<()>,
+) -> Result<Measurement> {
     let start = Instant::now();
     work()?;
     let seconds = start.elapsed().as_secs_f64();
-    if seconds == 0. { return Err(Error::Backend("timer resolution too low for benchmark".into())); }
-    Ok(Measurement { operation, bytes_per_copy: bytes, iterations, seconds,
-        payload_gb_per_second: bytes as f64 * iterations as f64 / seconds / 1e9 })
+    if seconds == 0. {
+        return Err(Error::Backend(
+            "timer resolution too low for benchmark".into(),
+        ));
+    }
+    Ok(Measurement {
+        operation,
+        bytes_per_copy: bytes,
+        iterations,
+        seconds,
+        payload_gb_per_second: bytes as f64 * iterations as f64 / seconds / 1e9,
+    })
 }
 
 fn source(bytes: usize) -> Vec<u8> {
@@ -37,7 +52,11 @@ fn source(bytes: usize) -> Vec<u8> {
 }
 
 fn verify(actual: &[u8], expected: &[u8]) -> Result<()> {
-    if actual != expected { return Err(Error::Backend("memory benchmark copy verification failed".into())); }
+    if actual != expected {
+        return Err(Error::Backend(
+            "memory benchmark copy verification failed".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -61,7 +80,9 @@ pub fn host(bytes: usize, iterations: usize) -> Result<Measurement> {
 pub fn device<B: Backend>(b: &B, bytes: usize, iterations: usize) -> Result<Vec<Measurement>> {
     validate(bytes, iterations)?;
     if !bytes.is_multiple_of(4) {
-        return Err(Error::ShapeMismatch("device benchmark requires four-byte aligned copy sizes".into()));
+        return Err(Error::ShapeMismatch(
+            "device benchmark requires four-byte aligned copy sizes".into(),
+        ));
     }
     let src = source(bytes);
     let mut dst = vec![0; bytes];
@@ -72,7 +93,9 @@ pub fn device<B: Backend>(b: &B, bytes: usize, iterations: usize) -> Result<Vec<
     b.upload(&mut a, 0, &src)?;
     fence(&a)?;
     let upload = measured("host_to_device", bytes, iterations, || {
-        for _ in 0..iterations { b.upload(&mut a, 0, &src)?; }
+        for _ in 0..iterations {
+            b.upload(&mut a, 0, &src)?;
+        }
         fence(&a)
     })?;
     b.download(&a, 0, &mut dst)?;
@@ -80,13 +103,17 @@ pub fn device<B: Backend>(b: &B, bytes: usize, iterations: usize) -> Result<Vec<
     b.copy(&a, 0, &mut c, 0, bytes)?;
     fence(&c)?;
     let copy = measured("device_copy", bytes, iterations, || {
-        for _ in 0..iterations { b.copy(&a, 0, &mut c, 0, bytes)?; }
+        for _ in 0..iterations {
+            b.copy(&a, 0, &mut c, 0, bytes)?;
+        }
         fence(&c)
     })?;
     b.download(&c, 0, &mut dst)?;
     verify(&dst, &src)?;
     let download = measured("device_to_host", bytes, iterations, || {
-        for _ in 0..iterations { b.download(&c, 0, &mut dst)?; }
+        for _ in 0..iterations {
+            b.download(&c, 0, &mut dst)?;
+        }
         Ok(())
     })?;
     verify(&dst, &src)?;

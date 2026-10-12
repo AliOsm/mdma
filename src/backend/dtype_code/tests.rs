@@ -3,9 +3,12 @@ use std::assert_matches;
 
 #[test]
 fn kernel_tags_and_superblock_sizes_are_stable() {
-    for (dtype, tag, bytes) in
-        [(GgmlDType::F32, 0, 0), (GgmlDType::F16, 1, 0), (GgmlDType::Q4K, 2, 144), (GgmlDType::Q6K, 3, 210)]
-    {
+    for (dtype, tag, bytes) in [
+        (GgmlDType::F32, 0, 0),
+        (GgmlDType::F16, 1, 0),
+        (GgmlDType::Q4K, 2, 144),
+        (GgmlDType::Q6K, 3, 210),
+    ] {
         assert_eq!(code(dtype).unwrap(), tag);
         assert_eq!(block_bytes(dtype), bytes);
         assert_eq!(is_kquant(tag), bytes != 0);
@@ -33,7 +36,10 @@ fn unsupported_formats_never_get_a_kernel_tag() {
 
 #[test]
 fn decoder_formats_do_not_change_legacy_capabilities() {
-    for (dtype, tag, quant, size) in [(GgmlDType::BF16, 4, false, 0), (GgmlDType::Q5K, 5, true, 176)] {
+    for (dtype, tag, quant, size) in [
+        (GgmlDType::BF16, 4, false, 0),
+        (GgmlDType::Q5K, 5, true, 176),
+    ] {
         assert!(code(dtype).is_err());
         assert_eq!(decoder_code(dtype).unwrap(), tag);
         assert_eq!(is_kquant(tag), quant);

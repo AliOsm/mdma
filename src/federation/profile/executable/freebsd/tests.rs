@@ -12,5 +12,8 @@ fn the_mapped_vnode_matches_the_opened_executable_only() {
     validate(&file).unwrap();
     let copy = tempfile::NamedTempFile::new().unwrap();
     std::fs::copy(std::env::current_exe().unwrap(), copy.path()).unwrap();
-    assert!(validate(copy.as_file()).is_err(), "same bytes, another file");
+    assert!(
+        validate(copy.as_file()).is_err(),
+        "same bytes, another file"
+    );
 }

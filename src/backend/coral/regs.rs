@@ -89,27 +89,57 @@ pub enum RunControl {
 }
 
 /// Every run-control register, scalar core first, then the tiles.
-pub const SCALAR_CORE_RUN_CONTROLS: [u64; 5] =
-    [SCALAR_CORE_RUN_CONTROL, AV_DATA_POP_RUN_CONTROL, PARAMETER_POP_RUN_CONTROL, INFEED_RUN_CONTROL, OUTFEED_RUN_CONTROL];
+pub const SCALAR_CORE_RUN_CONTROLS: [u64; 5] = [
+    SCALAR_CORE_RUN_CONTROL,
+    AV_DATA_POP_RUN_CONTROL,
+    PARAMETER_POP_RUN_CONTROL,
+    INFEED_RUN_CONTROL,
+    OUTFEED_RUN_CONTROL,
+];
 pub const TILE_RUN_CONTROLS: [u64; 10] = [
-    OP_RUN_CONTROL, NARROW_TO_WIDE_RUN_CONTROL, WIDE_TO_NARROW_RUN_CONTROL, MESH_BUS0_RUN_CONTROL, MESH_BUS1_RUN_CONTROL,
-    MESH_BUS2_RUN_CONTROL, MESH_BUS3_RUN_CONTROL, RING_BUS_CONSUMER0_RUN_CONTROL, RING_BUS_CONSUMER1_RUN_CONTROL,
+    OP_RUN_CONTROL,
+    NARROW_TO_WIDE_RUN_CONTROL,
+    WIDE_TO_NARROW_RUN_CONTROL,
+    MESH_BUS0_RUN_CONTROL,
+    MESH_BUS1_RUN_CONTROL,
+    MESH_BUS2_RUN_CONTROL,
+    MESH_BUS3_RUN_CONTROL,
+    RING_BUS_CONSUMER0_RUN_CONTROL,
+    RING_BUS_CONSUMER1_RUN_CONTROL,
     RING_BUS_PRODUCER_RUN_CONTROL,
 ];
 
 /// The 16-bit counter of scalar-core interrupt `id` in `SC_HOST_INT_COUNT`.
-pub fn sc_host_int_count(raw: u64, id: u64) -> u16 { (raw >> (16 * id)) as u16 }
+pub fn sc_host_int_count(raw: u64, id: u64) -> u16 {
+    (raw >> (16 * id)) as u16
+}
 
 /// The bits of `HIB_ERROR_STATUS`, as libedgetpu names them.
 pub const HIB_ERROR_BITS: [&str; 15] = [
-    "inbound_page_fault", "extended_page_fault", "csr_parity_error", "axi_slave_b_error", "axi_slave_r_error",
-    "instruction_queue_bad_configuration", "input_actv_queue_bad_configuration", "param_queue_bad_configuration",
-    "output_actv_queue_bad_configuration", "instruction_queue_invalid", "input_actv_queue_invalid", "param_queue_invalid",
-    "output_actv_queue_invalid", "length_0_dma", "virt_table_rdata_uncorr",
+    "inbound_page_fault",
+    "extended_page_fault",
+    "csr_parity_error",
+    "axi_slave_b_error",
+    "axi_slave_r_error",
+    "instruction_queue_bad_configuration",
+    "input_actv_queue_bad_configuration",
+    "param_queue_bad_configuration",
+    "output_actv_queue_bad_configuration",
+    "instruction_queue_invalid",
+    "input_actv_queue_invalid",
+    "param_queue_invalid",
+    "output_actv_queue_invalid",
+    "length_0_dma",
+    "virt_table_rdata_uncorr",
 ];
 
 pub fn hib_error_names(status: u64) -> String {
-    let names: Vec<&str> = HIB_ERROR_BITS.iter().enumerate().filter(|(bit, _)| status & (1 << bit) != 0).map(|(_, name)| *name).collect();
+    let names: Vec<&str> = HIB_ERROR_BITS
+        .iter()
+        .enumerate()
+        .filter(|(bit, _)| status & (1 << bit) != 0)
+        .map(|(_, name)| *name)
+        .collect();
     let unknown = status >> HIB_ERROR_BITS.len();
     match (names.is_empty(), unknown) {
         (true, 0) => "none".into(),

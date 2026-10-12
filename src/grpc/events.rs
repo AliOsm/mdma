@@ -24,10 +24,12 @@ pub(super) fn stream(admission: &Admission, running: Running, started: Instant) 
         n_ctx: saturating(admission.n_ctx),
     };
     Box::pin(stream_fn(move |mut yielder| async move {
-        yielder.yield_item(Ok(SynthesizeResponse {
-            accepted: Some(accepted),
-            ..SynthesizeResponse::default()
-        })).await;
+        yielder
+            .yield_item(Ok(SynthesizeResponse {
+                accepted: Some(accepted),
+                ..SynthesizeResponse::default()
+            }))
+            .await;
         let Running { mut tokens, worker } = running;
         let (mut first, mut last, mut emitted) = (None::<Instant>, started, 0_u32);
         while let Some(token) = tokens.next().await {
@@ -36,29 +38,49 @@ pub(super) fn stream(admission: &Admission, running: Running, started: Instant) 
             last = now;
             emitted += 1;
             let token = token.token();
-            yielder.yield_item(Ok(SynthesizeResponse { token_id: token.token_id, text: token.text.clone(), ..SynthesizeResponse::default() })).await;
+            yielder
+                .yield_item(Ok(SynthesizeResponse {
+                    token_id: token.token_id,
+                    text: token.text.clone(),
+                    ..SynthesizeResponse::default()
+                }))
+                .await;
         }
         let end = match worker.await {
             Ok(Ok(end)) => end,
             Ok(Err(error)) => return yielder.yield_item(Err(native_status(error))).await,
-            Err(_) => return yielder.yield_item(Err(Status::internal("generation worker failed"))).await,
+            Err(_) => {
+                return yielder
+                    .yield_item(Err(Status::internal("generation worker failed")))
+                    .await;
+            }
         };
         let completion = match end {
             WorkerEnd::Completed(completion) => completion,
-            WorkerEnd::Cancelled => return yielder.yield_item(Err(Status::cancelled("generation cancelled"))).await,
+            WorkerEnd::Cancelled => {
+                return yielder
+                    .yield_item(Err(Status::cancelled("generation cancelled")))
+                    .await;
+            }
         };
         if completion.emitted != emitted as usize {
-            return yielder.yield_item(Err(Status::internal("token stream and worker disagree on emitted tokens"))).await;
+            return yielder
+                .yield_item(Err(Status::internal(
+                    "token stream and worker disagree on emitted tokens",
+                )))
+                .await;
         }
         let first = first.unwrap_or_else(Instant::now);
-        yielder.yield_item(Ok(SynthesizeResponse {
-            completed: Some(SynthesizeCompleted {
-                emitted_tokens: emitted,
-                finish_reason: completion.reason.as_str().into(),
-                prefill_ms: millis(first.duration_since(started)),
-                decode_ms: millis(last.saturating_duration_since(first)),
-            }),
-            ..SynthesizeResponse::default()
-        })).await;
+        yielder
+            .yield_item(Ok(SynthesizeResponse {
+                completed: Some(SynthesizeCompleted {
+                    emitted_tokens: emitted,
+                    finish_reason: completion.reason.as_str().into(),
+                    prefill_ms: millis(first.duration_since(started)),
+                    decode_ms: millis(last.saturating_duration_since(first)),
+                }),
+                ..SynthesizeResponse::default()
+            }))
+            .await;
     }))
 }

@@ -1,6 +1,5 @@
 use super::super::{deadline, ingress::Receipt};
 use super::*;
-use std::assert_matches;
 use crate::{
     backend::cpu::CpuBackend,
     federation::{config::ExecuteExport, control::ExecutionEnvelope, tls::tests::Fixture},
@@ -10,6 +9,7 @@ use rama::{
     extensions::{Extensions, ExtensionsRef, Ingress},
     http::{HeaderMap, grpc::Code},
 };
+use std::assert_matches;
 
 fn setup() -> (
     Fixture,
@@ -31,8 +31,17 @@ fn setup_with_budget(
     let f = Fixture::new();
     let (binding, _) = f.bindings();
     let dir = crate::laya::compat_tests::checkpoint();
-    let options = Options { frozen: true, ..Options::new(32) };
-    let mut registry = Registry::new(Arc::new(CpuBackend), vec![("laya".into(), Source::Laya(dir.path().into()))], None, options).unwrap();
+    let options = Options {
+        frozen: true,
+        ..Options::new(32)
+    };
+    let mut registry = Registry::new(
+        Arc::new(CpuBackend),
+        vec![("laya".into(), Source::Laya(dir.path().into()))],
+        None,
+        options,
+    )
+    .unwrap();
     assert!(registry.preload().is_empty());
     registry.capture_execution_profiles().unwrap();
     let executor: Arc<dyn super::super::admission::Executor> =

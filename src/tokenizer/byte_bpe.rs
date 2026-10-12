@@ -1,8 +1,8 @@
 //! GGUF byte-level BPE using the established tokenizers implementation.
 use crate::gguf::GgufModel;
+use std::collections::BTreeMap;
 use tokenizers::SplitDelimiterBehavior;
 use tokenizers::models::bpe::{BpeConfig, PipelineBPE, Vocab};
-use std::collections::BTreeMap;
 use tokenizers::pipeline::{
     NormalizerChain, PipelineModel, PipelinePostProcessor, PipelinePreTokenizer, PipelineTokenizer,
 };

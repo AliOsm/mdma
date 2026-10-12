@@ -65,7 +65,10 @@ pub(super) fn known(value: &str) -> Option<String> {
     }
 }
 
-#[expect(clippy::cast_sign_loss, reason = "the value is checked finite and within 0..u64::MAX before the cast")]
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "the value is checked finite and within 0..u64::MAX before the cast"
+)]
 pub(super) fn capacity(value: &str) -> Option<u64> {
     let mut words = value.split_whitespace();
     let number = words.next()?;

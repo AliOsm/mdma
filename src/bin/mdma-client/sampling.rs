@@ -2,7 +2,9 @@ use mdma::grpc::SynthesizeSamplerConfig;
 use rama::error::BoxError;
 use std::env::VarError;
 
-pub(super) fn config(env: impl FnOnce(&str) -> Result<String, VarError>) -> Result<Option<SynthesizeSamplerConfig>, BoxError> {
+pub(super) fn config(
+    env: impl FnOnce(&str) -> Result<String, VarError>,
+) -> Result<Option<SynthesizeSamplerConfig>, BoxError> {
     match env("MDMA_GREEDY") {
         Err(VarError::NotPresent) => Ok(None),
         Ok(value) if value == "0" => Ok(None),

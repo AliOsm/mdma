@@ -17,21 +17,59 @@ pub const AV_BUF: i64 = 1 << 14;
 pub const PAR_BUF: i64 = 1 << 10;
 
 pub const TILE_COUNTERS: [&str; 19] = [
-    "AVDATA", "PARAMETERS", "PARTIAL_SUMS", "MESH_NORTH_IN", "MESH_EAST_IN", "MESH_SOUTH_IN", "MESH_WEST_IN", "MESH_NORTH_OUT",
-    "MESH_EAST_OUT", "MESH_SOUTH_OUT", "MESH_WEST_OUT", "WIDE_TO_NARROW", "WIDE_TO_SCALING", "NARROW_TO_WIDE", "RING_READ_A",
-    "RING_READ_B", "RING_WRITE", "RING_PRODUCER_A", "RING_PRODUCER_B",
+    "AVDATA",
+    "PARAMETERS",
+    "PARTIAL_SUMS",
+    "MESH_NORTH_IN",
+    "MESH_EAST_IN",
+    "MESH_SOUTH_IN",
+    "MESH_WEST_IN",
+    "MESH_NORTH_OUT",
+    "MESH_EAST_OUT",
+    "MESH_SOUTH_OUT",
+    "MESH_WEST_OUT",
+    "WIDE_TO_NARROW",
+    "WIDE_TO_SCALING",
+    "NARROW_TO_WIDE",
+    "RING_READ_A",
+    "RING_READ_B",
+    "RING_WRITE",
+    "RING_PRODUCER_A",
+    "RING_PRODUCER_B",
 ];
 pub const SCALAR_COUNTERS: [&str; 9] = [
-    "AVDATA_POP", "PARAMETER_POP", "AVDATA_INFEED", "PARAMETER_INFEED", "SCALAR_INFEED", "PRODUCER_A", "PRODUCER_B", "RING_OUTFEED",
+    "AVDATA_POP",
+    "PARAMETER_POP",
+    "AVDATA_INFEED",
+    "PARAMETER_INFEED",
+    "SCALAR_INFEED",
+    "PRODUCER_A",
+    "PRODUCER_B",
+    "RING_OUTFEED",
     "SCALAR_PIPELINE",
 ];
 
-pub fn tile_counter(name: &str) -> usize { TILE_COUNTERS.iter().position(|n| *n == name).unwrap_or_else(|| panic!("unknown tile counter {name}")) }
+pub fn tile_counter(name: &str) -> usize {
+    TILE_COUNTERS
+        .iter()
+        .position(|n| *n == name)
+        .unwrap_or_else(|| panic!("unknown tile counter {name}"))
+}
 
-pub fn tc(names: &[&str]) -> i64 { names.iter().map(|n| 1i64 << tile_counter(n)).sum() }
+pub fn tc(names: &[&str]) -> i64 {
+    names.iter().map(|n| 1i64 << tile_counter(n)).sum()
+}
 
 pub fn scm(names: &[&str]) -> i64 {
-    names.iter().map(|n| 1i64 << SCALAR_COUNTERS.iter().position(|c| c == n).unwrap_or_else(|| panic!("unknown scalar counter {n}"))).sum()
+    names
+        .iter()
+        .map(|n| {
+            1i64 << SCALAR_COUNTERS
+                .iter()
+                .position(|c| c == n)
+                .unwrap_or_else(|| panic!("unknown scalar counter {n}"))
+        })
+        .sum()
 }
 
 /// The counters of a mesh move (meshBus opcode): the receiving tile's IN side, the
@@ -47,59 +85,178 @@ pub fn mesh_counters(op: u8) -> (&'static str, &'static str) {
 }
 
 /// 128 * (words between start and end, exclusive).
-pub static START: LazyLock<Layout> = LazyLock::new(|| Layout::new("start", &[0x3e], 1, vec![spec("length_bits", 19, 32)], Fields::new()));
-pub static END: LazyLock<Layout> = LazyLock::new(|| Layout::new("end", &[0x3f], 1, vec![spec("length_bits", 19, 32)], Fields::new()));
+pub static START: LazyLock<Layout> = LazyLock::new(|| {
+    Layout::new(
+        "start",
+        &[0x3e],
+        1,
+        vec![spec("length_bits", 19, 32)],
+        Fields::new(),
+    )
+});
+pub static END: LazyLock<Layout> = LazyLock::new(|| {
+    Layout::new(
+        "end",
+        &[0x3f],
+        1,
+        vec![spec("length_bits", 19, 32)],
+        Fields::new(),
+    )
+});
 /// 4; 1 ends a bitstream that continues in the next one.
-pub static HALT: LazyLock<Layout> = LazyLock::new(|| Layout::new("halt", &[0x21], 1, vec![spec("code", 14, 5)], Fields::new()));
+pub static HALT: LazyLock<Layout> =
+    LazyLock::new(|| Layout::new("halt", &[0x21], 1, vec![spec("code", 14, 5)], Fields::new()));
 /// Tile fence: dispatched to the tiles, takes a slot in the tile-instruction sequence.
 pub static SYNC: LazyLock<Layout> = LazyLock::new(|| {
-    Layout::new("sync", &[0x1a], 1, vec![
-        spec("tiles", 12, 16), spec("seq", 28, 15), spec("b43", 43, 1), spec("counters", 44, 19), spec("count", 63, 16), spec("units", 79, 10),
-        spec("signal", 107, 1), spec("f109", 109, 2),
-    ], Fields::new())
+    Layout::new(
+        "sync",
+        &[0x1a],
+        1,
+        vec![
+            spec("tiles", 12, 16),
+            spec("seq", 28, 15),
+            spec("b43", 43, 1),
+            spec("counters", 44, 19),
+            spec("count", 63, 16),
+            spec("units", 79, 10),
+            spec("signal", 107, 1),
+            spec("f109", 109, 2),
+        ],
+        Fields::new(),
+    )
 });
 /// Scalar fence / scalar sync-counter op (not dispatched to the tiles).
 pub static SCSYNC: LazyLock<Layout> = LazyLock::new(|| {
-    let mut f = vec![spec("tiles", 12, 16), spec("smask", 32, 9), spec("value", 43, 13), spec("tokwait", 57, 1), spec("tmask", 73, 16)];
+    let mut f = vec![
+        spec("tiles", 12, 16),
+        spec("smask", 32, 9),
+        spec("value", 43, 13),
+        spec("tokwait", 57, 1),
+        spec("tmask", 73, 16),
+    ];
     f.extend((0..9).map(|k| spec(&format!("thr{k}"), 93 + 16 * k, 16)));
     f.extend([spec("wait", 237, 9), spec("sunits", 246, 5)]);
     Layout::new("scsync", &[0x24], 2, f, Fields::new())
 });
 /// avDataPop (stream=1) / parameterPop (stream=0): host stream -> circular staging buffer.
 pub static POP: LazyLock<Layout> = LazyLock::new(|| {
-    Layout::new("pop", &[0x25], 2, vec![
-        spec("stream", 12, 1), spec("d0_stride", 28, 16), spec("d0_limit", 44, 15), spec("d1_stride", 59, 16), spec("d1_limit", 75, 15),
-        spec("d2_stride", 90, 16), spec("d2_limit", 106, 15), spec("k121", 121, 1), spec("k124", 124, 1), spec("par136", 136, 1),
-        spec("av140", 140, 1), spec("count_m1", 142, 14), spec("k157", 157, 1), spec("count_neg", 159, 14), spec("k174", 174, 1),
-        spec("par177", 177, 1), spec("k178", 178, 1), spec("b183", 183, 1), spec("rows_neg", 184, 15), spec("k199", 199, 1), spec("k215", 215, 1),
-    ], Fields::new())
+    Layout::new(
+        "pop",
+        &[0x25],
+        2,
+        vec![
+            spec("stream", 12, 1),
+            spec("d0_stride", 28, 16),
+            spec("d0_limit", 44, 15),
+            spec("d1_stride", 59, 16),
+            spec("d1_limit", 75, 15),
+            spec("d2_stride", 90, 16),
+            spec("d2_limit", 106, 15),
+            spec("k121", 121, 1),
+            spec("k124", 124, 1),
+            spec("par136", 136, 1),
+            spec("av140", 140, 1),
+            spec("count_m1", 142, 14),
+            spec("k157", 157, 1),
+            spec("count_neg", 159, 14),
+            spec("k174", 174, 1),
+            spec("par177", 177, 1),
+            spec("k178", 178, 1),
+            spec("b183", 183, 1),
+            spec("rows_neg", 184, 15),
+            spec("k199", 199, 1),
+            spec("k215", 215, 1),
+        ],
+        Fields::new(),
+    )
 });
 /// Staging buffer -> ring bus -> the tiles in `tiles` (received by a ringConsumer).
 pub static INFEED: LazyLock<Layout> = LazyLock::new(|| {
-    Layout::new("infeed", &[0x26], 4, vec![
-        spec("stream", 12, 1), spec("buf_off", 14, 20), spec("d0_stride", 34, 21), spec("d0_limit", 55, 20), spec("d1_stride", 75, 21),
-        spec("d1_limit", 96, 20), spec("d2_stride", 116, 21), spec("d2_limit", 137, 20), spec("k157", 157, 1), spec("k160", 160, 1),
-        spec("par172", 172, 1), spec("av176", 176, 1), spec("count_m1", 183, 14), spec("k203", 203, 1), spec("count_neg", 205, 14),
-        spec("k311", 311, 1), spec("par314", 314, 1), spec("pop_wait", 320, 16), spec("k336", 336, 1), spec("k352", 352, 1), spec("k392", 392, 1),
-        spec("tiles", 409, 16), spec("k434", 434, 4), spec("f438", 438, 2),
-    ], Fields::new())
+    Layout::new(
+        "infeed",
+        &[0x26],
+        4,
+        vec![
+            spec("stream", 12, 1),
+            spec("buf_off", 14, 20),
+            spec("d0_stride", 34, 21),
+            spec("d0_limit", 55, 20),
+            spec("d1_stride", 75, 21),
+            spec("d1_limit", 96, 20),
+            spec("d2_stride", 116, 21),
+            spec("d2_limit", 137, 20),
+            spec("k157", 157, 1),
+            spec("k160", 160, 1),
+            spec("par172", 172, 1),
+            spec("av176", 176, 1),
+            spec("count_m1", 183, 14),
+            spec("k203", 203, 1),
+            spec("count_neg", 205, 14),
+            spec("k311", 311, 1),
+            spec("par314", 314, 1),
+            spec("pop_wait", 320, 16),
+            spec("k336", 336, 1),
+            spec("k352", 352, 1),
+            spec("k392", 392, 1),
+            spec("tiles", 409, 16),
+            spec("k434", 434, 4),
+            spec("f438", 438, 2),
+        ],
+        Fields::new(),
+    )
 });
 /// Ring (from a ringProducer) -> host stream (DMA tag 3), or -> scalar memory.
 pub static OUTFEED: LazyLock<Layout> = LazyLock::new(|| {
-    Layout::new("outfeed", &[0x27], 2, vec![
-        spec("base", 12, 15), spec("d0_stride", 27, 16), spec("d0_limit", 43, 15), spec("d1_stride", 58, 16), spec("d1_limit", 74, 15),
-        spec("d2_stride", 89, 16), spec("d2_limit", 105, 15), spec("d3_stride", 120, 16), spec("k173", 173, 2), spec("f222", 222, 7),
-    ], Fields::new())
+    Layout::new(
+        "outfeed",
+        &[0x27],
+        2,
+        vec![
+            spec("base", 12, 15),
+            spec("d0_stride", 27, 16),
+            spec("d0_limit", 43, 15),
+            spec("d1_stride", 58, 16),
+            spec("d1_limit", 74, 15),
+            spec("d2_stride", 89, 16),
+            spec("d2_limit", 105, 15),
+            spec("d3_stride", 120, 16),
+            spec("k173", 173, 2),
+            spec("f222", 222, 7),
+        ],
+        Fields::new(),
+    )
 });
 /// A scalar-core word as geohot's edgetpuxray decompiler sees it; bits 6..11
 /// "branch" and bit 11 "enable_scalar" are the opcode.
 pub static WORD: LazyLock<Layout> = LazyLock::new(|| {
-    Layout::new("word", &[], 1, vec![
-        spec("gate", 0, 1), spec("pred_reg", 1, 3), spec("yes_pred", 4, 1), spec("unk_0", 5, 1), spec("branch", 6, 5), spec("enable_scalar", 11, 1),
-        spec("enable_vector", 12, 2), spec("vs_reg_v1", 14, 5), spec("imm_size", 19, 12), spec("v_op", 31, 5), spec("v_offset", 36, 8),
-        spec("v_cmd", 44, 5), spec("vs_reg", 49, 5), spec("s_op", 54, 6), spec("s_x", 60, 5), spec("s_y", 65, 5), spec("imm_scalar", 70, 32),
-        spec("v_op_2", 102, 3), spec("vs_reg_w", 105, 5), spec("unk_3", 110, 18),
-    ], Fields::new())
+    Layout::new(
+        "word",
+        &[],
+        1,
+        vec![
+            spec("gate", 0, 1),
+            spec("pred_reg", 1, 3),
+            spec("yes_pred", 4, 1),
+            spec("unk_0", 5, 1),
+            spec("branch", 6, 5),
+            spec("enable_scalar", 11, 1),
+            spec("enable_vector", 12, 2),
+            spec("vs_reg_v1", 14, 5),
+            spec("imm_size", 19, 12),
+            spec("v_op", 31, 5),
+            spec("v_offset", 36, 8),
+            spec("v_cmd", 44, 5),
+            spec("vs_reg", 49, 5),
+            spec("s_op", 54, 6),
+            spec("s_x", 60, 5),
+            spec("s_y", 65, 5),
+            spec("imm_scalar", 70, 32),
+            spec("v_op_2", 102, 3),
+            spec("vs_reg_w", 105, 5),
+            spec("unk_3", 110, 18),
+        ],
+        Fields::new(),
+    )
 });
 
 /// Bit of the 32-bit immediate in an ALU word: where the runtime links addresses.
@@ -118,36 +275,130 @@ pub struct Sync {
 }
 
 impl Default for Sync {
-    fn default() -> Self { Self { tiles: 0xffff, counters: 0, count: 0, units: 0x3ff, signal: 0, b43: 0, f109: 0 } }
+    fn default() -> Self {
+        Self {
+            tiles: 0xffff,
+            counters: 0,
+            count: 0,
+            units: 0x3ff,
+            signal: 0,
+            b43: 0,
+            f109: 0,
+        }
+    }
 }
 
 pub fn sync(seq: i64, s: &Sync) -> Vec<u128> {
     SYNC.encode(&fields(&[
-        ("seq", seq), ("tiles", s.tiles), ("counters", s.counters), ("count", s.count), ("units", s.units), ("signal", s.signal), ("b43", s.b43),
+        ("seq", seq),
+        ("tiles", s.tiles),
+        ("counters", s.counters),
+        ("count", s.count),
+        ("units", s.units),
+        ("signal", s.signal),
+        ("b43", s.b43),
         ("f109", s.f109),
     ]))
 }
 
 /// 2nd word of every program.
-pub fn sync_init(caching: bool) -> Vec<u128> { sync(0, &Sync { counters: (1 << 19) - 1, signal: 1, b43: i64::from(caching), ..Sync::default() }) }
+pub fn sync_init(caching: bool) -> Vec<u128> {
+    sync(
+        0,
+        &Sync {
+            counters: (1 << 19) - 1,
+            signal: 1,
+            b43: i64::from(caching),
+            ..Sync::default()
+        },
+    )
+}
 /// Drain all units, then a token -> scsync_fence.
-pub fn sync_signal(seq: i64) -> Vec<u128> { sync(seq, &Sync { signal: 1, ..Sync::default() }) }
-pub fn sync_final(seq: i64, caching: bool) -> Vec<u128> { sync(seq, &Sync { signal: 1, f109: 3, b43: i64::from(caching), ..Sync::default() }) }
+pub fn sync_signal(seq: i64) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            signal: 1,
+            ..Sync::default()
+        },
+    )
+}
+pub fn sync_final(seq: i64, caching: bool) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            signal: 1,
+            f109: 3,
+            b43: i64::from(caching),
+            ..Sync::default()
+        },
+    )
+}
 /// Drain all units, no token.
-pub fn sync_drain(seq: i64, tiles: i64) -> Vec<u128> { sync(seq, &Sync { tiles, ..Sync::default() }) }
+pub fn sync_drain(seq: i64, tiles: i64) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            tiles,
+            ..Sync::default()
+        },
+    )
+}
 /// Starts each input's DMA.
-pub fn sync_wn_fence(seq: i64) -> Vec<u128> { sync(seq, &Sync { units: 1 << 5, ..Sync::default() }) }
+pub fn sync_wn_fence(seq: i64) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            units: 1 << 5,
+            ..Sync::default()
+        },
+    )
+}
 /// All counters but RING_PRODUCER_A/B.
-pub fn sync_reset17(seq: i64) -> Vec<u128> { sync(seq, &Sync { counters: (1 << 17) - 1, ..Sync::default() }) }
+pub fn sync_reset17(seq: i64) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            counters: (1 << 17) - 1,
+            ..Sync::default()
+        },
+    )
+}
 /// The 8 mesh counters.
-pub fn sync_reset_mesh(seq: i64) -> Vec<u128> { sync(seq, &Sync { counters: tc(&TILE_COUNTERS[3..11]), ..Sync::default() }) }
+pub fn sync_reset_mesh(seq: i64) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            counters: tc(&TILE_COUNTERS[3..11]),
+            ..Sync::default()
+        },
+    )
+}
 /// After the outfeeds.
-pub fn sync_rpa(seq: i64) -> Vec<u128> { sync(seq, &Sync { counters: tc(&["RING_PRODUCER_A"]), signal: 1, ..Sync::default() }) }
+pub fn sync_rpa(seq: i64) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            counters: tc(&["RING_PRODUCER_A"]),
+            signal: 1,
+            ..Sync::default()
+        },
+    )
+}
 /// Fence between the groups of a mesh phase (meshBus opcode `op`); `count` is the
 /// phase's running packet count.
 pub fn sync_mesh(seq: i64, op: u8, tiles: i64, count: i64) -> Vec<u128> {
     let (inn, out) = mesh_counters(op);
-    sync(seq, &Sync { tiles, counters: tc(&[inn]) | tc(&[out]), count, units: 1 << (op - 0x0f), ..Sync::default() })
+    sync(
+        seq,
+        &Sync {
+            tiles,
+            counters: tc(&[inn]) | tc(&[out]),
+            count,
+            units: 1 << (op - 0x0f),
+            ..Sync::default()
+        },
+    )
 }
 
 pub struct Scsync {
@@ -160,13 +411,26 @@ pub struct Scsync {
 }
 
 impl Default for Scsync {
-    fn default() -> Self { Self { smask: 0, value: 0, tokwait: false, thresholds: Vec::new(), sunits: 0b01100 } }
+    fn default() -> Self {
+        Self {
+            smask: 0,
+            value: 0,
+            tokwait: false,
+            thresholds: Vec::new(),
+            sunits: 0b01100,
+        }
+    }
 }
 
 pub fn scsync(s: &Scsync) -> Vec<u128> {
     let wait: i64 = s.thresholds.iter().map(|(k, _)| 1i64 << k).sum();
-    let mut f = fields(&[("smask", s.smask), ("value", s.value), ("sunits", s.sunits), ("wait", wait)])
-        .set("tiles", if s.tokwait || wait != 0 { 0xffff } else { 0 });
+    let mut f = fields(&[
+        ("smask", s.smask),
+        ("value", s.value),
+        ("sunits", s.sunits),
+        ("wait", wait),
+    ])
+    .set("tiles", if s.tokwait || wait != 0 { 0xffff } else { 0 });
     if s.tokwait {
         f = f.set("tokwait", 1).set("tmask", 0xffff);
     }
@@ -177,18 +441,54 @@ pub fn scsync(s: &Scsync) -> Vec<u128> {
 }
 
 /// Follows a sync(signal=1).
-pub fn scsync_fence() -> Vec<u128> { scsync(&Scsync { tokwait: true, ..Scsync::default() }) }
+pub fn scsync_fence() -> Vec<u128> {
+    scsync(&Scsync {
+        tokwait: true,
+        ..Scsync::default()
+    })
+}
 /// 2nd instruction of every program.
-pub fn scsync_init() -> Vec<u128> { scsync(&Scsync { smask: 0x1ff, tokwait: true, sunits: 0b11111, ..Scsync::default() }) }
+pub fn scsync_init() -> Vec<u128> {
+    scsync(&Scsync {
+        smask: 0x1ff,
+        tokwait: true,
+        sunits: 0b11111,
+        ..Scsync::default()
+    })
+}
 /// Before each input.
-pub fn scsync_set_av() -> Vec<u128> { scsync(&Scsync { smask: scm(&["AVDATA_POP", "AVDATA_INFEED"]), ..Scsync::default() }) }
+pub fn scsync_set_av() -> Vec<u128> {
+    scsync(&Scsync {
+        smask: scm(&["AVDATA_POP", "AVDATA_INFEED"]),
+        ..Scsync::default()
+    })
+}
 /// Right before avDataPop.
-pub fn scsync_av_credit() -> Vec<u128> { scsync(&Scsync { smask: scm(&["AVDATA_INFEED"]), value: 0x1fff, ..Scsync::default() }) }
-pub fn scsync_set_avpop() -> Vec<u128> { scsync(&Scsync { smask: scm(&["AVDATA_POP"]), ..Scsync::default() }) }
+pub fn scsync_av_credit() -> Vec<u128> {
+    scsync(&Scsync {
+        smask: scm(&["AVDATA_INFEED"]),
+        value: 0x1fff,
+        ..Scsync::default()
+    })
+}
+pub fn scsync_set_avpop() -> Vec<u128> {
+    scsync(&Scsync {
+        smask: scm(&["AVDATA_POP"]),
+        ..Scsync::default()
+    })
+}
 /// Scalar-unit fence only.
-pub fn scsync_nop() -> Vec<u128> { scsync(&Scsync::default()) }
+pub fn scsync_nop() -> Vec<u128> {
+    scsync(&Scsync::default())
+}
 /// n = outfeeds of the output.
-pub fn scsync_wait_pa(n: i64) -> Vec<u128> { scsync(&Scsync { smask: scm(&["PRODUCER_A"]), thresholds: vec![(5, n)], ..Scsync::default() }) }
+pub fn scsync_wait_pa(n: i64) -> Vec<u128> {
+    scsync(&Scsync {
+        smask: scm(&["PRODUCER_A"]),
+        thresholds: vec![(5, n)],
+        ..Scsync::default()
+    })
+}
 // *** host streams: pops fill the staging buffer, infeeds send buffer ranges over
 // the ring, outfeeds drain the ring to the host ***
 
@@ -201,14 +501,33 @@ fn passes(units: i64, buf: i64) -> (i64, i64) {
 /// avDataPop of a contiguous activation input of `nbytes` (a multiple of 8).
 pub fn av_pop(nbytes: i64) -> Vec<u128> {
     assert!(nbytes % 8 == 0 && nbytes > 0, "av_pop: {nbytes} bytes");
-    let mut f = fields(&[("stream", 1), ("d0_stride", 1), ("k121", 1), ("k124", 1), ("av140", 1), ("k174", 1), ("k178", 1), ("k199", 1), ("k215", 1)]);
+    let mut f = fields(&[
+        ("stream", 1),
+        ("d0_stride", 1),
+        ("k121", 1),
+        ("k124", 1),
+        ("av140", 1),
+        ("k174", 1),
+        ("k178", 1),
+        ("k199", 1),
+        ("k215", 1),
+    ]);
     if nbytes == 8 {
         return POP.encode(&f);
     }
     let (n, last) = passes(nbytes / 8, AV_BUF);
-    f = f.merge(fields(&[("d0_limit", AV_BUF - 1), ("d1_stride", neg(AV_BUF - 1, 16)), ("d1_limit", n - 1), ("d2_stride", neg(AV_BUF - 1, 16))]));
+    f = f.merge(fields(&[
+        ("d0_limit", AV_BUF - 1),
+        ("d1_stride", neg(AV_BUF - 1, 16)),
+        ("d1_limit", n - 1),
+        ("d2_stride", neg(AV_BUF - 1, 16)),
+    ]));
     if last != AV_BUF {
-        f = f.merge(fields(&[("count_m1", last - 1), ("k157", 1), ("count_neg", neg(last, 14))]));
+        f = f.merge(fields(&[
+            ("count_m1", last - 1),
+            ("k157", 1),
+            ("count_neg", neg(last, 14)),
+        ]));
     }
     POP.encode(&f)
 }
@@ -218,12 +537,29 @@ pub fn param_pop(nbytes: i64) -> Vec<u128> {
     let u = nbytes / 64;
     let (n, last) = passes(u, PAR_BUF);
     let mut f = fields(&[
-        ("stream", 0), ("d0_stride", 1), ("d0_limit", PAR_BUF - 1), ("d1_stride", neg(PAR_BUF - 1, 16)), ("d1_limit", n - 1),
-        ("d2_stride", neg(PAR_BUF - 1, 16)), ("k121", 1), ("k124", 1), ("par136", 1), ("k174", 1), ("par177", 1), ("k178", 1),
-        ("b183", i64::from(u % 2 == 0 || u >= 2048)), ("rows_neg", neg((u / 2).min(1024), 15)), ("k199", 1), ("k215", 1),
+        ("stream", 0),
+        ("d0_stride", 1),
+        ("d0_limit", PAR_BUF - 1),
+        ("d1_stride", neg(PAR_BUF - 1, 16)),
+        ("d1_limit", n - 1),
+        ("d2_stride", neg(PAR_BUF - 1, 16)),
+        ("k121", 1),
+        ("k124", 1),
+        ("par136", 1),
+        ("k174", 1),
+        ("par177", 1),
+        ("k178", 1),
+        ("b183", i64::from(u % 2 == 0 || u >= 2048)),
+        ("rows_neg", neg((u / 2).min(1024), 15)),
+        ("k199", 1),
+        ("k215", 1),
     ]);
     if last != PAR_BUF {
-        f = f.merge(fields(&[("count_m1", last - 1), ("k157", 1), ("count_neg", neg(last, 10))]));
+        f = f.merge(fields(&[
+            ("count_m1", last - 1),
+            ("k157", 1),
+            ("count_neg", neg(last, 10)),
+        ]));
     }
     POP.encode(&f)
 }
@@ -232,18 +568,40 @@ pub fn param_pop(nbytes: i64) -> Vec<u128> {
 /// the ring to `tiles`. A transfer longer than the staging buffer takes several
 /// passes; its offsets wrap.
 pub fn av_infeed(offset: i64, nbytes: i64, tiles: i64) -> Vec<u128> {
-    assert!(offset % 8 == 0 && nbytes % 8 == 0 && nbytes > 0, "av_infeed: {nbytes} bytes at {offset}");
+    assert!(
+        offset % 8 == 0 && nbytes % 8 == 0 && nbytes > 0,
+        "av_infeed: {nbytes} bytes at {offset}"
+    );
     let (off, u) = (offset / 8, nbytes / 8);
     let (n, last) = passes(u, AV_BUF);
     let wrap = u > AV_BUF;
     let mut f = fields(&[
-        ("stream", 1), ("buf_off", if wrap { off % (1 << 15) } else { off }), ("d0_stride", 1), ("k157", 1), ("k160", 1), ("av176", 1),
-        ("count_m1", last - 1), ("k311", 1), ("pop_wait", if wrap { (off + 1) % (1 << 16) } else { off + 1 }), ("k336", 1), ("k352", 1),
-        ("k392", 1), ("tiles", tiles), ("k434", 0xf), ("f438", 3),
+        ("stream", 1),
+        ("buf_off", if wrap { off % (1 << 15) } else { off }),
+        ("d0_stride", 1),
+        ("k157", 1),
+        ("k160", 1),
+        ("av176", 1),
+        ("count_m1", last - 1),
+        ("k311", 1),
+        (
+            "pop_wait",
+            if wrap { (off + 1) % (1 << 16) } else { off + 1 },
+        ),
+        ("k336", 1),
+        ("k352", 1),
+        ("k392", 1),
+        ("tiles", tiles),
+        ("k434", 0xf),
+        ("f438", 3),
     ]);
     if u > 1 {
         f = f.merge(fields(&[
-            ("d0_limit", AV_BUF - 1), ("d1_stride", neg(AV_BUF - 1, 21)), ("d1_limit", n - 1), ("d2_stride", neg(AV_BUF - 1, 21)), ("k203", 1),
+            ("d0_limit", AV_BUF - 1),
+            ("d1_stride", neg(AV_BUF - 1, 21)),
+            ("d1_limit", n - 1),
+            ("d2_stride", neg(AV_BUF - 1, 21)),
+            ("k203", 1),
             ("count_neg", neg(last, 14)),
         ]));
     }
@@ -256,12 +614,32 @@ pub fn param_infeed(offset: i64, nbytes: i64, tiles: i64, lanes: i64) -> Vec<u12
     let (off, u) = (offset / 64, nbytes / 64);
     let (n, last) = passes(u, PAR_BUF);
     let mut f = fields(&[
-        ("stream", 0), ("buf_off", off % 2048), ("d0_stride", 1), ("d0_limit", PAR_BUF - 1), ("d1_stride", neg(PAR_BUF - 1, 21)),
-        ("d1_limit", n - 1), ("d2_stride", neg(PAR_BUF - 1, 21)), ("k157", 1), ("k160", 1), ("par172", 1), ("k311", 1), ("par314", 1),
-        ("pop_wait", (off + 1) % (1 << 16)), ("k336", 1), ("k352", 1), ("k392", 1), ("tiles", tiles), ("k434", 0xf), ("f438", lanes - 1),
+        ("stream", 0),
+        ("buf_off", off % 2048),
+        ("d0_stride", 1),
+        ("d0_limit", PAR_BUF - 1),
+        ("d1_stride", neg(PAR_BUF - 1, 21)),
+        ("d1_limit", n - 1),
+        ("d2_stride", neg(PAR_BUF - 1, 21)),
+        ("k157", 1),
+        ("k160", 1),
+        ("par172", 1),
+        ("k311", 1),
+        ("par314", 1),
+        ("pop_wait", (off + 1) % (1 << 16)),
+        ("k336", 1),
+        ("k352", 1),
+        ("k392", 1),
+        ("tiles", tiles),
+        ("k434", 0xf),
+        ("f438", lanes - 1),
     ]);
     if last != PAR_BUF {
-        f = f.merge(fields(&[("count_m1", last - 1), ("k203", 1), ("count_neg", neg(last, 10))]));
+        f = f.merge(fields(&[
+            ("count_m1", last - 1),
+            ("k203", 1),
+            ("count_neg", neg(last, 10)),
+        ]));
     }
     INFEED.encode(&f)
 }
@@ -269,7 +647,12 @@ pub fn param_infeed(offset: i64, nbytes: i64, tiles: i64, lanes: i64) -> Vec<u12
 /// Host outfeed of `nbytes` (a multiple of 8) from the ring (one per ringProducer).
 pub fn outfeed(nbytes: i64) -> Vec<u128> {
     assert!(nbytes % 8 == 0 && nbytes > 0, "outfeed: {nbytes} bytes");
-    OUTFEED.encode(&fields(&[("d0_stride", i64::from(nbytes == 8)), ("d0_limit", nbytes / 8 - 1), ("k173", 3), ("f222", 0x7f)]))
+    OUTFEED.encode(&fields(&[
+        ("d0_stride", i64::from(nbytes == 8)),
+        ("d0_limit", nbytes / 8 - 1),
+        ("k173", 3),
+        ("f222", 0x7f),
+    ]))
 }
 
 // *** host DMA descriptors, built by the scalar ALU (0x20): v_op=0xa pushes
@@ -292,8 +675,14 @@ pub struct Alu {
 /// signed 0xf MOV), run iff `p<pred>` if given.
 pub fn alu(a: &Alu) -> u128 {
     let mut f = fields(&[
-        ("enable_scalar", 1), ("s_op", a.s_op), ("s_x", a.s_x), ("s_y", a.s_y), ("imm_scalar", a.imm & 0xffff_ffff), ("v_op", a.v_op),
-        ("v_offset", a.v_offset), ("vs_reg", a.vs_reg),
+        ("enable_scalar", 1),
+        ("s_op", a.s_op),
+        ("s_x", a.s_x),
+        ("s_y", a.s_y),
+        ("imm_scalar", a.imm & 0xffff_ffff),
+        ("v_op", a.v_op),
+        ("v_offset", a.v_offset),
+        ("vs_reg", a.vs_reg),
     ]);
     if let Some(p) = a.pred {
         f = f.merge(fields(&[("gate", 1), ("pred_reg", p), ("yes_pred", 1)]));
@@ -301,35 +690,90 @@ pub fn alu(a: &Alu) -> u128 {
     WORD.encode(&f)[0]
 }
 
-fn op3(s_op: i64, s_x: i64, s_y: i64, imm: i64) -> u128 { alu(&Alu { s_op, s_x, s_y, imm, ..Alu::default() }) }
+fn op3(s_op: i64, s_x: i64, s_y: i64, imm: i64) -> u128 {
+    alu(&Alu {
+        s_op,
+        s_x,
+        s_y,
+        imm,
+        ..Alu::default()
+    })
+}
 
-fn op3p(s_op: i64, s_x: i64, s_y: i64, imm: i64, pred: i64) -> u128 { alu(&Alu { s_op, s_x, s_y, imm, pred: Some(pred), ..Alu::default() }) }
+fn op3p(s_op: i64, s_x: i64, s_y: i64, imm: i64, pred: i64) -> u128 {
+    alu(&Alu {
+        s_op,
+        s_x,
+        s_y,
+        imm,
+        pred: Some(pred),
+        ..Alu::default()
+    })
+}
 
-pub fn movi(rd: i64, imm: i64) -> u128 { op3(0x2f, rd, 0, imm) }
+pub fn movi(rd: i64, imm: i64) -> u128 {
+    op3(0x2f, rd, 0, imm)
+}
 
 /// `(out_hi:out_lo) = (hi:lo) + off` for `0 <= off < 2^31`, the carry through
 /// predicates p0/p1 (8 words, as edgetpu_compiler emits them).
 pub fn add64(hi: i64, lo: i64, off: i64, out_hi: i64, out_lo: i64, tmp: i64) -> Vec<u128> {
     assert!((0..1 << 31).contains(&off), "add64: offset {off}");
     vec![
-        op3(0x2c, 0, lo, 0),                 // p0 = lo < 0 (bit 31 of lo)
-        op3(0x0a, 1, lo, lo),                // p1 = false
+        op3(0x2c, 0, lo, 0),  // p0 = lo < 0 (bit 31 of lo)
+        op3(0x0a, 1, lo, lo), // p1 = false
         op3(0x23, tmp, lo, 0x7fff_ffff),
         op3p(0x21, tmp, tmp, off, 0),
-        op3p(0x2c, 1, tmp, 0, 0),            // p0: p1 = carry out of bit 31
+        op3p(0x2c, 1, tmp, 0, 0), // p0: p1 = carry out of bit 31
         op3(0x21, out_lo, lo, off),
         op3(0x21, out_hi, hi, 0),
         op3p(0x21, out_hi, out_hi, 1, 1),
     ]
 }
 
-pub fn push_issue(lo: i64, hi: i64, len_reg: i64, tag_reg: i64, length: i64, tag: i64) -> Vec<u128> {
+pub fn push_issue(
+    lo: i64,
+    hi: i64,
+    len_reg: i64,
+    tag_reg: i64,
+    length: i64,
+    tag: i64,
+) -> Vec<u128> {
     vec![
-        alu(&Alu { v_op: 0xa, v_offset: 0, vs_reg: lo, ..Alu::default() }),
-        alu(&Alu { s_op: 0x2f, s_x: len_reg, imm: length, v_op: 0xa, v_offset: 1, vs_reg: hi, ..Alu::default() }),
-        alu(&Alu { s_op: 0x2f, s_x: tag_reg, imm: tag, v_op: 0xa, v_offset: 2, vs_reg: len_reg, ..Alu::default() }),
-        alu(&Alu { v_op: 0xa, v_offset: 3, vs_reg: tag_reg, ..Alu::default() }),
-        alu(&Alu { v_op: 0xc, ..Alu::default() }),
+        alu(&Alu {
+            v_op: 0xa,
+            v_offset: 0,
+            vs_reg: lo,
+            ..Alu::default()
+        }),
+        alu(&Alu {
+            s_op: 0x2f,
+            s_x: len_reg,
+            imm: length,
+            v_op: 0xa,
+            v_offset: 1,
+            vs_reg: hi,
+            ..Alu::default()
+        }),
+        alu(&Alu {
+            s_op: 0x2f,
+            s_x: tag_reg,
+            imm: tag,
+            v_op: 0xa,
+            v_offset: 2,
+            vs_reg: len_reg,
+            ..Alu::default()
+        }),
+        alu(&Alu {
+            v_op: 0xa,
+            v_offset: 3,
+            vs_reg: tag_reg,
+            ..Alu::default()
+        }),
+        alu(&Alu {
+            v_op: 0xc,
+            ..Alu::default()
+        }),
     ]
 }
 
@@ -353,7 +797,14 @@ pub enum Regs {
 /// Push and issue a host DMA descriptor of the relocated buffer address + `off` +
 /// `off2`. `load_base = (hi, lo)` also emits the two MOVIs the runtime relocates
 /// (a caching program loads lo first).
-pub fn host_dma(tag: i64, length: i64, off: i64, off2: i64, regs: Regs, load_base: Option<(i64, i64)>) -> Vec<u128> {
+pub fn host_dma(
+    tag: i64,
+    length: i64,
+    off: i64,
+    off2: i64,
+    regs: Regs,
+    load_base: Option<(i64, i64)>,
+) -> Vec<u128> {
     let (hi, lo, r) = match regs {
         Regs::Act => (11, 12, 4),
         Regs::Par => (0, 1, 2),
@@ -381,11 +832,19 @@ pub fn interrupt(caching: bool) -> Vec<u128> {
 // *** the program skeleton; seq = tile instructions (tile ops + syncs) before the block's first sync ***
 
 /// `nwords`: the whole program, start and end included.
-pub fn start(nwords: i64) -> Vec<u128> { START.encode(&fields(&[("length_bits", 128 * (nwords - 2))])) }
-pub fn end() -> Vec<u128> { END.encode(&fields(&[("length_bits", 128)])) }
-pub fn halt(code: i64) -> Vec<u128> { HALT.encode(&fields(&[("code", code)])) }
+pub fn start(nwords: i64) -> Vec<u128> {
+    START.encode(&fields(&[("length_bits", 128 * (nwords - 2))]))
+}
+pub fn end() -> Vec<u128> {
+    END.encode(&fields(&[("length_bits", 128)]))
+}
+pub fn halt(code: i64) -> Vec<u128> {
+    HALT.encode(&fields(&[("code", code)]))
+}
 /// 4 of these follow halt.
-pub fn nop() -> Vec<u128> { WORD.encode(&fields(&[("enable_scalar", 1)])) }
+pub fn nop() -> Vec<u128> {
+    WORD.encode(&fields(&[("enable_scalar", 1)]))
+}
 
 /// The program bytes: start, body, end.
 pub fn program(body: &[u128]) -> Vec<u8> {
@@ -464,4 +923,6 @@ pub fn epilogue(seq: i64, caching: bool) -> Vec<u128> {
 }
 
 /// `isa::ttu` with the default count name, for the scalar-side recipes.
-pub fn ttu(p: &str, strides: &[i64], counts: &[i64], levels: usize) -> Fields { ttu_generic(p, strides, counts, levels, "cnt") }
+pub fn ttu(p: &str, strides: &[i64], counts: &[i64], levels: usize) -> Fields {
+    ttu_generic(p, strides, counts, levels, "cnt")
+}

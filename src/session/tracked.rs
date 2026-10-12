@@ -67,7 +67,12 @@ where
         cancel: CancellationToken,
         guard: Option<ShutdownGuard>,
     ) -> BResult<(worker::Admission, Running)> {
-        let prepared = self.prepare(prompt, max_tokens, !cancel.is_cancelled(), self.prefix.clone())?;
+        let prepared = self.prepare(
+            prompt,
+            max_tokens,
+            !cancel.is_cancelled(),
+            self.prefix.clone(),
+        )?;
         let admission = prepared.admission().clone();
         Ok((admission, prepared.start(cancel, guard)))
     }

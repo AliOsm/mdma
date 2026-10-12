@@ -1,5 +1,9 @@
 use sha2::{Digest, Sha256};
-use std::{fs::{File, Metadata}, io::{self, Read, Seek}, time::SystemTime};
+use std::{
+    fs::{File, Metadata},
+    io::{self, Read, Seek},
+    time::SystemTime,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Stamp {
@@ -24,15 +28,23 @@ impl Stamp {
         })
     }
 
-    #[expect(clippy::needless_pass_by_value, reason = "callers pass freshly queried metadata")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers pass freshly queried metadata"
+    )]
     pub fn check(&self, metadata: Metadata) -> io::Result<()> {
         if *self != Self::read(&metadata)? {
-            return Err(io::Error::other("model/cache changed while reading; keep model files immutable"));
+            return Err(io::Error::other(
+                "model/cache changed while reading; keep model files immutable",
+            ));
         }
         Ok(())
     }
 
-    #[expect(clippy::needless_pass_by_value, reason = "callers pass freshly queried metadata")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "callers pass freshly queried metadata"
+    )]
     pub fn check_payload(&self, metadata: Metadata) -> io::Result<()> {
         let now = Self::read(&metadata)?;
         // Atomic replacement can unlink this still-open inode, changing ctime.
@@ -49,7 +61,9 @@ pub(crate) fn digest(mut reader: impl Read) -> io::Result<String> {
     let mut chunk = vec![0; 1024 * 1024];
     loop {
         let n = reader.read(&mut chunk)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hash.update(&chunk[..n]);
     }
     Ok(hex::encode(hash.finalize()))

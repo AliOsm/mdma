@@ -6,7 +6,10 @@ fn known(value: Option<&str>) -> &str {
 }
 
 fn bytes(value: Option<u64>) -> String {
-    value.map_or_else(|| "unavailable".into(), |n| format!("{:.2} GiB", n as f64 / 1024_f64.powi(3)))
+    value.map_or_else(
+        || "unavailable".into(),
+        |n| format!("{:.2} GiB", n as f64 / 1024_f64.powi(3)),
+    )
 }
 
 fn count(value: Option<u32>) -> String {
@@ -18,7 +21,10 @@ fn mhz(value: Option<f64>) -> String {
 }
 
 fn speed(value: Option<&MemorySpeed>) -> String {
-    value.map_or_else(|| "unavailable".into(), |s| format!("{} {}", s.value, s.unit))
+    value.map_or_else(
+        || "unavailable".into(),
+        |s| format!("{} {}", s.value, s.unit),
+    )
 }
 
 fn clock(value: &Clock) -> String {
@@ -36,9 +42,11 @@ fn link(value: &PcieLink) -> String {
             .position(|v| (speed - v).abs() < 0.01)
     });
     let speed = value
-        .speed_gt_s.map_or_else(|| "unavailable".into(), |n| format!("{n:.1} GT/s"));
+        .speed_gt_s
+        .map_or_else(|| "unavailable".into(), |n| format!("{n:.1} GT/s"));
     let width = value
-        .width.map_or_else(|| "width unavailable".into(), |n| format!("x{n}"));
+        .width
+        .map_or_else(|| "width unavailable".into(), |n| format!("x{n}"));
     match generation {
         Some(index) => format!("PCIe {}.0 {width} ({speed})", index + 1),
         None => format!("{speed}, {width}"),
@@ -186,11 +194,20 @@ fn write_text(out: &mut String, report: &Report) -> std::fmt::Result {
             writeln!(out, "  Display ports: unavailable")?;
         }
         for port in &gpu.display_ports {
-            writeln!(out, "  Display port {}: {}", port.name, known(port.status.as_deref()))?;
+            writeln!(
+                out,
+                "  Display port {}: {}",
+                port.name,
+                known(port.status.as_deref())
+            )?;
         }
     }
     for (index, accelerator) in report.accelerators.iter().enumerate() {
-        let kind = if accelerator.kind == "coral_edge_tpu" { "Coral Edge TPU" } else { accelerator.kind };
+        let kind = if accelerator.kind == "coral_edge_tpu" {
+            "Coral Edge TPU"
+        } else {
+            accelerator.kind
+        };
         writeln!(
             out,
             "\nAccelerator {}\n  Kind: {kind} ({}) — detected, no mdma backend yet",
@@ -211,16 +228,25 @@ fn write_text(out: &mut String, report: &Report) -> std::fmt::Result {
                 "  Device node: {} / status: {} / temperature: {}",
                 known(accelerator.device_node.as_deref()),
                 known(accelerator.status.as_deref()),
-                accelerator.temperature_c.map_or_else(|| "unavailable".into(), |c| format!("{c:.1} °C"))
+                accelerator
+                    .temperature_c
+                    .map_or_else(|| "unavailable".into(), |c| format!("{c:.1} °C"))
             )?;
-            writeln!(out, "  PCIe link now: {} / device maximum: {}", link(&accelerator.current_link), link(&accelerator.max_link))?;
+            writeln!(
+                out,
+                "  PCIe link now: {} / device maximum: {}",
+                link(&accelerator.current_link),
+                link(&accelerator.max_link)
+            )?;
         } else {
             let firmware = match accelerator.firmware_loaded {
                 Some(true) => "loaded",
                 Some(false) => "not loaded (bootloader)",
                 None => "unavailable",
             };
-            let usb = accelerator.usb_speed_mbps.map_or_else(|| "unavailable".into(), |mbps| format!("{mbps} Mb/s"));
+            let usb = accelerator
+                .usb_speed_mbps
+                .map_or_else(|| "unavailable".into(), |mbps| format!("{mbps} Mb/s"));
             writeln!(out, "  Firmware: {firmware} / USB link: {usb}")?;
         }
     }

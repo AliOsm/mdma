@@ -1,15 +1,30 @@
 //! Bounded, single-flight control polling with jitter and finite backoff.
 use super::outbound::Credentials;
-use crate::federation::{catalog_cache::Cache, trust::{Snapshot, State}};
-use rama::{error::BoxError, futures::{future::BoxFuture, stream::{FuturesUnordered, StreamExt}}, rt::Executor};
-use std::{collections::BTreeMap, time::{Duration, Instant}};
+use crate::federation::{
+    catalog_cache::Cache,
+    trust::{Snapshot, State},
+};
+use rama::{
+    error::BoxError,
+    futures::{
+        future::BoxFuture,
+        stream::{FuturesUnordered, StreamExt},
+    },
+    rt::Executor,
+};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 const MAX_INFLIGHT: usize = 8;
 
 fn jitter(min_ms: u64, max_ms: u64) -> Result<Duration, BoxError> {
     let mut bytes = [0; 8];
     aws_lc_rs::rand::fill(&mut bytes)?;
-    Ok(Duration::from_millis(min_ms + u64::from_le_bytes(bytes) % (max_ms - min_ms + 1)))
+    Ok(Duration::from_millis(
+        min_ms + u64::from_le_bytes(bytes) % (max_ms - min_ms + 1),
+    ))
 }
 
 struct Schedule {
@@ -20,7 +35,11 @@ struct Schedule {
 
 impl Schedule {
     fn initial(now: Instant) -> Result<Self, BoxError> {
-        Ok(Self { due: now + jitter(0, 2000)?, failures: 0, running: false })
+        Ok(Self {
+            due: now + jitter(0, 2000)?,
+            failures: 0,
+            running: false,
+        })
     }
 
     fn finish(&mut self, success: bool, now: Instant) -> Result<(), BoxError> {
@@ -38,7 +57,11 @@ impl Schedule {
     }
 }
 
-fn synchronize(schedule: &mut BTreeMap<String, Schedule>, snapshot: &Snapshot, now: Instant) -> Result<(), BoxError> {
+fn synchronize(
+    schedule: &mut BTreeMap<String, Schedule>,
+    snapshot: &Snapshot,
+    now: Instant,
+) -> Result<(), BoxError> {
     schedule.retain(|id, _| snapshot.peer(id).is_some_and(|p| p.state == State::Active));
     for record in snapshot.records().filter(|p| p.state == State::Active) {
         if !schedule.contains_key(&record.policy.server_id) {
@@ -48,13 +71,26 @@ fn synchronize(schedule: &mut BTreeMap<String, Schedule>, snapshot: &Snapshot, n
     Ok(())
 }
 
-fn due_peers(schedule: &mut BTreeMap<String, Schedule>, now: Instant, capacity: usize) -> Vec<String> {
-    let mut ready: Vec<_> = schedule.iter().filter(|(_, s)| !s.running && s.due <= now)
-        .map(|(id, s)| (s.due, id.clone())).collect();
+fn due_peers(
+    schedule: &mut BTreeMap<String, Schedule>,
+    now: Instant,
+    capacity: usize,
+) -> Vec<String> {
+    let mut ready: Vec<_> = schedule
+        .iter()
+        .filter(|(_, s)| !s.running && s.due <= now)
+        .map(|(id, s)| (s.due, id.clone()))
+        .collect();
     ready.sort();
-    let ids: Vec<_> = ready.into_iter().take(capacity.min(MAX_INFLIGHT)).map(|(_, id)| id).collect();
+    let ids: Vec<_> = ready
+        .into_iter()
+        .take(capacity.min(MAX_INFLIGHT))
+        .map(|(_, id)| id)
+        .collect();
     for id in &ids {
-        if let Some(entry) = schedule.get_mut(id) { entry.running = true; }
+        if let Some(entry) = schedule.get_mut(id) {
+            entry.running = true;
+        }
     }
     ids
 }
@@ -65,16 +101,26 @@ pub(super) struct Poller {
 }
 
 impl Poller {
-    pub(super) fn credentials(&self) -> &Credentials { &self.credentials }
+    pub(super) fn credentials(&self) -> &Credentials {
+        &self.credentials
+    }
     pub fn new(credentials: Credentials) -> Self {
-        Self { credentials, cache: Cache::default() }
+        Self {
+            credentials,
+            cache: Cache::default(),
+        }
     }
 
     pub async fn run(self, executor: Executor) -> Result<(), BoxError> {
         let mut changes = self.credentials.store.subscribe();
         let mut schedule = BTreeMap::new();
-        synchronize(&mut schedule, &self.credentials.store.snapshot()?, Instant::now())?;
-        let mut pending: FuturesUnordered<BoxFuture<'static, (String, bool)>> = FuturesUnordered::new();
+        synchronize(
+            &mut schedule,
+            &self.credentials.store.snapshot()?,
+            Instant::now(),
+        )?;
+        let mut pending: FuturesUnordered<BoxFuture<'static, (String, bool)>> =
+            FuturesUnordered::new();
         let stopping = async {
             match executor.guard() {
                 Some(guard) => guard.cancelled().await,
@@ -85,7 +131,11 @@ impl Poller {
         loop {
             let now = Instant::now();
             // Earliest due first; a down peer cannot starve later peer IDs.
-            for id in due_peers(&mut schedule, now, MAX_INFLIGHT.saturating_sub(pending.len())) {
+            for id in due_peers(
+                &mut schedule,
+                now,
+                MAX_INFLIGHT.saturating_sub(pending.len()),
+            ) {
                 let credentials = self.credentials.clone();
                 let cache = self.cache.clone();
                 let executor = executor.clone();
@@ -109,8 +159,14 @@ impl Poller {
                 }));
             }
             let next = if pending.len() < MAX_INFLIGHT {
-                schedule.values().filter(|s| !s.running).map(|s| s.due).min()
-            } else { None };
+                schedule
+                    .values()
+                    .filter(|s| !s.running)
+                    .map(|s| s.due)
+                    .min()
+            } else {
+                None
+            };
             let wake = async {
                 match next {
                     Some(due) => tokio::time::sleep_until(due.into()).await,

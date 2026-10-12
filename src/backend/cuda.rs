@@ -5,12 +5,14 @@
 // (a synchronous DtoH copy) observes all of them. Graph decode (graph.rs)
 // runs on a backend twin with its own stream.
 
-use super::{dtype_code, shape, AttnSpec, Backend, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec};
+use super::{
+    AttnSpec, Backend, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec, dtype_code, shape,
+};
 use crate::gguf::GgmlDType;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 const CUDA_SUCCESS: c_int = 0;
 const CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR: c_int = 75;
@@ -211,7 +213,11 @@ impl Drop for CudaBuf {
         // synchronises the device first, so queued kernels on `ptr` finish.
         self.charge.release(|| unsafe {
             let status = cuCtxSetCurrent(self.ctx);
-            let status = if status == 0 { cuMemFree_v2(self.ptr) } else { status };
+            let status = if status == 0 {
+                cuMemFree_v2(self.ptr)
+            } else {
+                status
+            };
             if status != 0 {
                 eprintln!("mdma: CUDA buffer release failed ({status}); buffer remains charged");
             }
@@ -254,7 +260,10 @@ impl Drop for Kernels {
     }
 }
 
-#[expect(clippy::struct_excessive_bools, reason = "independent device capabilities and modes")]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent device capabilities and modes"
+)]
 pub struct CudaBackend {
     device: CuDevice,
     ctx: CuContext,
@@ -396,19 +405,23 @@ fn rope_setup(
     n_tokens: usize,
     spec: &RopeSpec,
 ) -> Result<(Freqs, i32, i32)> {
-    let shape::Rope { n_q_heads, n_kv_heads } = shape::rope(spec, q.len / 4, k.len / 4, n_tokens)?;
+    let shape::Rope {
+        n_q_heads,
+        n_kv_heads,
+    } = shape::rope(spec, q.len / 4, k.len / 4, n_tokens)?;
     Ok((rope_freqs("rope", spec)?, int(n_q_heads)?, int(n_kv_heads)?))
 }
 
 impl CudaBackend {
-
     /// Free and total device bytes.
     fn memory_info(&self) -> Result<(usize, usize)> {
         self.bind()?;
         let (mut free, mut total) = (0, 0);
         // SAFETY: `bind` made the context current, as cuMemGetInfo requires;
         // `free` and `total` are live usize locals matching `size_t *`.
-        cu("cuMemGetInfo", unsafe { cuMemGetInfo_v2(&raw mut free, &raw mut total) })?;
+        cu("cuMemGetInfo", unsafe {
+            cuMemGetInfo_v2(&raw mut free, &raw mut total)
+        })?;
         Ok((free, total))
     }
     /// Opens device `MDMA_CUDA_DEVICE` (default 0) on its primary context
@@ -462,10 +475,17 @@ impl CudaBackend {
             let mut sms = 0;
             cu(
                 "cuDeviceGetAttribute",
-                cuDeviceGetAttribute(&raw mut sms, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, device),
+                cuDeviceGetAttribute(
+                    &raw mut sms,
+                    CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+                    device,
+                ),
             )?;
             let mut integrated = 0;
-            cu("cuDeviceGetAttribute", cuDeviceGetAttribute(&raw mut integrated, CU_DEVICE_ATTRIBUTE_INTEGRATED, device))?;
+            cu(
+                "cuDeviceGetAttribute",
+                cuDeviceGetAttribute(&raw mut integrated, CU_DEVICE_ATTRIBUTE_INTEGRATED, device),
+            )?;
             // SAFETY: cuDeviceGetName succeeded with `raw`'s real length
             // (256), and the driver returns the name NUL-terminated within
             // `len` bytes, so CStr::from_ptr stays inside `raw`, which
@@ -617,38 +637,75 @@ impl CudaBackend {
         }))
     }
 
-    pub(crate) fn federation_profile(&self) -> std::io::Result<crate::federation::profile::gpu::Gpu> {
+    pub(crate) fn federation_profile(
+        &self,
+    ) -> std::io::Result<crate::federation::profile::gpu::Gpu> {
         use crate::federation::profile::gpu::{Gpu, fields};
         use sha2::{Digest, Sha256};
         let (mut driver, mut uuid) = (0, [0u8; 16]);
         // SAFETY: both write through pointers to live locals of the
         // prototypes' types (an int, a 16-byte CUuuid); `self.device` came
         // from cuDeviceGet after cuInit, and neither call needs a context.
-        cu("cuDriverGetVersion", unsafe { cuDriverGetVersion(&raw mut driver) }).map_err(std::io::Error::other)?;
-        cu("cuDeviceGetUuid", unsafe { cuDeviceGetUuid_v2(uuid.as_mut_ptr(), self.device) }).map_err(std::io::Error::other)?;
+        cu("cuDriverGetVersion", unsafe {
+            cuDriverGetVersion(&raw mut driver)
+        })
+        .map_err(std::io::Error::other)?;
+        cu("cuDeviceGetUuid", unsafe {
+            cuDeviceGetUuid_v2(uuid.as_mut_ptr(), self.device)
+        })
+        .map_err(std::io::Error::other)?;
         if driver <= 0 || uuid == [0; 16] {
             return Err(std::io::Error::other("unverifiable CUDA driver or device"));
         }
         let pci = self.pci_bus_id().map_err(std::io::Error::other)?;
-        Ok(Gpu::immutable("cuda", "f32", "f16", fields([
-            ("vocabulary", "mdma.cuda.v1".into()),
-            ("workload", "decoder".into()),
-            ("device_name", self.name.clone()),
-            ("device_identity", format!("pci-{pci}/uuid-{}", hex::encode(uuid))),
-            ("driver_version", driver.to_string()),
-            ("kernel_target", env!("MDMA_CUDA_ARCH_BUILT").into()),
-            ("kernel_id", format!("sha256:{}", hex::encode(Sha256::digest(PTX)))),
-            ("weights", "gguf-raw-matrices-f32-norms".into()),
-            ("int8_prefill", if self.int8_mma { "mma-q8_1" } else { "off" }.into()),
-            ("int8_decode", if self.dp4a { "dp4a-q8_1" } else { "off" }.into()),
-            ("execution", if self.graphs { "eligible-request-graph-with-eager-fallback" } else { "eager" }.into()),
-            ("attention", match self.attn_chunk {
-                Some(keys) => format!("f16kv-chunks-of-{keys}"),
-                None => format!("f16kv-split-over-{}-sms", self.sms),
-            }),
-            ("target_arch", std::env::consts::ARCH.into()),
-            ("target_os", std::env::consts::OS.into()),
-        ]), self.health.clone()))
+        Ok(Gpu::immutable(
+            "cuda",
+            "f32",
+            "f16",
+            fields([
+                ("vocabulary", "mdma.cuda.v1".into()),
+                ("workload", "decoder".into()),
+                ("device_name", self.name.clone()),
+                (
+                    "device_identity",
+                    format!("pci-{pci}/uuid-{}", hex::encode(uuid)),
+                ),
+                ("driver_version", driver.to_string()),
+                ("kernel_target", env!("MDMA_CUDA_ARCH_BUILT").into()),
+                (
+                    "kernel_id",
+                    format!("sha256:{}", hex::encode(Sha256::digest(PTX))),
+                ),
+                ("weights", "gguf-raw-matrices-f32-norms".into()),
+                (
+                    "int8_prefill",
+                    if self.int8_mma { "mma-q8_1" } else { "off" }.into(),
+                ),
+                (
+                    "int8_decode",
+                    if self.dp4a { "dp4a-q8_1" } else { "off" }.into(),
+                ),
+                (
+                    "execution",
+                    if self.graphs {
+                        "eligible-request-graph-with-eager-fallback"
+                    } else {
+                        "eager"
+                    }
+                    .into(),
+                ),
+                (
+                    "attention",
+                    match self.attn_chunk {
+                        Some(keys) => format!("f16kv-chunks-of-{keys}"),
+                        None => format!("f16kv-split-over-{}-sms", self.sms),
+                    },
+                ),
+                ("target_arch", std::env::consts::ARCH.into()),
+                ("target_os", std::env::consts::OS.into()),
+            ]),
+            self.health.clone(),
+        ))
     }
 
     /// Device name and compute capability, e.g. for the serve banner.
@@ -740,7 +797,9 @@ impl CudaBackend {
     /// Ops whose position or token would be frozen into a graph.
     fn eager_only(&self, op: &str) -> Result<()> {
         match self.replay {
-            Some(_) => Err(Error::Backend(format!("cuda: {op} is not graph-replayable"))),
+            Some(_) => Err(Error::Backend(format!(
+                "cuda: {op} is not graph-replayable"
+            ))),
             None => Ok(()),
         }
     }
@@ -781,7 +840,10 @@ impl CudaBackend {
     /// and runs gemm_q4k / gemm_q6k (prefill) or gemv_q8 (decode) into y, under one
     /// scratch lock.
     #[allow(clippy::too_many_arguments)]
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes y on the device")]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the kernel writes y on the device"
+    )]
     fn qmatmul_q8(
         &self,
         w: &QWeight<CudaBuf>,
@@ -897,8 +959,18 @@ impl CudaBackend {
     }
 
     // Arguments stay live through launch, including its write-epoch update.
-    #[expect(clippy::needless_pass_by_ref_mut, reason = "the kernel writes y on the device")]
-    fn launch_binary_f32(&self, op: &str, kernel: &str, a: &CudaBuf, b: &CudaBuf, y: &mut CudaBuf) -> Result<()> {
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the kernel writes y on the device"
+    )]
+    fn launch_binary_f32(
+        &self,
+        op: &str,
+        kernel: &str,
+        a: &CudaBuf,
+        b: &CudaBuf,
+        y: &mut CudaBuf,
+    ) -> Result<()> {
         let n = shape::elementwise(op, &[a.len, b.len], &[y.len])? / 4;
         let mut a_ptr = a.ptr;
         let mut b_ptr = b.ptr;
@@ -963,8 +1035,12 @@ impl Backend for CudaBackend {
         self.sync()
     }
 
-    fn device_label(&self) -> Option<String> { Some(self.device_name().into()) }
-    fn unified_memory(&self) -> bool { self.unified_memory }
+    fn device_label(&self) -> Option<String> {
+        Some(self.device_name().into())
+    }
+    fn unified_memory(&self) -> bool {
+        self.unified_memory
+    }
 
     fn available_device_bytes(&self) -> Result<Option<usize>> {
         self.memory_info().map(|(free, _)| Some(free))
@@ -989,8 +1065,14 @@ impl Backend for CudaBackend {
     }
 
     fn supports(&self, op: Operation) -> bool {
-        matches!(op, Operation::Scale | Operation::GeluTanhMul | Operation::Softcap
-            | Operation::RopeSplitHalf | Operation::WindowedAttention)
+        matches!(
+            op,
+            Operation::Scale
+                | Operation::GeluTanhMul
+                | Operation::Softcap
+                | Operation::RopeSplitHalf
+                | Operation::WindowedAttention
+        )
     }
 
     fn supports_weight_dtype(&self, dtype: GgmlDType) -> bool {
@@ -1013,12 +1095,25 @@ impl Backend for CudaBackend {
         self.gelu(a, b, y)
     }
 
-    fn rope_split_half(&self, x: &mut Self::Buf, pos: u32, spec: &RopeSpec, factors: &Self::Buf) -> Result<()> {
+    fn rope_split_half(
+        &self,
+        x: &mut Self::Buf,
+        pos: u32,
+        spec: &RopeSpec,
+        factors: &Self::Buf,
+    ) -> Result<()> {
         self.split_rope(x, pos, spec, factors)
     }
 
-    fn attn_windowed(&self, q: &Self::Buf, kv: &KvView<Self::Buf>, spec: &AttnSpec,
-        scale: f32, window: usize, o: &mut Self::Buf) -> Result<()> {
+    fn attn_windowed(
+        &self,
+        q: &Self::Buf,
+        kv: &KvView<Self::Buf>,
+        spec: &AttnSpec,
+        scale: f32,
+        window: usize,
+        o: &mut Self::Buf,
+    ) -> Result<()> {
         self.attention_windowed(q, kv, spec, scale, window, o)
     }
 
@@ -1028,14 +1123,18 @@ impl Backend for CudaBackend {
         self.bind()?;
         // cuMemAlloc rejects 0 bytes; a zero-length buffer still needs a
         // distinct, freeable pointer.
-        let (ptr, charge) = self.buffers.allocate(crate::memory::MemoryDomain::Device, bytes.max(4), || {
-            let mut ptr = 0;
-            // SAFETY: `bind` above made `self.ctx` current on this thread and
-            // `allocate` runs this closure synchronously; `ptr` is a live u64
-            // out-pointer and the size is non-zero, which cuMemAlloc requires.
-            cu("cuMemAlloc", unsafe { cuMemAlloc_v2(&raw mut ptr, bytes.max(4)) })?;
-            Ok(ptr)
-        })?;
+        let (ptr, charge) =
+            self.buffers
+                .allocate(crate::memory::MemoryDomain::Device, bytes.max(4), || {
+                    let mut ptr = 0;
+                    // SAFETY: `bind` above made `self.ctx` current on this thread and
+                    // `allocate` runs this closure synchronously; `ptr` is a live u64
+                    // out-pointer and the size is non-zero, which cuMemAlloc requires.
+                    cu("cuMemAlloc", unsafe {
+                        cuMemAlloc_v2(&raw mut ptr, bytes.max(4))
+                    })?;
+                    Ok(ptr)
+                })?;
         let buf = CudaBuf {
             ctx: self.ctx,
             ptr,
@@ -1174,18 +1273,30 @@ impl Backend for CudaBackend {
         let n_out = shape::matmul(&gate.shape, x.len / 4, y.len / 4)?.n_out;
         let (mut wg, mut wu, mut x_ptr, mut y_ptr) = (gate.buf.ptr, up.buf.ptr, x.ptr, y.ptr);
         let (mut n_out_i, mut n_in_i) = (int(n_out)?, int(n_in)?);
-        let (mut dt_g, mut bb_g) = (dtype_code::code(gate.dtype)?, dtype_code::block_bytes(gate.dtype));
-        let (mut dt_u, mut bb_u) = (dtype_code::code(up.dtype)?, dtype_code::block_bytes(up.dtype));
+        let (mut dt_g, mut bb_g) = (
+            dtype_code::code(gate.dtype)?,
+            dtype_code::block_bytes(gate.dtype),
+        );
+        let (mut dt_u, mut bb_u) = (
+            dtype_code::code(up.dtype)?,
+            dtype_code::block_bytes(up.dtype),
+        );
         self.launch(
             "gemv_q_swiglu",
             [(n_out as u32).div_ceil(WARPS * Q_ROWS), n_tokens as u32, 1],
             [32, WARPS, 1],
-            &mut params!(wg, wu, x_ptr, y_ptr, n_out_i, n_in_i, dt_g, bb_g, dt_u, bb_u),
+            &mut params!(
+                wg, wu, x_ptr, y_ptr, n_out_i, n_in_i, dt_g, bb_g, dt_u, bb_u
+            ),
         )
     }
 
     fn qmatmul(&self, w: &QWeight<Self::Buf>, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
-        let shape::Matmul { n_out, n_in, n_tokens } = shape::matmul(&w.shape, x.len / 4, y.len / 4)?;
+        let shape::Matmul {
+            n_out,
+            n_in,
+            n_tokens,
+        } = shape::matmul(&w.shape, x.len / 4, y.len / 4)?;
         let mut code = dtype_code::decoder_code(w.dtype)?;
         if w.dtype == GgmlDType::Q5K {
             return self.qmatmul_q5k(w, x, y, n_out, n_in, n_tokens);
@@ -1429,7 +1540,14 @@ impl Backend for CudaBackend {
         spec: &AttnSpec,
         o: &mut Self::Buf,
     ) -> Result<()> {
-        let shape::Attn { n_q, prefix } = shape::attn(spec, q.len / 4, kv.len, kv.k.len / 2, kv.v.len / 2, o.len / 4)?;
+        let shape::Attn { n_q, prefix } = shape::attn(
+            spec,
+            q.len / 4,
+            kv.len,
+            kv.k.len / 2,
+            kv.v.len / 2,
+            o.len / 4,
+        )?;
         if spec.head_dim > MAX_HEAD_DIM {
             // Eager only: graph capture refuses heads this wide.
             return self.attention_windowed(q, kv, spec, 1.0 / (spec.head_dim as f32).sqrt(), 0, o);
@@ -1492,8 +1610,12 @@ impl Backend for CudaBackend {
             0u64
         };
         self.launch(
-            ["attn_f16kv_g1", "attn_f16kv_g2", "attn_f16kv_g4", "attn_f16kv_g8"]
-                [g.trailing_zeros() as usize],
+            [
+                "attn_f16kv_g1",
+                "attn_f16kv_g2",
+                "attn_f16kv_g4",
+                "attn_f16kv_g8",
+            ][g.trailing_zeros() as usize],
             [(spec.n_q_heads / g) as u32, n_q as u32, splits as u32],
             [32, ATTN_WARPS, 1],
             &mut params!(

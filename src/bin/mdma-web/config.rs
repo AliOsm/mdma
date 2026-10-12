@@ -30,26 +30,43 @@ impl Config {
         let required = |name: &str| super::vars::required(&env, name);
         let optional = |name: &str, default: &str| -> Result<String, BoxError> {
             match env(name) {
-                Ok(value) if value.trim().is_empty() => Err(format!("{name} must not be empty").into()),
+                Ok(value) if value.trim().is_empty() => {
+                    Err(format!("{name} must not be empty").into())
+                }
                 Ok(value) => Ok(value),
                 Err(VarError::NotPresent) => Ok(default.to_owned()),
                 Err(error) => Err(format!("{name}: {error}").into()),
             }
         };
-        let bounded = |name: &str, default: u32, range: std::ops::RangeInclusive<u32>| -> Result<u32, BoxError> {
-            optional(name, &default.to_string())?.parse::<u32>().ok().filter(|n| range.contains(n))
-                .ok_or_else(|| format!("{name} must be an integer between {} and {}", range.start(), range.end()).into())
+        let bounded = |name: &str,
+                       default: u32,
+                       range: std::ops::RangeInclusive<u32>|
+         -> Result<u32, BoxError> {
+            optional(name, &default.to_string())?
+                .parse::<u32>()
+                .ok()
+                .filter(|n| range.contains(n))
+                .ok_or_else(|| {
+                    format!(
+                        "{name} must be an integer between {} and {}",
+                        range.start(),
+                        range.end()
+                    )
+                    .into()
+                })
         };
 
         let listen = optional("MDMA_WEB_LISTEN", DEFAULT_LISTEN)?;
-        let listen = listen.parse::<SocketAddress>()
+        let listen = listen
+            .parse::<SocketAddress>()
             .map_err(|e| format!("MDMA_WEB_LISTEN '{listen}' is not an ip:port address: {e}"))?
             .into_std();
         if !listen.ip().is_loopback() {
             return Err(format!(
                 "MDMA_WEB_LISTEN must be a loopback address (127.0.0.1 or [::1]), got {listen}: \
                  the gateway acts with its client certificate for every browser that reaches it"
-            ).into());
+            )
+            .into());
         }
         Ok(Self {
             listen,
@@ -57,8 +74,13 @@ impl Config {
             tls_cert: required("MDMA_TLS_CERT")?,
             tls_key: required("MDMA_TLS_KEY")?,
             tls_ca: required("MDMA_TLS_CA")?,
-            max_streams: bounded("MDMA_WEB_MAX_STREAMS", DEFAULT_MAX_STREAMS, 1..=MAX_STREAMS)? as usize,
-            watch_interval: Duration::from_millis(u64::from(bounded("MDMA_WEB_WATCH_MS", DEFAULT_WATCH_MS, WATCH_MS)?)),
+            max_streams: bounded("MDMA_WEB_MAX_STREAMS", DEFAULT_MAX_STREAMS, 1..=MAX_STREAMS)?
+                as usize,
+            watch_interval: Duration::from_millis(u64::from(bounded(
+                "MDMA_WEB_WATCH_MS",
+                DEFAULT_WATCH_MS,
+                WATCH_MS,
+            )?)),
         })
     }
 }

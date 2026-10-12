@@ -20,8 +20,8 @@ use rama::rt::Executor;
 use rama::tcp::server::TcpListener;
 use rama::tls::rustls::server::TlsAcceptorLayer;
 use rama::tls::server::{ClientVerifyMode, ServerAuthData, TlsServerConfig};
-use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pki_types::pem::{Error as PemError, PemObject};
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -158,7 +158,9 @@ where
         Ok::<_, BoxError>(Some((MdmaServer::new(service), tls_config, federation)))
     })
     .await??;
-    let Some((grpc_svc, tls_config, federation)) = startup else { return Ok(()); };
+    let Some((grpc_svc, tls_config, federation)) = startup else {
+        return Ok(());
+    };
 
     // Do not open a new listening socket if stop was requested during startup.
     if executor
@@ -170,10 +172,15 @@ where
     {
         return Ok(());
     }
-    let client_policy = federation.as_ref().map_or_else(Default::default, mdma::federation::runtime::Prepared::client_policy);
-    let tcp_service = client_policy.connection_service(TlsAcceptorLayer::new(tls_config)
-        .into_layer(client_policy.tls_service(HttpServer::auto(executor.clone())
-            .service(client_policy.http_service(grpc_svc)))));
+    let client_policy = federation.as_ref().map_or_else(
+        Default::default,
+        mdma::federation::runtime::Prepared::client_policy,
+    );
+    let tcp_service = client_policy.connection_service(
+        TlsAcceptorLayer::new(tls_config).into_layer(client_policy.tls_service(
+            HttpServer::auto(executor.clone()).service(client_policy.http_service(grpc_svc)),
+        )),
+    );
 
     let listener = TcpListener::bind_address(listen.to_string(), executor.clone()).await?;
     let federation_listener = match &federation {
@@ -185,9 +192,13 @@ where
         listener.local_addr()?
     );
     if let Some(peer_listener) = &federation_listener {
-        let workloads = federation.as_ref().is_some_and(mdma::federation::runtime::Prepared::execution_enabled);
-        eprintln!("mdma federation listening on {} (strict mTLS, execution={workloads})",
-            peer_listener.local_addr()?);
+        let workloads = federation
+            .as_ref()
+            .is_some_and(mdma::federation::runtime::Prepared::execution_enabled);
+        eprintln!(
+            "mdma federation listening on {} (strict mTLS, execution={workloads})",
+            peer_listener.local_addr()?
+        );
     }
     let peers = async move {
         match (federation, federation_listener) {
@@ -240,16 +251,25 @@ async fn launch(config: Config, guard: ShutdownGuard) -> Result<(), BoxError> {
     if matches!(&config.models, ModelsSource::ControlOnly) {
         let executor = Executor::graceful(guard.clone());
         let prepared = tokio::task::spawn_blocking(move || {
-            let path = config.federation_config.ok_or("missing control-only federation config")?;
+            let path = config
+                .federation_config
+                .ok_or("missing control-only federation config")?;
             mdma::federation::runtime::Prepared::load(
                 mdma::federation::runtime::Config::load(std::path::Path::new(&path))?,
-                config.listen.into(), &load_certs(&config.tls_ca)?, &load_certs(&config.tls_cert)?,
+                config.listen.into(),
+                &load_certs(&config.tls_ca)?,
+                &load_certs(&config.tls_cert)?,
             )
-        }).await??;
-        if guard.cancelled().now_or_never().is_some() { return Ok(()); }
+        })
+        .await??;
+        if guard.cancelled().now_or_never().is_some() {
+            return Ok(());
+        }
         let listener = prepared.bind(executor.clone()).await?;
-        eprintln!("mdma federation control-only listening on {} (strict mTLS, no client listener or workloads)",
-            listener.local_addr()?);
+        eprintln!(
+            "mdma federation control-only listening on {} (strict mTLS, no client listener or workloads)",
+            listener.local_addr()?
+        );
         prepared.serve(listener, executor).await?;
         return Ok(());
     }
@@ -258,10 +278,19 @@ async fn launch(config: Config, guard: ShutdownGuard) -> Result<(), BoxError> {
         #[cfg(feature = "rocm")]
         "rocm" => {
             let reference = config.rocm_f32;
-            run(move || {
-                if reference { mdma::backend::rocm::HipBackend::new_f32() }
-                else { mdma::backend::rocm::HipBackend::new() }
-            }, "rocm", config, guard).await
+            run(
+                move || {
+                    if reference {
+                        mdma::backend::rocm::HipBackend::new_f32()
+                    } else {
+                        mdma::backend::rocm::HipBackend::new()
+                    }
+                },
+                "rocm",
+                config,
+                guard,
+            )
+            .await
         }
         #[cfg(not(feature = "rocm"))]
         "rocm" => Err("MDMA_BACKEND=rocm requires building with --features rocm".into()),

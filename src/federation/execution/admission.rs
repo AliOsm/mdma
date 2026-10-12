@@ -8,6 +8,7 @@ use super::{
     native::{self, CompletionTask},
     synthesis,
 };
+use crate::registry::{Holder, Lease, LeaseError};
 use crate::{
     backend::Backend,
     federation::{
@@ -24,7 +25,6 @@ use rama::{
     extensions::{Extensions, ExtensionsRef, Ingress},
     http::grpc::{Request, Status},
 };
-use crate::registry::{Holder, Lease, LeaseError};
 use std::{sync::Arc, time::Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -40,7 +40,8 @@ pub(super) type Launch = Box<
 >;
 
 /// A model load in progress.
-pub(crate) type Loading<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Status>> + Send + 'a>>;
+pub(crate) type Loading<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Status>> + Send + 'a>>;
 
 pub(crate) struct Prepared {
     pub(super) admission: Admission,
@@ -50,14 +51,24 @@ pub(crate) struct Prepared {
 pub(crate) trait Executor: Send + Sync {
     fn descriptor(&self, model: &str) -> Result<ModelDescriptor, Status>;
     /// A lease keeping `model` loaded for `peer`; the load starts in the background.
-    fn lease(&self, _peer: &str, _model: &str, _ttl: Option<std::time::Duration>) -> Result<LeaseGrant, Status> {
+    fn lease(
+        &self,
+        _peer: &str,
+        _model: &str,
+        _ttl: Option<std::time::Duration>,
+    ) -> Result<LeaseGrant, Status> {
         Err(Status::unimplemented("execution_disabled"))
     }
     /// The model a peer's lease is on.
     fn lease_model(&self, _peer: &str, _id: &str) -> Result<String, Status> {
         Err(Status::not_found("lease_unknown"))
     }
-    fn renew_lease(&self, _peer: &str, _id: &str, _ttl: Option<std::time::Duration>) -> Result<LeaseGrant, Status> {
+    fn renew_lease(
+        &self,
+        _peer: &str,
+        _id: &str,
+        _ttl: Option<std::time::Duration>,
+    ) -> Result<LeaseGrant, Status> {
         Err(Status::not_found("lease_unknown"))
     }
     fn release_lease(&self, _peer: &str, _id: &str) -> Result<(), Status> {
@@ -99,7 +110,9 @@ where
         if !resident {
             let (registry, model) = (self.inventory.registry.clone(), lease.model.clone());
             // The outcome is recorded on the model and published in the catalog.
-            drop(tokio::task::spawn_blocking(move || registry.acquire_blocking(&model).map(drop)));
+            drop(tokio::task::spawn_blocking(move || {
+                registry.acquire_blocking(&model).map(drop)
+            }));
         }
         LeaseGrant {
             lease_id: lease.id.clone(),
@@ -175,28 +188,56 @@ where
                 .await
                 .map_err(|_| Status::internal("execution_failed"))?
                 .map_err(|error| match error {
-                    crate::registry::LoadError::Memory(_) => Status::resource_exhausted("limit_exceeded"),
-                    crate::registry::LoadError::Failed(_) => Status::unavailable("model_unavailable"),
+                    crate::registry::LoadError::Memory(_) => {
+                        Status::resource_exhausted("limit_exceeded")
+                    }
+                    crate::registry::LoadError::Failed(_) => {
+                        Status::unavailable("model_unavailable")
+                    }
                 })
         })
     }
 
-    fn lease(&self, peer: &str, model: &str, ttl: Option<std::time::Duration>) -> Result<LeaseGrant, Status> {
-        let lease = self.inventory.registry.lease(Holder::Peer(peer.to_owned()), model, ttl).map_err(lease_error)?;
+    fn lease(
+        &self,
+        peer: &str,
+        model: &str,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<LeaseGrant, Status> {
+        let lease = self
+            .inventory
+            .registry
+            .lease(Holder::Peer(peer.to_owned()), model, ttl)
+            .map_err(lease_error)?;
         Ok(self.grant(&lease))
     }
 
     fn lease_model(&self, peer: &str, id: &str) -> Result<String, Status> {
-        self.inventory.registry.lease_model(&Holder::Peer(peer.to_owned()), id).map_err(lease_error)
+        self.inventory
+            .registry
+            .lease_model(&Holder::Peer(peer.to_owned()), id)
+            .map_err(lease_error)
     }
 
-    fn renew_lease(&self, peer: &str, id: &str, ttl: Option<std::time::Duration>) -> Result<LeaseGrant, Status> {
-        let lease = self.inventory.registry.renew(&Holder::Peer(peer.to_owned()), id, ttl).map_err(lease_error)?;
+    fn renew_lease(
+        &self,
+        peer: &str,
+        id: &str,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<LeaseGrant, Status> {
+        let lease = self
+            .inventory
+            .registry
+            .renew(&Holder::Peer(peer.to_owned()), id, ttl)
+            .map_err(lease_error)?;
         Ok(self.grant(&lease))
     }
 
     fn release_lease(&self, peer: &str, id: &str) -> Result<(), Status> {
-        self.inventory.registry.release(&Holder::Peer(peer.to_owned()), id).map_err(lease_error)
+        self.inventory
+            .registry
+            .release(&Holder::Peer(peer.to_owned()), id)
+            .map_err(lease_error)
     }
 
     fn descriptor(&self, model: &str) -> Result<ModelDescriptor, Status> {
@@ -252,7 +293,11 @@ where
             )
             .map_err(|error| native_error(&error))?;
         let admission = prepared.admission().clone();
-        let guard = self.inventory.shutdown.clone().map(rama::graceful::WeakShutdownGuard::upgrade);
+        let guard = self
+            .inventory
+            .shutdown
+            .clone()
+            .map(rama::graceful::WeakShutdownGuard::upgrade);
         Ok(Prepared {
             admission,
             launch: Box::new(move |claim, cancel, response_permit, boundary| {
@@ -343,7 +388,10 @@ impl Service {
         Ok(descriptor)
     }
 
-    #[expect(clippy::needless_pass_by_value, reason = "owned gRPC request, matching `decide`")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "owned gRPC request, matching `decide`"
+    )]
     pub(crate) fn synthesize(
         &self,
         request: Request<SynthesizeRequest>,
@@ -383,7 +431,10 @@ impl Service {
     /// Load the model a permitted caller asked for before admission, so the
     /// first request to an on-disk model does not block the runtime.
     pub(crate) fn load<'a, T>(
-        &'a self, request: &Request<T>, envelope: &'a ExecutionEnvelope, operation: Operation,
+        &'a self,
+        request: &Request<T>,
+        envelope: &'a ExecutionEnvelope,
+        operation: Operation,
     ) -> Result<Loading<'a>, Status> {
         let binding = request
             .extensions()

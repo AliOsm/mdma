@@ -4,9 +4,15 @@
 // or a swapped nibble does not survive these shapes.
 use super::CudaBackend;
 use crate::backend::cpu::CpuBackend;
-use crate::backend::test_support::{generation::{benchmark_prefix, greedy_continuation}, parity};
-use crate::backend::test_support::{activation_row, bytes, close, cpu_qmatmul, f16_round, f32s, qmatmul as gpu_qmatmul, real_tensor_rows};
 use crate::backend::test_support::fixture;
+use crate::backend::test_support::{
+    activation_row, bytes, close, cpu_qmatmul, f16_round, f32s, qmatmul as gpu_qmatmul,
+    real_tensor_rows,
+};
+use crate::backend::test_support::{
+    generation::{benchmark_prefix, greedy_continuation},
+    parity,
+};
 use crate::backend::{AttnSpec, Backend, KvView, Pool, QWeight, RopeSpec};
 use crate::gguf::{GgmlDType, GgufModel};
 
@@ -103,10 +109,18 @@ fn add_rmsnorm_is_bit_identical_to_add_then_rmsnorm() {
     let gpu = gpu();
     let (dim, n_tokens) = (300usize, 3usize);
     let n = dim * n_tokens;
-    let a: Vec<f32> = (0..n).map(|i| ((i * 37 % 101) as f32 - 50.0) / 16.0).collect();
-    let b: Vec<f32> = (0..n).map(|i| ((i * 13 % 67) as f32 - 30.0) / 8.0).collect();
+    let a: Vec<f32> = (0..n)
+        .map(|i| ((i * 37 % 101) as f32 - 50.0) / 16.0)
+        .collect();
+    let b: Vec<f32> = (0..n)
+        .map(|i| ((i * 13 % 67) as f32 - 30.0) / 8.0)
+        .collect();
     let w: Vec<f32> = (0..dim).map(|i| 0.5 + (i % 11) as f32 * 0.07).collect();
-    let (a_g, b_g, w_g) = (upload_new(&gpu, &a), upload_new(&gpu, &b), upload_new(&gpu, &w));
+    let (a_g, b_g, w_g) = (
+        upload_new(&gpu, &a),
+        upload_new(&gpu, &b),
+        upload_new(&gpu, &w),
+    );
 
     let mut sum_want = gpu.alloc(n * 4, Pool::Scratch).unwrap();
     let mut y_want = gpu.alloc(n * 4, Pool::Scratch).unwrap();
@@ -115,12 +129,16 @@ fn add_rmsnorm_is_bit_identical_to_add_then_rmsnorm() {
 
     let mut sum = gpu.alloc(n * 4, Pool::Scratch).unwrap();
     let mut y = gpu.alloc(n * 4, Pool::Scratch).unwrap();
-    gpu.add_rmsnorm(&w_g, &a_g, &b_g, &mut sum, &mut y, 1e-5).unwrap();
+    gpu.add_rmsnorm(&w_g, &a_g, &b_g, &mut sum, &mut y, 1e-5)
+        .unwrap();
     assert_eq!(download_all(&gpu, &sum), download_all(&gpu, &sum_want));
     assert_eq!(download_all(&gpu, &y), download_all(&gpu, &y_want));
 
     let mut short = gpu.alloc(n * 4 - 4, Pool::Scratch).unwrap();
-    assert!(gpu.add_rmsnorm(&w_g, &a_g, &b_g, &mut short, &mut y, 1e-5).is_err());
+    assert!(
+        gpu.add_rmsnorm(&w_g, &a_g, &b_g, &mut short, &mut y, 1e-5)
+            .is_err()
+    );
 }
 
 /// rope_kv_f16 against rope_f32 + kv_write_f16: q and both caches match
@@ -140,15 +158,20 @@ fn rope_kv_write_is_bit_identical_to_rope_then_kv_write() {
     let q: Vec<f32> = (0..n_tokens * n_q * head_dim)
         .map(|i| ((i * 7 % 23) as f32 - 11.0) / 5.0)
         .collect();
-    let k: Vec<f32> = (0..n_elems).map(|i| ((i * 5 % 19) as f32 - 9.0) / 4.0).collect();
-    let v: Vec<f32> = (0..n_elems).map(|i| ((i * 3 % 17) as f32 - 8.0) / 3.0).collect();
+    let k: Vec<f32> = (0..n_elems)
+        .map(|i| ((i * 5 % 19) as f32 - 9.0) / 4.0)
+        .collect();
+    let v: Vec<f32> = (0..n_elems)
+        .map(|i| ((i * 3 % 17) as f32 - 8.0) / 3.0)
+        .collect();
 
     let mut q_want = upload_new(&gpu, &q);
     let mut k_want = upload_new(&gpu, &k);
     let v_g = upload_new(&gpu, &v);
     let mut dk_want = gpu.alloc(cache_bytes, Pool::Scratch).unwrap();
     let mut dv_want = gpu.alloc(cache_bytes, Pool::Scratch).unwrap();
-    gpu.rope(&mut q_want, &mut k_want, 5, n_tokens, &spec).unwrap();
+    gpu.rope(&mut q_want, &mut k_want, 5, n_tokens, &spec)
+        .unwrap();
     gpu.kv_write(&k_want, &v_g, &mut dk_want, &mut dv_want, offset, n_elems)
         .unwrap();
 
@@ -156,21 +179,48 @@ fn rope_kv_write_is_bit_identical_to_rope_then_kv_write() {
     let mut k_g = upload_new(&gpu, &k);
     let mut dk = gpu.alloc(cache_bytes, Pool::Scratch).unwrap();
     let mut dv = gpu.alloc(cache_bytes, Pool::Scratch).unwrap();
-    gpu.rope_kv_write(&mut q_g, &mut k_g, &v_g, &mut dk, &mut dv, offset, 5, n_tokens, &spec, n_elems)
-        .unwrap();
+    gpu.rope_kv_write(
+        &mut q_g, &mut k_g, &v_g, &mut dk, &mut dv, offset, 5, n_tokens, &spec, n_elems,
+    )
+    .unwrap();
     assert_eq!(download_all(&gpu, &q_g), download_all(&gpu, &q_want));
     let (dk_got, dk_ref) = (download_all(&gpu, &dk), download_all(&gpu, &dk_want));
     assert_eq!(dk_got, dk_ref);
     assert_eq!(download_all(&gpu, &dv), download_all(&gpu, &dv_want));
-    assert!(dk_got[..offset * 2].iter().all(|&b| b == 0), "rows before the offset");
-    assert!(dk_got[offset * 2..(offset + n_elems) * 2].iter().any(|&b| b != 0));
+    assert!(
+        dk_got[..offset * 2].iter().all(|&b| b == 0),
+        "rows before the offset"
+    );
+    assert!(
+        dk_got[offset * 2..(offset + n_elems) * 2]
+            .iter()
+            .any(|&b| b != 0)
+    );
 
-    assert!(gpu
-        .rope_kv_write(&mut q_g, &mut k_g, &v_g, &mut dk, &mut dv, offset + 2 * row, 5, n_tokens, &spec, n_elems)
-        .is_err(), "rows past the cache end");
+    assert!(
+        gpu.rope_kv_write(
+            &mut q_g,
+            &mut k_g,
+            &v_g,
+            &mut dk,
+            &mut dv,
+            offset + 2 * row,
+            5,
+            n_tokens,
+            &spec,
+            n_elems
+        )
+        .is_err(),
+        "rows past the cache end"
+    );
 }
 
-fn upload_weight(gpu: &CudaBackend, dtype: GgmlDType, n_out: usize, n_in: usize) -> QWeight<super::CudaBuf> {
+fn upload_weight(
+    gpu: &CudaBackend,
+    dtype: GgmlDType,
+    n_out: usize,
+    n_in: usize,
+) -> QWeight<super::CudaBuf> {
     let raw = synthetic_kquant(dtype, n_out, n_in);
     let mut buf = gpu.alloc(raw.len(), Pool::Weights).unwrap();
     gpu.upload(&mut buf, 0, &raw).unwrap();
@@ -207,7 +257,8 @@ fn fused_decode_matmuls_are_bit_identical_to_separate_ones() {
         let out = |n_out: usize| gpu.alloc(n_tokens * n_out * 4, Pool::Scratch).unwrap();
 
         let (mut q, mut k, mut v) = (out(100), out(36), out(36));
-        gpu.qmatmul_qkv(&wq, &wk, &wv, &x_g, &mut q, &mut k, &mut v).unwrap();
+        gpu.qmatmul_qkv(&wq, &wk, &wv, &x_g, &mut q, &mut k, &mut v)
+            .unwrap();
         for (w, got) in [(&wq, &q), (&wk, &k), (&wv, &v)] {
             let mut want = out(w.shape[0]);
             gpu.qmatmul(w, &x_g, &mut want).unwrap();
@@ -215,7 +266,8 @@ fn fused_decode_matmuls_are_bit_identical_to_separate_ones() {
         }
 
         let (mut gs, mut us, mut y) = (out(70), out(70), out(70));
-        gpu.ffn_gate_up(&wg, &wu, &x_g, &mut gs, &mut us, &mut y).unwrap();
+        gpu.ffn_gate_up(&wg, &wu, &x_g, &mut gs, &mut us, &mut y)
+            .unwrap();
         let (mut g_want, mut u_want, mut y_want) = (out(70), out(70), out(70));
         gpu.qmatmul(&wg, &x_g, &mut g_want).unwrap();
         gpu.qmatmul(&wu, &x_g, &mut u_want).unwrap();
@@ -223,8 +275,14 @@ fn fused_decode_matmuls_are_bit_identical_to_separate_ones() {
         assert_eq!(download_all(&gpu, &y), download_all(&gpu, &y_want));
 
         let mut short = out(35);
-        assert!(gpu.qmatmul_qkv(&wq, &wk, &wv, &x_g, &mut q, &mut short, &mut v).is_err());
-        assert!(gpu.ffn_gate_up(&wg, &wu, &x_g, &mut gs, &mut us, &mut short).is_err());
+        assert!(
+            gpu.qmatmul_qkv(&wq, &wk, &wv, &x_g, &mut q, &mut short, &mut v)
+                .is_err()
+        );
+        assert!(
+            gpu.ffn_gate_up(&wg, &wu, &x_g, &mut gs, &mut us, &mut short)
+                .is_err()
+        );
     }
 }
 
@@ -701,7 +759,9 @@ fn greedy_continuation_matches_llama_cpp() {
     const PROMPT: &[u32] = &[1, 918, 6872, 446, 9760, 505];
     const EXPECTED: &[u32] = &[12247, 281, 12247, 505, 395];
     let backend = gpu();
-    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = GPU_MODEL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Model::load(&backend, &mut gguf).expect("load model");
     let mut kv = model.new_kv_cache(&backend, 64).expect("kv");
@@ -714,7 +774,15 @@ fn greedy_continuation_matches_llama_cpp() {
             .expect("forward");
         pos += 1;
     }
-    let generated = greedy_continuation(&backend, &model, &mut kv, &mut ws, logits, pos, EXPECTED.len());
+    let generated = greedy_continuation(
+        &backend,
+        &model,
+        &mut kv,
+        &mut ws,
+        logits,
+        pos,
+        EXPECTED.len(),
+    );
     assert_eq!(generated, EXPECTED);
 }
 
@@ -729,7 +797,9 @@ fn gemm_prefill_continues_like_per_token_decode() {
         "{} has no int8 mma.sync",
         backend.device_name()
     );
-    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = GPU_MODEL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Model::load(&backend, &mut gguf).expect("load model");
     let prompt: Vec<u32> = (0..40).map(|i| 1 + (i * 2749 + 918) % 30000).collect();
@@ -791,7 +861,9 @@ fn bench_wall_time() {
     use std::time::Instant;
     let backend = gpu();
     let start = Instant::now();
-    let _guard = GPU_MODEL_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = GPU_MODEL_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut gguf = GgufModel::open(fixture()).expect("open gguf");
     let model = Model::load(&backend, &mut gguf).expect("load model");
     eprintln!(

@@ -3,9 +3,13 @@
 //! the host side: parameter blob layout, input padding and the bit-exact reference.
 
 use super::{CachingPart, Emitter, Quant, WIDE_OUT_FIFO, WIDE_TOP, caching_program};
-use crate::backend::coral::executable::{Bitstream, Description, Direction, Executable, ExecutableType, Hint, Layer};
+use crate::backend::coral::executable::{
+    Bitstream, Description, Direction, Executable, ExecutableType, Hint, Layer,
+};
 use crate::backend::coral::isa::scalar::{self as sc, mesh_counters, tile_counter};
-use crate::backend::coral::isa::{Fields, cdiv, cdiv_i64, fields, op, ring_mesh as rm, round_up, ttu, wide_narrow as wn};
+use crate::backend::coral::isa::{
+    Fields, cdiv, cdiv_i64, fields, op, ring_mesh as rm, round_up, ttu, wide_narrow as wn,
+};
 use crate::backend::coral::{Error, Result};
 
 /// 64-byte units: ring broadcast of x from the gather tile to the other compute tiles.
@@ -27,37 +31,73 @@ pub struct FcGeom {
 }
 
 impl FcGeom {
-    pub const fn new(n: usize, k: usize) -> Self { Self { n, k, bias: true } }
+    pub const fn new(n: usize, k: usize) -> Self {
+        Self { n, k, bias: true }
+    }
 
     /// 64-output groups.
-    pub const fn g(&self) -> usize { cdiv(self.n, 64) }
+    pub const fn g(&self) -> usize {
+        cdiv(self.n, 64)
+    }
     /// Groups ("passes") per compute tile; the last tile may have fewer.
-    pub const fn p(&self) -> usize { cdiv(self.g(), 16) }
+    pub const fn p(&self) -> usize {
+        cdiv(self.g(), 16)
+    }
     /// Compute tiles.
-    pub const fn t(&self) -> usize { cdiv(self.g(), self.p()) }
+    pub const fn t(&self) -> usize {
+        cdiv(self.g(), self.p())
+    }
     /// Groups of compute tile t.
-    pub fn gt(&self, t: usize) -> usize { self.p().min(self.g() - self.p() * t) }
+    pub fn gt(&self, t: usize) -> usize {
+        self.p().min(self.g() - self.p() * t)
+    }
     /// Outputs of compute tile t.
-    pub fn n_out(&self, t: usize) -> usize { (64 * self.p()).min(self.n - 64 * self.p() * t) }
+    pub fn n_out(&self, t: usize) -> usize {
+        (64 * self.p()).min(self.n - 64 * self.p() * t)
+    }
     /// Input DMA bytes.
-    pub const fn s(&self) -> usize { 8 * cdiv(self.k, 8) }
+    pub const fn s(&self) -> usize {
+        8 * cdiv(self.k, 8)
+    }
     /// Output DMA bytes.
-    pub const fn out_bytes(&self) -> usize { 8 * cdiv(self.n, 8) }
+    pub const fn out_bytes(&self) -> usize {
+        8 * cdiv(self.n, 8)
+    }
     /// Input bytes per input tile.
-    pub const fn b(&self) -> usize { 64 * cdiv(self.s(), 1024) }
+    pub const fn b(&self) -> usize {
+        64 * cdiv(self.s(), 1024)
+    }
     /// Input tiles (x arrives in pieces of b bytes).
-    pub const fn t_in(&self) -> usize { cdiv(self.s(), self.b()) }
+    pub const fn t_in(&self) -> usize {
+        cdiv(self.s(), self.b())
+    }
     /// Bytes of x on input tile t.
-    pub fn piece(&self, t: usize) -> usize { self.b().min(self.k - self.b() * t) }
+    pub fn piece(&self, t: usize) -> usize {
+        self.b().min(self.k - self.b() * t)
+    }
     /// 4-byte input words = reduction steps.
-    pub const fn kw(&self) -> usize { cdiv(self.k, 4) }
+    pub const fn kw(&self) -> usize {
+        cdiv(self.k, 4)
+    }
     /// Outputs per parameter group.
-    pub const fn group_out(&self) -> usize { if self.n <= 64 { round_up(self.n, 16) } else { 64 } }
+    pub const fn group_out(&self) -> usize {
+        if self.n <= 64 {
+            round_up(self.n, 16)
+        } else {
+            64
+        }
+    }
     /// int32 bias + `[K/4][g][4]` weights.
-    pub const fn group_bytes(&self) -> usize { 4 * self.group_out() * (self.bias as usize) + self.group_out() * 4 * self.kw() }
-    pub const fn param_bytes(&self) -> usize { self.g() * self.group_bytes() }
+    pub const fn group_bytes(&self) -> usize {
+        4 * self.group_out() * (self.bias as usize) + self.group_out() * 4 * self.kw()
+    }
+    pub const fn param_bytes(&self) -> usize {
+        self.g() * self.group_bytes()
+    }
     /// 64-byte units of bias in front of tile t's weights.
-    pub fn bias_rows(&self, t: usize) -> usize { 4 * self.gt(t) * usize::from(self.bias) }
+    pub fn bias_rows(&self, t: usize) -> usize {
+        4 * self.gt(t) * usize::from(self.bias)
+    }
 }
 
 /// edgetpu_compiler's narrow placement (fitted on ~1450 compiles) -> byte addresses
@@ -72,7 +112,13 @@ pub fn narrow_layout(n: usize, k: usize) -> (i64, i64, i64) {
     let m = 256 * cdiv(k, 256) + 512;
     let rsz = if FcGeom::new(n, k).t_in() > 1 { 32 } else { 0 };
     let n4 = round_up(n, 4);
-    let y_r = |base: usize| if n <= 4 { (base + rsz, base) } else { (base, base + n4) };
+    let y_r = |base: usize| {
+        if n <= 4 {
+            (base + rsz, base)
+        } else {
+            (base, base + n4)
+        }
+    };
     let (x, (y, r)) = if !(k <= 188 || n4 + 32 >= m) {
         (0, y_r(round_up(k, 4)))
     } else if n4 < m {
@@ -93,8 +139,19 @@ fn rcons_input(g: &FcGeom, j: usize, tiles: i64, seq: i64) -> Vec<u128> {
     let p = cdiv((4 * g.b()).min(g.s() - 4 * g.b() * j), 256) as i64;
     rm::encode_ring_consumer(
         &fields(&[
-            ("tile_mask", tiles), ("seq", seq), ("addr", WIDE_TOP - 8 * c), ("sdims", i64::from(c > 1)), ("cbuf", 1), ("slots", c), ("grp", p - 1),
-            ("gstride", if p > 1 { 4 * (c - p) + 1 } else { 0 }), ("mode", 3), ("s_id", R_W2N_1), ("s_val", -64 * c), ("s_cnt", c), ("s_en_b", 1),
+            ("tile_mask", tiles),
+            ("seq", seq),
+            ("addr", WIDE_TOP - 8 * c),
+            ("sdims", i64::from(c > 1)),
+            ("cbuf", 1),
+            ("slots", c),
+            ("grp", p - 1),
+            ("gstride", if p > 1 { 4 * (c - p) + 1 } else { 0 }),
+            ("mode", 3),
+            ("s_id", R_W2N_1),
+            ("s_val", -64 * c),
+            ("s_cnt", c),
+            ("s_en_b", 1),
             ("s_y", 1),
         ])
         .merge(ttu("", &[1], &[if p == 1 { 1 } else { c }], 4, "cnt")),
@@ -110,7 +167,17 @@ fn rcons_forward(g: &FcGeom, tiles: i64, seq: i64, fifo: i64) -> Vec<u128> {
         fields(&[("cbuf", 0), ("mode", 1), ("s_id", R_W2N_0)]).merge(ttu("", &[0], &[c], 4, "cnt"))
     };
     rm::encode_ring_consumer(
-        &fields(&[("tile_mask", tiles), ("seq", seq), ("addr", fifo), ("slots", 1), ("s_val", -64), ("s_cnt", 1), ("s_en_b", 1), ("s_y", 1)]).merge(f),
+        &fields(&[
+            ("tile_mask", tiles),
+            ("seq", seq),
+            ("addr", fifo),
+            ("slots", 1),
+            ("s_val", -64),
+            ("s_cnt", 1),
+            ("s_en_b", 1),
+            ("s_y", 1),
+        ])
+        .merge(f),
     )
 }
 
@@ -118,8 +185,18 @@ fn rcons_forward(g: &FcGeom, tiles: i64, seq: i64, fifo: i64) -> Vec<u128> {
 fn rprod_forward(g: &FcGeom, tile: i64, dest: i64, seq: i64, fifo: i64) -> Vec<u128> {
     rm::encode_ring_producer(
         &fields(&[
-            ("tile_mask", tile), ("seq", seq), ("addr", fifo), ("sdims", 1), ("cbuf", 1), ("slots", 1), ("mode", 1), ("r0_id", R_N2W), ("r0_val", 1),
-            ("r0_en_a", 1), ("r0_en_b", 1), ("dest", dest),
+            ("tile_mask", tile),
+            ("seq", seq),
+            ("addr", fifo),
+            ("sdims", 1),
+            ("cbuf", 1),
+            ("slots", 1),
+            ("mode", 1),
+            ("r0_id", R_N2W),
+            ("r0_val", 1),
+            ("r0_en_a", 1),
+            ("r0_en_b", 1),
+            ("dest", dest),
         ])
         .merge(ttu("", &[1, 0], &[1, cdiv(g.k, 256) as i64], 4, "cnt")),
     )
@@ -128,12 +205,33 @@ fn rprod_forward(g: &FcGeom, tile: i64, dest: i64, seq: i64, fifo: i64) -> Vec<u
 /// ringProducer: one tile's outputs to the scalar core (outfeed); k = output
 /// ordinal in a RING_PRODUCER_A record (serializes the tiles; op 2, op 1 for a
 /// scalar-memory outfeed).
-pub fn rprod_output(nbytes: usize, tile: i64, k: i64, seq: i64, fifo: i64, smem: bool) -> Vec<u128> {
+pub fn rprod_output(
+    nbytes: usize,
+    tile: i64,
+    k: i64,
+    seq: i64,
+    fifo: i64,
+    smem: bool,
+) -> Vec<u128> {
     rm::encode_ring_producer(
         &fields(&[
-            ("tile_mask", tile), ("seq", seq), ("addr", fifo), ("sdims", 1), ("cbuf", 1), ("slots", 1), ("mode", 3), ("pcfg", if smem { 12 } else { 20 }),
-            ("r0_id", (if smem { 1 } else { 2 } << 5) | 0x11), ("r0_val", k), ("r0_en_a", 1), ("r0_en_b", 1), ("r1_id", R_N2W), ("r1_val", 1),
-            ("r1_en_a", 1), ("r1_en_b", 1), ("dest", 1 << rm::SCALAR_CORE),
+            ("tile_mask", tile),
+            ("seq", seq),
+            ("addr", fifo),
+            ("sdims", 1),
+            ("cbuf", 1),
+            ("slots", 1),
+            ("mode", 3),
+            ("pcfg", if smem { 12 } else { 20 }),
+            ("r0_id", (if smem { 1 } else { 2 } << 5) | 0x11),
+            ("r0_val", k),
+            ("r0_en_a", 1),
+            ("r0_en_b", 1),
+            ("r1_id", R_N2W),
+            ("r1_val", 1),
+            ("r1_en_a", 1),
+            ("r1_en_b", 1),
+            ("dest", 1 << rm::SCALAR_CORE),
         ])
         .merge(ttu("", &[1, 0], &[1, cdiv(nbytes, 256) as i64], 4, "cnt")),
     )
@@ -145,10 +243,27 @@ pub fn rprod_output(nbytes: usize, tile: i64, k: i64, seq: i64, fifo: i64, smem:
 /// without bias.
 fn rcons_caching(g: &FcGeom, t: usize, tile: i64, off: i64) -> Fields {
     let (n, kq) = (g.gt(t) as i64, g.kw() as i64);
-    let aux = if g.bias { fields(&[("aux_en0", 1), ("aux_addr0", off), ("aux_addr1", 4 * (n - 1) + off), ("aux_en1", 1)]) } else { Fields::new() };
-    fields(&[("tile_mask", tile), ("addr", 2 + g.bias_rows(t) as i64 + off), ("sdims", if n == 1 { 1 } else { 3 })])
-        .merge(aux)
-        .merge(if n > 1 { ttu("", &[1, kq], &[kq, n], 4, "cnt") } else { ttu("", &[1], &[kq], 4, "cnt") })
+    let aux = if g.bias {
+        fields(&[
+            ("aux_en0", 1),
+            ("aux_addr0", off),
+            ("aux_addr1", 4 * (n - 1) + off),
+            ("aux_en1", 1),
+        ])
+    } else {
+        Fields::new()
+    };
+    fields(&[
+        ("tile_mask", tile),
+        ("addr", 2 + g.bias_rows(t) as i64 + off),
+        ("sdims", if n == 1 { 1 } else { 3 }),
+    ])
+    .merge(aux)
+    .merge(if n > 1 {
+        ttu("", &[1, kq], &[kq, n], 4, "cnt")
+    } else {
+        ttu("", &[1], &[kq], 4, "cnt")
+    })
 }
 
 // *** mesh DMAs (ring_mesh.md section 4) ***
@@ -158,11 +273,28 @@ type Half = (i64, i64);
 
 /// meshBus `op` with an outbound half (send to the neighbour in op's direction)
 /// and/or an inbound half (receive from the opposite neighbour).
-fn mesh(op: u8, tiles: i64, seq: i64, out: Option<Half>, inn: Option<Half>, mode: i64) -> Vec<u128> {
-    let mut f = fields(&[("opcode", i64::from(op)), ("tile_mask", tiles), ("seq", seq)]);
+fn mesh(
+    op: u8,
+    tiles: i64,
+    seq: i64,
+    out: Option<Half>,
+    inn: Option<Half>,
+    mode: i64,
+) -> Vec<u128> {
+    let mut f = fields(&[
+        ("opcode", i64::from(op)),
+        ("tile_mask", tiles),
+        ("seq", seq),
+    ]);
     for (p, half, m) in [("o_", out, "out_mode"), ("i_", inn, "in_mode")] {
         if let Some((addr, words)) = half {
-            f = f.merge(fields(&[(&format!("{p}addr"), addr), (&format!("{p}sdims"), i64::from(words > 1)), (m, mode)])).merge(ttu(p, &[1], &[words], 4, "cnt"));
+            f = f
+                .merge(fields(&[
+                    (&format!("{p}addr"), addr),
+                    (&format!("{p}sdims"), i64::from(words > 1)),
+                    (m, mode),
+                ]))
+                .merge(ttu(p, &[1], &[words], 4, "cnt"));
         }
     }
     rm::encode_mesh(&f)
@@ -176,18 +308,50 @@ fn mesh(op: u8, tiles: i64, seq: i64, out: Option<Half>, inn: Option<Half>, mode
 pub fn relay(op: u8, tiles: i64, seq: i64, r: i64, nwords: i64, c: i64) -> Vec<u128> {
     let (packets, rest) = (cdiv_i64(nwords, 4), nwords % 4);
     let (inn, out) = mesh_counters(op);
-    let (rin, rout) = ((tile_counter(inn) << 1) as i64, (tile_counter(out) << 1) as i64);
+    let (rin, rout) = (
+        (tile_counter(inn) << 1) as i64,
+        (tile_counter(out) << 1) as i64,
+    );
     let mut f = fields(&[
-        ("opcode", i64::from(op)), ("tile_mask", tiles), ("seq", seq), ("out_mode", 3), ("in_mode", 3), ("s0_id", rin), ("s0_val", 5 + 4 * c),
-        ("s0_en_a", 1), ("s0_en_b", 1), ("s1_id", rout), ("s1_val", -3 + 4 * c), ("s1_en_a", 1), ("s1_en_b", 1), ("s2_id", 1),
+        ("opcode", i64::from(op)),
+        ("tile_mask", tiles),
+        ("seq", seq),
+        ("out_mode", 3),
+        ("in_mode", 3),
+        ("s0_id", rin),
+        ("s0_val", 5 + 4 * c),
+        ("s0_en_a", 1),
+        ("s0_en_b", 1),
+        ("s1_id", rout),
+        ("s1_val", -3 + 4 * c),
+        ("s1_en_a", 1),
+        ("s1_en_b", 1),
+        ("s2_id", 1),
     ]);
     for p in ["o_", "i_"] {
-        f = f.merge(fields(&[(&format!("{p}addr"), r), (&format!("{p}sdims"), 1), (&format!("{p}cbuf"), 1), (&format!("{p}slots"), 4)]))
-            .merge(ttu(p, &[1, 0], &[if nwords == 1 { 1 } else { 4 }, packets], 4, "cnt"));
+        f = f
+            .merge(fields(&[
+                (&format!("{p}addr"), r),
+                (&format!("{p}sdims"), 1),
+                (&format!("{p}cbuf"), 1),
+                (&format!("{p}slots"), 4),
+            ]))
+            .merge(ttu(
+                p,
+                &[1, 0],
+                &[if nwords == 1 { 1 } else { 4 }, packets],
+                4,
+                "cnt",
+            ));
     }
     if rest != 0 && nwords > 1 {
         let tail = (4 * (4 - rest) + 1) << 6;
-        f = f.merge(fields(&[("o_grp", rest - 1), ("i_grp", rest - 1), ("rsv243", tail), ("rsv448", tail)]));
+        f = f.merge(fields(&[
+            ("o_grp", rest - 1),
+            ("i_grp", rest - 1),
+            ("rsv243", tail),
+            ("rsv448", tail),
+        ]));
     }
     rm::encode_mesh(&f)
 }
@@ -198,7 +362,9 @@ pub fn relay(op: u8, tiles: i64, seq: i64, r: i64, nwords: i64, c: i64) -> Vec<u
 /// Every west group ends with a mesh fence, north groups once they have relays.
 /// The west fence counts are +1.
 fn gather(e: &mut Emitter, g: &FcGeom, x: i64, r: i64, ibit: &dyn Fn(usize) -> i64) {
-    let rows: Vec<Vec<usize>> = (0..cdiv(g.t_in(), 4)).map(|row| (4 * row..(4 * row + 4).min(g.t_in())).collect()).collect();
+    let rows: Vec<Vec<usize>> = (0..cdiv(g.t_in(), 4))
+        .map(|row| (4 * row..(4 * row + 4).min(g.t_in())).collect())
+        .collect();
     let mask = |ts: &[usize]| ts.iter().map(|t| ibit(*t)).sum::<i64>();
     let words = |nbytes: usize| cdiv(nbytes, 4) as i64;
     e.sync(sc::sync_reset17);
@@ -207,7 +373,14 @@ fn gather(e: &mut Emitter, g: &FcGeom, x: i64, r: i64, ibit: &dyn Fn(usize) -> i
         let rs: Vec<&Vec<usize>> = rows.iter().filter(|row| row.len() > k).collect();
         for row in &rs {
             let seq = e.seq;
-            e.tile(mesh(0x16, mask(&[row[k]]), seq, Some((x + (g.b() * row[k]) as i64, words(g.piece(row[k])))), None, 3));
+            e.tile(mesh(
+                0x16,
+                mask(&[row[k]]),
+                seq,
+                Some((x + (g.b() * row[k]) as i64, words(g.piece(row[k])))),
+                None,
+                3,
+            ));
         }
         // Relays forwarding the same number of words share one instruction.
         let mut classes: Vec<(i64, Vec<&Vec<usize>>)> = Vec::new();
@@ -220,21 +393,34 @@ fn gather(e: &mut Emitter, g: &FcGeom, x: i64, r: i64, ibit: &dyn Fn(usize) -> i
                 }
             }
             for (w, crs) in &classes {
-                let tiles: Vec<usize> = crs.iter().flat_map(|row| row[1..k].iter().copied()).collect();
+                let tiles: Vec<usize> = crs
+                    .iter()
+                    .flat_map(|row| row[1..k].iter().copied())
+                    .collect();
                 let seq = e.seq;
                 e.tile(relay(0x16, mask(&tiles), seq, r, *w, cum + 1));
             }
         }
         for row in &rs {
             let seq = e.seq;
-            e.tile(mesh(0x16, mask(&[row[0]]), seq, None, Some((x + (g.b() * row[k]) as i64, words(g.piece(row[k])))), 3));
+            e.tile(mesh(
+                0x16,
+                mask(&[row[0]]),
+                seq,
+                None,
+                Some((x + (g.b() * row[k]) as i64, words(g.piece(row[k])))),
+                3,
+            ));
         }
         if k >= 2 {
             // The fence excludes the relays that forward as many packets as the first relay instruction.
             let pk = cdiv_i64(classes[0].0, 4);
             cum += pk;
-            let excluded: Vec<usize> =
-                classes.iter().filter(|(w, _)| cdiv_i64(*w, 4) == pk).flat_map(|(_, crs)| crs.iter().flat_map(|row| row[1..k].iter().copied())).collect();
+            let excluded: Vec<usize> = classes
+                .iter()
+                .filter(|(w, _)| cdiv_i64(*w, 4) == pk)
+                .flat_map(|(_, crs)| crs.iter().flat_map(|row| row[1..k].iter().copied()))
+                .collect();
             last = 0xffff & !mask(&excluded);
         }
         e.sync(|seq| sc::sync_mesh(seq, 0x16, last, cum + 1));
@@ -246,14 +432,28 @@ fn gather(e: &mut Emitter, g: &FcGeom, x: i64, r: i64, ibit: &dyn Fn(usize) -> i
     for (k, row) in rows.iter().enumerate().skip(1) {
         let n = words(row.iter().map(|t| g.piece(*t)).sum());
         let seq = e.seq;
-        e.tile(mesh(0x17, mask(&[4 * k]), seq, Some((x + (g.b() * 4 * k) as i64, n)), None, 0));
+        e.tile(mesh(
+            0x17,
+            mask(&[4 * k]),
+            seq,
+            Some((x + (g.b() * 4 * k) as i64, n)),
+            None,
+            0,
+        ));
         if k >= 2 {
             let relays: Vec<usize> = (1..k).map(|j| 4 * j).collect();
             let seq = e.seq;
             e.tile(relay(0x17, mask(&relays), seq, r, n, cum));
         }
         let seq = e.seq;
-        e.tile(mesh(0x17, mask(&[0]), seq, None, Some((x + (g.b() * 4 * k) as i64, n)), 0));
+        e.tile(mesh(
+            0x17,
+            mask(&[0]),
+            seq,
+            None,
+            Some((x + (g.b() * 4 * k) as i64, n)),
+            0,
+        ));
         if k >= 2 {
             cum += cdiv_i64(n, 4);
             let relays: Vec<usize> = (1..k).map(|j| 4 * j).collect();
@@ -282,10 +482,16 @@ pub fn shift_ok(n: usize, k: usize, s: usize, move_gather: bool) -> bool {
     if s + g.t().max(g.t_in()) > 16 {
         return false;
     }
-    (0..cdiv(g.t_in(), 4)).filter(|r| g.t_in() - 4 * r >= 2).all(|r| s % 4 + 4.min(g.t_in() - 4 * r) <= 4)
+    (0..cdiv(g.t_in(), 4))
+        .filter(|r| g.t_in() - 4 * r >= 2)
+        .all(|r| s % 4 + 4.min(g.t_in() - 4 * r) <= 4)
 }
 
-pub fn legal_shifts(n: usize, k: usize, move_gather: bool) -> Vec<usize> { (0..16).filter(|s| shift_ok(n, k, *s, move_gather)).collect() }
+pub fn legal_shifts(n: usize, k: usize, move_gather: bool) -> Vec<usize> {
+    (0..16)
+        .filter(|s| shift_ok(n, k, *s, move_gather))
+        .collect()
+}
 
 /// Physical tiles: compute tile t -> t + s; input/gather tile t -> t + s (move_gather) or t.
 #[derive(Clone, Copy, Debug, Default)]
@@ -295,11 +501,17 @@ pub struct Place {
 }
 
 impl Place {
-    pub fn c(&self, t: usize) -> i64 { 1 << (t + self.s) }
+    pub fn c(&self, t: usize) -> i64 {
+        1 << (t + self.s)
+    }
 
-    pub fn i(&self, t: usize) -> i64 { 1 << (t + if self.move_gather { self.s } else { 0 }) }
+    pub fn i(&self, t: usize) -> i64 {
+        1 << (t + if self.move_gather { self.s } else { 0 })
+    }
 
-    pub fn cspan(&self, a: usize, b: usize) -> i64 { (a..b).map(|t| self.c(t)).sum() }
+    pub fn cspan(&self, a: usize, b: usize) -> i64 {
+        (a..b).map(|t| self.c(t)).sum()
+    }
 }
 
 // *** program blocks ***
@@ -335,7 +547,12 @@ fn broadcast(e: &mut Emitter, g: &FcGeom, x: i64, src: i64, dest: i64, fifo: i64
 fn input_block(e: &mut Emitter, g: &FcGeom, pl: &Place, x: i64, r: i64) {
     e.sync(sc::input_head);
     e.sync(sc::sync_wn_fence);
-    e.scalar_with_base(sc::input_dma(g.s() as i64, 0), Description::InputActivation, Some("x"), false);
+    e.scalar_with_base(
+        sc::input_dma(g.s() as i64, 0),
+        Description::InputActivation,
+        Some("x"),
+        false,
+    );
     for t in 0..g.t_in() {
         let seq = e.seq;
         e.tile(wn::w2n_input(g.k, t, x / 4, seq, Some(pl.i(t))));
@@ -344,7 +561,14 @@ fn input_block(e: &mut Emitter, g: &FcGeom, pl: &Place, x: i64, r: i64) {
         let ts: i64 = (4 * j..(4 * j + 4).min(g.t_in())).map(|t| pl.i(t)).sum();
         let seq = e.seq;
         e.tile(rcons_input(g, j, ts, seq));
-        e.scalar(sc::av_infeed((4 * j * g.b()) as i64, (4 * g.b()).min(g.s() - 4 * j * g.b()) as i64, ts), 0);
+        e.scalar(
+            sc::av_infeed(
+                (4 * j * g.b()) as i64,
+                (4 * g.b()).min(g.s() - 4 * j * g.b()) as i64,
+                ts,
+            ),
+            0,
+        );
     }
     e.sync(|seq| sc::sync_drain(seq, 0xffff));
     e.sync(sc::sync_reset17);
@@ -361,8 +585,20 @@ fn input_block(e: &mut Emitter, g: &FcGeom, pl: &Place, x: i64, r: i64) {
 }
 
 /// Compute fence, bias loads (one per distinct group count), the ops, reset; `tail`: + the completion fence.
-#[allow(clippy::too_many_arguments, reason = "mirrors the generator's block signature")]
-fn ops_block(e: &mut Emitter, g: &FcGeom, pl: &Place, x: i64, y: i64, off: i64, quant: &Quant, tail: bool) {
+#[allow(
+    clippy::too_many_arguments,
+    reason = "mirrors the generator's block signature"
+)]
+fn ops_block(
+    e: &mut Emitter,
+    g: &FcGeom,
+    pl: &Place,
+    x: i64,
+    y: i64,
+    off: i64,
+    quant: &Quant,
+    tail: bool,
+) {
     e.sync(sc::signal_fence);
     if g.bias {
         let mut counts: Vec<usize> = (0..g.t()).map(|t| g.gt(t)).collect();
@@ -393,7 +629,12 @@ fn ops_block(e: &mut Emitter, g: &FcGeom, pl: &Place, x: i64, y: i64, off: i64, 
         .set("tile_mask", pl.c(t));
         if !g.bias {
             // The bias ("scaling") path is off.
-            f = f.merge(fields(&[("cfg1", 0), ("sync0", 0), ("sync1", 0), ("cfg4", 0)]));
+            f = f.merge(fields(&[
+                ("cfg1", 0),
+                ("sync0", 0),
+                ("sync1", 0),
+                ("cfg4", 0),
+            ]));
         }
         e.tile(op::encode_op(&f));
     }
@@ -405,16 +646,35 @@ fn ops_block(e: &mut Emitter, g: &FcGeom, pl: &Place, x: i64, y: i64, off: i64, 
 
 /// One output vector: narrowToWide per compute tile, host DMA, (outfeed, ringProducer) per tile in ordinal order.
 fn output_block(e: &mut Emitter, g: &FcGeom, pl: &Place, y: i64) {
-    e.scalar_with_base(sc::output_dma_head(0), Description::OutputActivation, Some("y"), false);
+    e.scalar_with_base(
+        sc::output_dma_head(0),
+        Description::OutputActivation,
+        Some("y"),
+        false,
+    );
     for t in 0..g.t() {
         let seq = e.seq;
-        e.tile(wn::n2w_output(g.n_out(t), pl.c(t), (y + (64 * g.p() * t) as i64) / 4, WIDE_OUT_FIFO, seq, None));
+        e.tile(wn::n2w_output(
+            g.n_out(t),
+            pl.c(t),
+            (y + (64 * g.p() * t) as i64) / 4,
+            WIDE_OUT_FIFO,
+            seq,
+            None,
+        ));
     }
     e.scalar(sc::output_dma_tail(g.out_bytes() as i64), 0);
     for t in 0..g.t() {
         e.scalar(sc::outfeed((8 * cdiv(g.n_out(t), 8)) as i64), 0);
         let seq = e.seq;
-        e.tile(rprod_output(g.n_out(t), pl.c(t), t as i64, seq, WIDE_OUT_FIFO, false));
+        e.tile(rprod_output(
+            g.n_out(t),
+            pl.c(t),
+            t as i64,
+            seq,
+            WIDE_OUT_FIFO,
+            false,
+        ));
     }
     let seq = e.seq;
     e.scalar(sc::output_wait(seq, g.t() as i64), 2);
@@ -440,7 +700,15 @@ pub struct FcSpec {
 
 impl FcSpec {
     pub const fn new(n: usize, k: usize) -> Self {
-        Self { n, k, param_offset: 0, tile_shift: 0, move_gather: true, quant: Quant::REFERENCE, bias: true }
+        Self {
+            n,
+            k,
+            param_offset: 0,
+            tile_shift: 0,
+            move_gather: true,
+            quant: Quant::REFERENCE,
+            bias: true,
+        }
     }
 }
 
@@ -457,24 +725,39 @@ pub struct FcPrograms {
 pub fn build_fc(spec: &FcSpec) -> Result<FcPrograms> {
     let fail = |what: String| Error::Codegen(format!("fc {}x{}: {what}", spec.n, spec.k));
     if !spec.param_offset.is_multiple_of(256) {
-        return Err(fail(format!("param_offset {} is not a multiple of 256", spec.param_offset)));
+        return Err(fail(format!(
+            "param_offset {} is not a multiple of 256",
+            spec.param_offset
+        )));
     }
     if spec.n == 0 || spec.k == 0 {
         return Err(fail("empty matrix".into()));
     }
-    let g = FcGeom { n: spec.n, k: spec.k, bias: spec.bias };
+    let g = FcGeom {
+        n: spec.n,
+        k: spec.k,
+        bias: spec.bias,
+    };
     if g.t() > 16 || g.t_in() > 16 {
         return Err(fail("needs more than 16 tiles".into()));
     }
     if spec.k <= 4 && g.p() > 1 {
-        return Err(fail("K <= 4 with N > 1024: the compiler uses another op schedule".into()));
+        return Err(fail(
+            "K <= 4 with N > 1024: the compiler uses another op schedule".into(),
+        ));
     }
     if !shift_ok(spec.n, spec.k, spec.tile_shift, spec.move_gather) {
         return Err(fail(format!(
-            "tile_shift {} is not legal (move_gather {}); legal: {:?}", spec.tile_shift, spec.move_gather, legal_shifts(spec.n, spec.k, spec.move_gather)
+            "tile_shift {} is not legal (move_gather {}); legal: {:?}",
+            spec.tile_shift,
+            spec.move_gather,
+            legal_shifts(spec.n, spec.k, spec.move_gather)
         )));
     }
-    let pl = Place { s: spec.tile_shift, move_gather: spec.move_gather };
+    let pl = Place {
+        s: spec.tile_shift,
+        move_gather: spec.move_gather,
+    };
     let off = (spec.param_offset / 64) as i64;
     let (x, y, r) = narrow_layout(spec.n, spec.k);
     let mut e = Emitter::new();
@@ -484,18 +767,28 @@ pub fn build_fc(spec: &FcSpec) -> Result<FcPrograms> {
     output_block(&mut e, &g, &pl, y);
     e.sync(|seq| sc::epilogue(seq, false));
     let (exe_bytes, exe_relocs) = e.program();
-    let (caching_bytes, caching_relocs) = caching_program(g.param_bytes() as i64, &[caching_part(&g, &pl, off, 0)]);
+    let (caching_bytes, caching_relocs) =
+        caching_program(g.param_bytes() as i64, &[caching_part(&g, &pl, off, 0)]);
     let name = format!("fc_{}x{}", spec.n, spec.k);
     let caching = Executable {
         name: format!("{name}:caching"),
         kind: ExecutableType::ParameterCaching,
         batch_size: 1,
         scratch_size: 0,
-        bitstreams: vec![Bitstream { data: caching_bytes, relocs: caching_relocs }],
+        bitstreams: vec![Bitstream {
+            data: caching_bytes,
+            relocs: caching_relocs,
+        }],
         parameters: Vec::new(),
         hints: vec![
             Hint::Instruction { chunk: 0 },
-            Hint::Dma { direction: Direction::Infeed, desc: Description::Parameter, name: None, offset: 0, size: g.param_bytes() },
+            Hint::Dma {
+                direction: Direction::Infeed,
+                desc: Description::Parameter,
+                name: None,
+                offset: 0,
+                size: g.param_bytes(),
+            },
             Hint::Interrupt { id: 0 },
         ],
         inputs: Vec::new(),
@@ -507,19 +800,44 @@ pub fn build_fc(spec: &FcSpec) -> Result<FcPrograms> {
         kind: ExecutableType::ExecutionOnly,
         batch_size: 1,
         scratch_size: 0,
-        bitstreams: vec![Bitstream { data: exe_bytes, relocs: exe_relocs }],
+        bitstreams: vec![Bitstream {
+            data: exe_bytes,
+            relocs: exe_relocs,
+        }],
         parameters: Vec::new(),
         hints: vec![
             Hint::Instruction { chunk: 0 },
-            Hint::Dma { direction: Direction::Infeed, desc: Description::InputActivation, name: Some("x".into()), offset: 0, size: g.s() },
-            Hint::Dma { direction: Direction::Outfeed, desc: Description::OutputActivation, name: Some("y".into()), offset: 0, size: g.out_bytes() },
+            Hint::Dma {
+                direction: Direction::Infeed,
+                desc: Description::InputActivation,
+                name: Some("x".into()),
+                offset: 0,
+                size: g.s(),
+            },
+            Hint::Dma {
+                direction: Direction::Outfeed,
+                desc: Description::OutputActivation,
+                name: Some("y".into()),
+                offset: 0,
+                size: g.out_bytes(),
+            },
             Hint::Interrupt { id: 0 },
         ],
-        inputs: vec![Layer { name: "x".into(), size_bytes: g.s() }],
-        outputs: vec![Layer { name: "y".into(), size_bytes: g.out_bytes() }],
+        inputs: vec![Layer {
+            name: "x".into(),
+            size_bytes: g.s(),
+        }],
+        outputs: vec![Layer {
+            name: "y".into(),
+            size_bytes: g.out_bytes(),
+        }],
         caching_token: 0,
     };
-    Ok(FcPrograms { geom: g, caching, execution })
+    Ok(FcPrograms {
+        geom: g,
+        caching,
+        execution,
+    })
 }
 
 // *** the host side of one matmul ***
@@ -528,7 +846,14 @@ pub fn build_fc(spec: &FcSpec) -> Result<FcPrograms> {
 /// 1x1 conv alike): per group of `group` outputs an int32 bias row, then the
 /// weights as `[K4/4][group][4]` uint8. `w` is `[N, K]` row-major; K is padded to a
 /// multiple of 4 with `w_zp`, the padded outputs are 0.
-pub fn param_blob(w: &[u8], n: usize, k: usize, w_zp: u8, bias: Option<&[i32]>, group: usize) -> Vec<u8> {
+pub fn param_blob(
+    w: &[u8],
+    n: usize,
+    k: usize,
+    w_zp: u8,
+    bias: Option<&[i32]>,
+    group: usize,
+) -> Vec<u8> {
     assert_eq!(w.len(), n * k, "weights are [N, K]");
     let (np, k4) = (round_up(n, group), round_up(k, 4));
     let mut out = Vec::with_capacity(np * 4 + np * k4);
@@ -541,7 +866,13 @@ pub fn param_blob(w: &[u8], n: usize, k: usize, w_zp: u8, bias: Option<&[i32]>, 
             for row in g..g + group {
                 for j in 0..4 {
                     let col = 4 * word + j;
-                    out.push(if row >= n { 0 } else if col >= k { w_zp } else { w[row * k + col] });
+                    out.push(if row >= n {
+                        0
+                    } else if col >= k {
+                        w_zp
+                    } else {
+                        w[row * k + col]
+                    });
                 }
             }
         }
@@ -553,10 +884,18 @@ pub fn param_blob(w: &[u8], n: usize, k: usize, w_zp: u8, bias: Option<&[i32]>, 
 /// float32 rescale, clamp, round half to even (measured with exact .5 ties on the
 /// device), add the zero point. `x` is `[K]`, `w` is `[N, K]`.
 pub fn fc_reference(q: &Quant, x: &[u8], w: &[u8], bias: &[i32], n: usize, k: usize) -> Vec<u8> {
-    assert!(x.len() >= k && w.len() == n * k && bias.len() == n, "fc_reference: shapes");
+    assert!(
+        x.len() >= k && w.len() == n * k && bias.len() == n,
+        "fc_reference: shapes"
+    );
     (0..n)
         .map(|row| {
-            let acc: i64 = (0..k).map(|col| (i64::from(x[col]) - i64::from(q.in_zp)) * (i64::from(w[row * k + col]) - i64::from(q.w_zp))).sum::<i64>()
+            let acc: i64 = (0..k)
+                .map(|col| {
+                    (i64::from(x[col]) - i64::from(q.in_zp))
+                        * (i64::from(w[row * k + col]) - i64::from(q.w_zp))
+                })
+                .sum::<i64>()
                 + i64::from(bias[row]);
             let y = (acc as f32 * q.mult).clamp(q.clamp_min(), q.clamp_max());
             (y.round_ties_even() + f32::from(q.out_zp)) as u8
@@ -575,9 +914,17 @@ pub struct FcProgram {
 }
 
 impl FcProgram {
-    pub const fn new(n: usize, k: usize) -> Self { Self { n, k, rows: if n < 64 { 64 } else { n } } }
+    pub const fn new(n: usize, k: usize) -> Self {
+        Self {
+            n,
+            k,
+            rows: if n < 64 { 64 } else { n },
+        }
+    }
 
-    pub const fn geom(&self) -> FcGeom { FcGeom::new(self.rows, self.k) }
+    pub const fn geom(&self) -> FcGeom {
+        FcGeom::new(self.rows, self.k)
+    }
 
     /// Parameter bytes per tile, 256-byte aligned regions.
     pub fn tile_bytes(&self) -> usize {
@@ -586,18 +933,33 @@ impl FcProgram {
     }
 
     /// Whether the weights fit the tiles' wide memory from `param_offset`.
-    pub fn fits(&self, param_offset: usize) -> bool { param_offset + self.tile_bytes() <= WIDE_BYTES }
+    pub fn fits(&self, param_offset: usize) -> bool {
+        param_offset + self.tile_bytes() <= WIDE_BYTES
+    }
 
-    pub fn params(&self, w: &[u8], bias: &[i32], w_zp: u8) -> Vec<u8> { param_blob(w, self.n, self.k, w_zp, Some(bias), 64) }
+    pub fn params(&self, w: &[u8], bias: &[i32], w_zp: u8) -> Vec<u8> {
+        param_blob(w, self.n, self.k, w_zp, Some(bias), 64)
+    }
 
     /// The compute tiles move to [shift, shift+T); the input gather stays on tiles 0..
     pub fn programs(&self, shift: usize, param_offset: usize, quant: Quant) -> Result<FcPrograms> {
         if !self.fits(param_offset) {
             return Err(Error::Codegen(format!(
-                "fc {}x{}: {} parameter bytes per tile at offset {param_offset} exceed the {WIDE_BYTES} available", self.n, self.k, self.tile_bytes()
+                "fc {}x{}: {} parameter bytes per tile at offset {param_offset} exceed the {WIDE_BYTES} available",
+                self.n,
+                self.k,
+                self.tile_bytes()
             )));
         }
-        build_fc(&FcSpec { n: self.rows, k: self.k, param_offset, tile_shift: shift, move_gather: false, quant, bias: true })
+        build_fc(&FcSpec {
+            n: self.rows,
+            k: self.k,
+            param_offset,
+            tile_shift: shift,
+            move_gather: false,
+            quant,
+            bias: true,
+        })
     }
 
     /// x padded to the input DMA size with the input zero point.
@@ -609,7 +971,9 @@ impl FcProgram {
     }
 
     /// The N outputs from the program's output buffer.
-    pub fn output<'a>(&self, out: &'a [u8]) -> &'a [u8] { &out[..self.n] }
+    pub fn output<'a>(&self, out: &'a [u8]) -> &'a [u8] {
+        &out[..self.n]
+    }
 }
 
 #[cfg(test)]

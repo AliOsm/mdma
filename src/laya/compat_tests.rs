@@ -1,7 +1,7 @@
 //! Always-on compatibility checks with small generated safetensors.
-use super::{AgentConfig, DecisionModel, EncoderConfig};
 use super::prompt::{Item, Kind, collate};
 use super::weights::Weights;
+use super::{AgentConfig, DecisionModel, EncoderConfig};
 use crate::backend::cpu::CpuBackend;
 use crate::model::arch::modernbert::tests::fixture as encoder_fixture;
 use serde_json::json;
@@ -9,10 +9,14 @@ use std::assert_matches;
 
 fn fixture(bias: bool) -> (Vec<u8>, EncoderConfig, AgentConfig) {
     let (mut b, encoder) = encoder_fixture(bias);
-    let agent = AgentConfig::from_json(&json!({
-        "encoder": "tiny-modernbert", "head_layers": 2,
-        "act_costs": {"answer": 1.0}, "max_len": 16, "head_max_len": 8
-    }).to_string()).unwrap();
+    let agent = AgentConfig::from_json(
+        &json!({
+            "encoder": "tiny-modernbert", "head_layers": 2,
+            "act_costs": {"answer": 1.0}, "max_len": 16, "head_max_len": 8
+        })
+        .to_string(),
+    )
+    .unwrap();
     for i in 0..2 {
         let p = format!("head.layers.{i}");
         b.norm(&format!("{p}.norm1"), true);
@@ -37,7 +41,11 @@ pub(crate) fn checkpoint() -> tempfile::TempDir {
     let tokenizer = super::tokenizer::tests::checkpoint();
     std::fs::create_dir(dir.path().join("tokenizer")).unwrap();
     for path in ["tokenizer.json", "tokenizer_config.json"] {
-        std::fs::copy(tokenizer.path().join(path), dir.path().join("tokenizer").join(path)).unwrap();
+        std::fs::copy(
+            tokenizer.path().join(path),
+            dir.path().join("tokenizer").join(path),
+        )
+        .unwrap();
     }
     let (weights, encoder, agent) = fixture(true);
     std::fs::write(dir.path().join("model.safetensors"), weights).unwrap();
@@ -73,25 +81,35 @@ where
     assert_eq!(manifest["backend"].as_str(), Some("cpu"));
     assert_eq!(manifest["kv_dtype"].as_str(), Some("none"));
     let inventory = crate::federation::inventory::Native {
-        registry: std::sync::Arc::new(registry), shutdown: None, power: None, host: std::sync::Arc::default(),
+        registry: std::sync::Arc::new(registry),
+        shutdown: None,
+        power: None,
+        host: std::sync::Arc::default(),
         max_output_tokens: usize::MAX,
     };
     let snapshot = crate::federation::inventory::Inventory::snapshot(&inventory, &["laya".into()]);
     assert_eq!(snapshot.models.len(), 1);
     assert_eq!(snapshot.models[0].backend, "cpu");
-    assert_eq!(snapshot.models[0].kind, crate::federation::catalog::Kind::Laya);
+    assert_eq!(
+        snapshot.models[0].kind,
+        crate::federation::catalog::Kind::Laya
+    );
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn laya_cpu_profile_does_not_claim_the_daemons_metal_backend() {
-    native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend(crate::backend::metal::MetalBackend::new().unwrap());
+    native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend(
+        crate::backend::metal::MetalBackend::new().unwrap(),
+    );
 }
 
 #[cfg(feature = "vulkan")]
 #[test]
 fn laya_cpu_profile_does_not_claim_the_daemons_vulkan_backend() {
-    native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend(crate::backend::vulkan::VulkanBackend::new().unwrap());
+    native_laya_profile_is_cpu_even_with_an_unprofiled_decoder_backend(
+        crate::backend::vulkan::VulkanBackend::new().unwrap(),
+    );
 }
 
 #[test]
@@ -104,7 +122,16 @@ fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_o
     let mut frozen = laya_registry(backend.clone(), dir.path(), true);
     assert_eq!(frozen.capture_execution_profiles().unwrap(), 1);
     let original_profile = frozen.execution_profile("").unwrap().as_str().to_owned();
-    assert_eq!(frozen.execution_profile("").unwrap().manifest().as_object().unwrap()["kv_dtype"].as_str(), Some("none"));
+    assert_eq!(
+        frozen
+            .execution_profile("")
+            .unwrap()
+            .manifest()
+            .as_object()
+            .unwrap()["kv_dtype"]
+            .as_str(),
+        Some("none")
+    );
     let original_id = frozen.artifact_id("").unwrap();
     {
         let mut registry = laya_registry(backend.clone(), dir.path(), true);
@@ -114,16 +141,30 @@ fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_o
         assert_eq!(catalog.models.len(), 1);
         assert_eq!(catalog.models[0].artifact_id, original_id.as_str());
         assert_eq!(catalog.models[0].profile_id, original_profile);
-        assert_eq!(catalog.models[0].limits, crate::federation::catalog::Limits::Decide {
-            max_questions: crate::federation::catalog::MAX_DECIDE_QUESTIONS,
-            max_result_bytes: crate::federation::catalog::MAX_DECIDE_RESULT_BYTES,
-        });
+        assert_eq!(
+            catalog.models[0].limits,
+            crate::federation::catalog::Limits::Decide {
+                max_questions: crate::federation::catalog::MAX_DECIDE_QUESTIONS,
+                max_result_bytes: crate::federation::catalog::MAX_DECIDE_RESULT_BYTES,
+            }
+        );
     }
-    assert_eq!(&original_id, &super::sources::Sources::capture(dir.path()).unwrap().id());
-    let predictor = |registry: &Registry<CpuBackend>| registry.acquire_blocking("").unwrap().laya().expect("Laya").clone();
+    assert_eq!(
+        &original_id,
+        &super::sources::Sources::capture(dir.path()).unwrap().id()
+    );
+    let predictor = |registry: &Registry<CpuBackend>| {
+        registry
+            .acquire_blocking("")
+            .unwrap()
+            .laya()
+            .expect("Laya")
+            .clone()
+    };
     let original = predictor(&frozen);
     assert_eq!(original.temperature_for(Kind::Choice, 2), 0.75);
-    let questions = json!({"q": {"type": "choice", "instructions": "hello", "criteria": ["world", "hello"]}});
+    let questions =
+        json!({"q": {"type": "choice", "instructions": "hello", "criteria": ["world", "hello"]}});
     let questions = questions.as_object().unwrap();
     let expected = predictor(&normal).predict(&json!({}), questions).unwrap();
     assert_eq!(original.predict(&json!({}), questions).unwrap(), expected);
@@ -134,19 +175,31 @@ fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_o
     std::fs::write(&tokenizer_path, canonical).unwrap();
     let converted = laya_registry(backend.clone(), dir.path(), true);
     assert_ne!(converted.artifact_id(""), Some(original_id.clone()));
-    assert_eq!(predictor(&converted).predict(&json!({}), questions).unwrap(), expected);
+    assert_eq!(
+        predictor(&converted)
+            .predict(&json!({}), questions)
+            .unwrap(),
+        expected
+    );
     assert_eq!(original.predict(&json!({}), questions).unwrap(), expected);
 
     std::fs::write(&tokenizer_path, legacy).unwrap();
     let config_path = dir.path().join("rl_agent_config.json");
-    let mut config: serde_json::Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
     config["temperature_by_options"]["choice:2"] = json!(1.5);
     std::fs::write(config_path, config.to_string()).unwrap();
     let mut recalibrated = laya_registry(backend, dir.path(), true);
     assert_eq!(recalibrated.capture_execution_profiles().unwrap(), 1);
-    assert_eq!(recalibrated.execution_profile("").unwrap().as_str(), original_profile);
+    assert_eq!(
+        recalibrated.execution_profile("").unwrap().as_str(),
+        original_profile
+    );
     assert_ne!(recalibrated.artifact_id(""), Some(original_id.clone()));
-    assert_eq!(predictor(&recalibrated).temperature_for(Kind::Choice, 2), 1.5);
+    assert_eq!(
+        predictor(&recalibrated).temperature_for(Kind::Choice, 2),
+        1.5
+    );
     assert_eq!(original.temperature_for(Kind::Choice, 2), 0.75);
     std::fs::remove_dir_all(dir.path()).unwrap();
     assert_eq!(original.predict(&json!({}), questions).unwrap(), expected);
@@ -154,10 +207,23 @@ fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_o
 }
 
 /// One Laya checkpoint named `laya`, loaded.
-fn laya_registry<B: crate::backend::Backend>(backend: std::sync::Arc<B>, dir: &std::path::Path, frozen: bool) -> crate::registry::Registry<B> {
+fn laya_registry<B: crate::backend::Backend>(
+    backend: std::sync::Arc<B>,
+    dir: &std::path::Path,
+    frozen: bool,
+) -> crate::registry::Registry<B> {
     use crate::registry::{Options, Registry, Source};
-    let options = Options { frozen, ..Options::new(32) };
-    let registry = Registry::new(backend, vec![("laya".into(), Source::Laya(dir.into()))], None, options).unwrap();
+    let options = Options {
+        frozen,
+        ..Options::new(32)
+    };
+    let registry = Registry::new(
+        backend,
+        vec![("laya".into(), Source::Laya(dir.into()))],
+        None,
+        options,
+    )
+    .unwrap();
     assert!(registry.preload().is_empty());
     registry
 }
@@ -165,32 +231,60 @@ fn laya_registry<B: crate::backend::Backend>(backend: std::sync::Arc<B>, dir: &s
 fn close(got: &[f32], want: &[f32]) {
     assert_eq!(got.len(), want.len());
     for (&got, &want) in got.iter().zip(want) {
-        assert!(got.is_finite() && (got - want).abs() < 2e-5, "{got} != {want}");
+        assert!(
+            got.is_finite() && (got - want).abs() < 2e-5,
+            "{got} != {want}"
+        );
     }
 }
 
 #[test]
 fn checked_prediction_matches_ordinary_output_and_stops_at_batch_boundaries() {
     let dir = checkpoint();
-    let predictor = super::Predictor::load(CpuBackend, dir.path()).unwrap().with_batch_size(1);
+    let predictor = super::Predictor::load(CpuBackend, dir.path())
+        .unwrap()
+        .with_batch_size(1);
     let state = json!({});
     let questions = json!({
         "one": {"type": "choice", "instructions": "hello", "criteria": ["world", "hello"]},
         "two": {"type": "noul", "instructions": "hello"}
     });
     let questions = questions.as_object().unwrap();
-    let prepared = predictor.prepare_checked(&state, questions, || true).unwrap().unwrap();
+    let prepared = predictor
+        .prepare_checked(&state, questions, || true)
+        .unwrap()
+        .unwrap();
     let ids: Vec<_> = questions.keys().cloned().collect();
     let expected = predictor.predict(&state, questions).unwrap();
-    assert_eq!(predictor.predict_prepared(&prepared, &ids, || true).unwrap(), Some(expected));
-    assert!(predictor.prepare_checked(&state, questions, || false).unwrap().is_none());
-    assert!(predictor.predict_prepared(&prepared, &ids, || false).unwrap().is_none());
+    assert_eq!(
+        predictor
+            .predict_prepared(&prepared, &ids, || true)
+            .unwrap(),
+        Some(expected)
+    );
+    assert!(
+        predictor
+            .prepare_checked(&state, questions, || false)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        predictor
+            .predict_prepared(&prepared, &ids, || false)
+            .unwrap()
+            .is_none()
+    );
     let checks = std::cell::Cell::new(0);
-    assert!(predictor.predict_prepared(&prepared, &ids, || {
-        let count = checks.get() + 1;
-        checks.set(count);
-        count < 3 // Stop after the first actual forward, before answer emission.
-    }).unwrap().is_none());
+    assert!(
+        predictor
+            .predict_prepared(&prepared, &ids, || {
+                let count = checks.get() + 1;
+                checks.set(count);
+                count < 3 // Stop after the first actual forward, before answer emission.
+            })
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(checks.get(), 3);
 }
 
@@ -198,41 +292,63 @@ fn checked_prediction_matches_ordinary_output_and_stops_at_batch_boundaries() {
 fn laya_workspace_reservation_accounts_for_minimum_two_option_padding_and_checked_overflow() {
     let dir = checkpoint();
     let predictor = super::Predictor::load(CpuBackend, dir.path()).unwrap();
-    let questions = json!({"one": {"type": "choice", "instructions": "hello", "criteria": ["world"]}});
-    let prepared = predictor.prepare(&json!({}), questions.as_object().unwrap()).unwrap();
+    let questions =
+        json!({"one": {"type": "choice", "instructions": "hello", "criteria": ["world"]}});
+    let prepared = predictor
+        .prepare(&json!({}), questions.as_object().unwrap())
+        .unwrap();
     assert_eq!(prepared[0].1.markers.len(), 1);
     let seq = prepared[0].1.ids.len();
     let d = predictor.model.encoder_config().hidden_size;
     let inter = predictor.model.encoder_config().intermediate_size;
     let actions = predictor.model.agent_config().n_act();
     let expected = (16 * seq * d + 3 * seq * inter + 4 * 2 * d + 2 + d + 4 + 512 + actions) * 4;
-    assert_eq!(predictor.prepared_workspace_bytes(&prepared).unwrap(), expected);
+    assert_eq!(
+        predictor.prepared_workspace_bytes(&prepared).unwrap(),
+        expected
+    );
     assert_eq!(predictor.prepared_workspace_bytes(&[]).unwrap(), 0);
-    assert_matches!(predictor.model.workspace_bytes(usize::MAX, 16, 2),
-        Err(super::Error::Backend(crate::backend::Error::SizeOverflow)));
+    assert_matches!(
+        predictor.model.workspace_bytes(usize::MAX, 16, 2),
+        Err(super::Error::Backend(crate::backend::Error::SizeOverflow))
+    );
 }
 
 #[test]
 fn modernbert_laya_compat_batched_heads_and_padding() {
     let backend = CpuBackend;
     let items = [
-        Item { ids: vec![1, 3, 7, 2, 4, 9], markers: vec![1, 4], kind: Kind::Choice },
-        Item { ids: vec![2, 6, 3, 8], markers: vec![2], kind: Kind::Noul },
+        Item {
+            ids: vec![1, 3, 7, 2, 4, 9],
+            markers: vec![1, 4],
+            kind: Kind::Choice,
+        },
+        Item {
+            ids: vec![2, 6, 3, 8],
+            markers: vec![2],
+            kind: Kind::Noul,
+        },
     ];
     let batch = collate(&items, 0).unwrap();
     for bias in [false, true] {
         let (bytes, encoder, agent) = fixture(bias);
         let weights = Weights::parse(&bytes).unwrap();
         let model = DecisionModel::load(&backend, &weights, encoder, agent).unwrap();
-        let mut ws = model.alloc_workspace(&backend, batch.n, batch.seq_len, batch.kmax).unwrap();
+        let mut ws = model
+            .alloc_workspace(&backend, batch.n, batch.seq_len, batch.kmax)
+            .unwrap();
         let out = model.forward(&backend, &mut ws, &batch).unwrap();
         // Pinned f32 marker/action logits for the generated checkpoint.
         let (logits, act) = if bias {
-            ([[-0.12536192, -0.101696126], [-0.12512279, -1e4]],
-             [[-1.258848, 1.648989], [-1.2953907, 1.5038197]])
+            (
+                [[-0.12536192, -0.101696126], [-0.12512279, -1e4]],
+                [[-1.258848, 1.648989], [-1.2953907, 1.5038197]],
+            )
         } else {
-            ([[-0.10507684, -0.040960923], [-0.10848595, -1e4]],
-             [[-0.47215173, 1.050978], [-0.5653026, 1.2019355]])
+            (
+                [[-0.10507684, -0.040960923], [-0.10848595, -1e4]],
+                [[-0.47215173, 1.050978], [-0.5653026, 1.2019355]],
+            )
         };
         for i in 0..batch.n {
             close(&out.logits[i], &logits[i]);
@@ -241,7 +357,9 @@ fn modernbert_laya_compat_batched_heads_and_padding() {
         assert_eq!(out.logits[1][1], -1e4);
         for (i, item) in items.iter().enumerate() {
             let single = collate(std::slice::from_ref(item), 0).unwrap();
-            let mut ws = model.alloc_workspace(&backend, 1, single.seq_len, single.kmax).unwrap();
+            let mut ws = model
+                .alloc_workspace(&backend, 1, single.seq_len, single.kmax)
+                .unwrap();
             let one = model.forward(&backend, &mut ws, &single).unwrap();
             close(&out.logits[i], &one.logits[0]);
             close(&out.act[i], &one.act[0]);
@@ -260,13 +378,21 @@ fn modernbert_laya_compat_batched_heads_and_padding() {
 fn laya_compat_shared_error_mapping() {
     let json_error = EncoderConfig::from_json("{}").unwrap_err();
     assert_matches!(super::Error::from(json_error), super::Error::Json(_));
-    let config_error = EncoderConfig::from_json(&json!({
-        "model_type": "bert", "vocab_size": 32, "hidden_size": 8,
-        "intermediate_size": 12, "num_hidden_layers": 3, "num_attention_heads": 2
-    }).to_string()).unwrap_err();
+    let config_error = EncoderConfig::from_json(
+        &json!({
+            "model_type": "bert", "vocab_size": 32, "hidden_size": 8,
+            "intermediate_size": 12, "num_hidden_layers": 3, "num_attention_heads": 2
+        })
+        .to_string(),
+    )
+    .unwrap_err();
     assert_matches!(super::Error::from(config_error), super::Error::Config(_));
     let weights_error = Weights::parse(b"not safetensors").err().unwrap();
-    assert_matches!(super::Error::from(weights_error), super::Error::Checkpoint(_));
-    let backend_error = super::weights::Error::Backend(crate::backend::Error::NotImplemented("test"));
+    assert_matches!(
+        super::Error::from(weights_error),
+        super::Error::Checkpoint(_)
+    );
+    let backend_error =
+        super::weights::Error::Backend(crate::backend::Error::NotImplemented("test"));
     assert_matches!(super::Error::from(backend_error), super::Error::Backend(_));
 }

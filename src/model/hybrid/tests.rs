@@ -13,9 +13,13 @@ fn parity<G: Backend>(gpu: &G, width: usize, tolerance: f32) {
         let mut a = reference.new_kv_cache(&CpuBackend, 32).unwrap();
         let mut b = hybrid.new_kv_cache(gpu, 32).unwrap();
         for (pos, tokens) in [(0, vec![1, 3, 7]), (3, vec![11, 13])] {
-            let mut aw = reference.alloc_workspace(&CpuBackend, tokens.len()).unwrap();
+            let mut aw = reference
+                .alloc_workspace(&CpuBackend, tokens.len())
+                .unwrap();
             let mut bw = hybrid.alloc_workspace(gpu, tokens.len()).unwrap();
-            let want = reference.prefill(&CpuBackend, &mut a, &mut aw, &tokens, pos).unwrap();
+            let want = reference
+                .prefill(&CpuBackend, &mut a, &mut aw, &tokens, pos)
+                .unwrap();
             let got = hybrid.prefill(gpu, &mut b, &mut bw, &tokens, pos).unwrap();
             close(&got, &want, tolerance);
             assert_eq!(a.len(), b.len());
@@ -23,13 +27,31 @@ fn parity<G: Backend>(gpu: &G, width: usize, tolerance: f32) {
         let mut aw = reference.alloc_workspace(&CpuBackend, 1).unwrap();
         let mut bw = hybrid.alloc_workspace(gpu, 1).unwrap();
         for pos in 5..8 {
-            let want = reference.forward(&CpuBackend, &mut a, &mut aw, 17, pos).unwrap();
-            close(&hybrid.forward(gpu, &mut b, &mut bw, 17, pos).unwrap(), &want, tolerance);
+            let want = reference
+                .forward(&CpuBackend, &mut a, &mut aw, 17, pos)
+                .unwrap();
+            close(
+                &hybrid.forward(gpu, &mut b, &mut bw, 17, pos).unwrap(),
+                &want,
+                tolerance,
+            );
         }
-        assert_matches!(hybrid.forward(gpu, &mut b, &mut bw, 128, 8), Err(Error::ShapeMismatch(_)));
-        assert_matches!(hybrid.forward(gpu, &mut b, &mut bw, 1, 9), Err(Error::ShapeMismatch(_)));
-        assert_matches!(hybrid.alloc_workspace(gpu, 0).map(|_| ()), Err(Error::ShapeMismatch(_)));
-        assert_matches!(hybrid.new_kv_cache(gpu, 65).map(|_| ()), Err(Error::ShapeMismatch(_)));
+        assert_matches!(
+            hybrid.forward(gpu, &mut b, &mut bw, 128, 8),
+            Err(Error::ShapeMismatch(_))
+        );
+        assert_matches!(
+            hybrid.forward(gpu, &mut b, &mut bw, 1, 9),
+            Err(Error::ShapeMismatch(_))
+        );
+        assert_matches!(
+            hybrid.alloc_workspace(gpu, 0).map(|_| ()),
+            Err(Error::ShapeMismatch(_))
+        );
+        assert_matches!(
+            hybrid.new_kv_cache(gpu, 65).map(|_| ()),
+            Err(Error::ShapeMismatch(_))
+        );
     }
 }
 
@@ -55,7 +77,9 @@ fn zero_offload_never_allocates_or_calls_the_device() {
 #[test]
 #[ignore = "requires a Vulkan GPU; bounded three-layer generated fixture"]
 fn vulkan_suffix_matches_cpu_and_preserves_prefix() {
-    let gpu = crate::backend::vulkan::VulkanBackend::new().unwrap().with_f16_weights(false);
+    let gpu = crate::backend::vulkan::VulkanBackend::new()
+        .unwrap()
+        .with_f16_weights(false);
     parity(&gpu, 32, 1e-3);
 }
 

@@ -31,6 +31,9 @@ fn names_round_trip() {
 
 #[test]
 fn reasoning_comes_from_a_thinking_template() {
-    assert_eq!(Capability::from_template("{{ '<|im_start|>assistant\\n<think>\\n' }}"), [Capability::Reasoning]);
+    assert_eq!(
+        Capability::from_template("{{ '<|im_start|>assistant\\n<think>\\n' }}"),
+        [Capability::Reasoning]
+    );
     assert!(Capability::from_template("{{ '<|assistant|>' }}").is_empty());
 }

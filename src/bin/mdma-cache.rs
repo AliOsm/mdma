@@ -17,7 +17,9 @@ struct Args {
 
 #[cfg(feature = "rocm")]
 fn prepare(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    use mdma::{backend::rocm::HipBackend, cache::ModelCache, gguf::GgufModel, tokenizer::Tokenizer};
+    use mdma::{
+        backend::rocm::HipBackend, cache::ModelCache, gguf::GgufModel, tokenizer::Tokenizer,
+    };
     let mut source = GgufModel::open(&args.model)?;
     Tokenizer::from_gguf(&source).ok_or("unsupported or invalid tokenizer")?;
     let backend = HipBackend::new()?;
@@ -27,8 +29,13 @@ fn prepare(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         None => ModelCache::from_env()?,
     };
     let result = cache.prepare(&backend, &mut source, args.force)?;
-    eprintln!("{} ROCm cache: SHA-256={}, {} packed tensors, {} weight bytes",
-        if result.reused { "Reused" } else { "Prepared" }, result.source_sha256, result.packed_tensors, result.weight_bytes);
+    eprintln!(
+        "{} ROCm cache: SHA-256={}, {} packed tensors, {} weight bytes",
+        if result.reused { "Reused" } else { "Prepared" },
+        result.source_sha256,
+        result.packed_tensors,
+        result.weight_bytes
+    );
     println!("{}", result.path.display());
     Ok(())
 }

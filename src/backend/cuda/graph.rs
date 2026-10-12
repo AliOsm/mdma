@@ -30,8 +30,7 @@ const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
 unsafe extern "C" {
     fn cuStreamBeginCapture_v2(stream: CuStream, mode: c_int) -> CuResult;
     fn cuStreamEndCapture(stream: CuStream, graph: *mut CuGraph) -> CuResult;
-    fn cuGraphInstantiateWithFlags(exec: *mut CuGraphExec, graph: CuGraph, flags: u64)
-    -> CuResult;
+    fn cuGraphInstantiateWithFlags(exec: *mut CuGraphExec, graph: CuGraph, flags: u64) -> CuResult;
     fn cuGraphLaunch(exec: CuGraphExec, stream: CuStream) -> CuResult;
     fn cuGraphDestroy(graph: CuGraph) -> CuResult;
     fn cuGraphExecDestroy(exec: CuGraphExec) -> CuResult;
@@ -163,7 +162,10 @@ impl GraphState {
                 Some(backend.alloc(bytes, Pool::Scratch)?);
         }
         if backend.dp4a {
-            let width = config.n_embd.max(config.n_ff).max(config.n_heads * config.head_dim);
+            let width = config
+                .n_embd
+                .max(config.n_ff)
+                .max(config.n_heads * config.head_dim);
             *backend.q8_scratch.lock().expect("fresh twin") = Some(Q8Scratch {
                 q8: backend.alloc(width, Pool::Scratch)?,
                 ys: backend.alloc(width / 32 * 8, Pool::Scratch)?,
@@ -177,7 +179,9 @@ impl GraphState {
         // SAFETY: `bind` just made the context current on this thread; the
         // legacy stream is never captured, since twins capture their own
         // non-blocking streams.
-        cu("cuStreamSynchronize", unsafe { cuStreamSynchronize(std::ptr::null_mut()) })?;
+        cu("cuStreamSynchronize", unsafe {
+            cuStreamSynchronize(std::ptr::null_mut())
+        })?;
         let saved_len = kv.len();
         let capture = Capture::begin(backend.stream)?;
         let recorded = model.forward_device(&backend, kv, ws, 0, 0);
@@ -255,15 +259,17 @@ impl Decoder for CudaDecoder<'_> {
 /// attn_f16kv takes (Gemma's 512-wide global heads run eagerly on the
 /// windowed kernel), or the capture fails, which falls back to eager decode
 /// with the reason on stderr.
-#[expect(clippy::unnecessary_wraps, reason = "delegate_decoder! calls fallible factories")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "delegate_decoder! calls fallible factories"
+)]
 pub(super) fn decoder<'a>(
     backend: &'a CudaBackend,
     model: &'a Model<CudaBackend>,
     kv: &'a mut KvCache<CudaBackend>,
     ws: &'a mut Workspace<CudaBackend>,
 ) -> Result<Box<dyn Decoder + 'a>> {
-    if backend.graphs && model.config().head_dim <= MAX_HEAD_DIM
-    {
+    if backend.graphs && model.config().head_dim <= MAX_HEAD_DIM {
         match GraphState::capture(backend, model, kv, ws) {
             Ok(state) => {
                 return Ok(Box::new(CudaDecoder {

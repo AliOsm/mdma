@@ -74,11 +74,17 @@ fn valid_small_head_budgets_do_not_underflow_during_prompt_preparation() {
     let tokenizer = Tokenizer::open(dir.path()).unwrap();
     let question = crate::laya::prompt::Question::from_json(&json!({
         "type": "choice", "instructions": "hello", "criteria": ["hello", "world"]
-    })).unwrap();
+    }))
+    .unwrap();
     for head_max_len in 5..16 {
         let sequence = crate::laya::prompt::build_sequence(
-            &tokenizer, &json!({}), &question, 16, head_max_len,
-        ).unwrap();
+            &tokenizer,
+            &json!({}),
+            &question,
+            16,
+            head_max_len,
+        )
+        .unwrap();
         assert!(sequence.ids.len() <= 16);
         assert_eq!(sequence.markers.len(), 2);
     }

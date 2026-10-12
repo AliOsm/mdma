@@ -42,7 +42,10 @@ fn battery_and_ac_readings_drive_existing_policy() {
     ] {
         let reading = battery_reading(&battery(state, capacity, 100)).unwrap();
         assert_eq!(reading.on_battery, state == "Battery Power");
-        assert_eq!(reading.battery_percent, Some(u8::try_from(capacity).unwrap()));
+        assert_eq!(
+            reading.battery_percent,
+            Some(u8::try_from(capacity).unwrap())
+        );
         assert_eq!(reading.gpu, None);
         assert_eq!(classify(Some(reading), &policy), expected);
     }

@@ -119,7 +119,11 @@ fn pick(spec: &str, offered: &[(String, Operation)]) -> Result<Vec<(String, Oper
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .map(|name| {
-            offered.iter().find(|(offered, _)| offered == name).cloned().ok_or_else(|| format!("no model named {name:?} in the models folder").into())
+            offered
+                .iter()
+                .find(|(offered, _)| offered == name)
+                .cloned()
+                .ok_or_else(|| format!("no model named {name:?} in the models folder").into())
         })
         .collect()
 }
@@ -129,14 +133,22 @@ fn grants(args: &Enroll) -> Result<Grants> {
         return Ok(Grants::default());
     }
     let offered = offered(args.models.clone())?;
-    let execute = args.execute.as_deref().map(|spec| pick(spec, &offered)).transpose()?.unwrap_or_default();
+    let execute = args
+        .execute
+        .as_deref()
+        .map(|spec| pick(spec, &offered))
+        .transpose()?
+        .unwrap_or_default();
     let catalog = match &args.catalog {
         Some(spec) => pick(spec, &offered)?,
         None => execute.clone(),
     };
     Ok(Grants {
         catalog: catalog.into_iter().map(|(name, _)| name).collect(),
-        execute: execute.into_iter().map(|(model, operation)| ExecuteExport { model, operation }).collect(),
+        execute: execute
+            .into_iter()
+            .map(|(model, operation)| ExecuteExport { model, operation })
+            .collect(),
     })
 }
 
@@ -155,8 +167,10 @@ fn read_bundle(path: &Path) -> Result<(Bundle, String)> {
 /// FB16131937), so stay up a moment for it to ask.
 #[cfg(target_os = "macos")]
 fn local_network_hint() {
-    eprintln!("mdma-fed: macOS may be blocking local network access: allow mdma-fed, or the app you run it \
-        from, in System Settings > Privacy & Security > Local Network (Terminal and SSH need nothing), then run again");
+    eprintln!(
+        "mdma-fed: macOS may be blocking local network access: allow mdma-fed, or the app you run it \
+        from, in System Settings > Privacy & Security > Local Network (Terminal and SSH need nothing), then run again"
+    );
     std::thread::sleep(std::time::Duration::from_secs(10));
 }
 
@@ -168,19 +182,29 @@ fn run(command: Command) -> Result<()> {
         Command::Init(args) => {
             let config = admin::init(&args.dir, &args.id, &args.endpoint, args.days)?;
             println!("created {} in {}", config.server_id, args.dir.display());
-            println!("next: mdma-fed export {} > {}.json, then enroll it on each peer", args.dir.display(), config.server_id);
+            println!(
+                "next: mdma-fed export {} > {}.json, then enroll it on each peer",
+                args.dir.display(),
+                config.server_id
+            );
         }
         Command::Export(args) => {
             let mut bytes = serde_json::to_vec_pretty(&admin::export(&args.dir)?)?;
             bytes.push(b'\n');
             std::io::Write::write_all(&mut std::io::stdout(), &bytes)?;
-            eprintln!("bundle {}; compare it with what the peer's enroll prints", digest(&bytes));
+            eprintln!(
+                "bundle {}; compare it with what the peer's enroll prints",
+                digest(&bytes)
+            );
         }
         Command::Enroll(args) => {
             let (bundle, digest) = read_bundle(&args.bundle)?;
             let grants = grants(&args)?;
             let peer = admin::enroll(&args.dir, &bundle, args.endpoint.as_deref(), grants)?;
-            println!("enrolled {} at {} from bundle {digest}", peer.server_id, peer.endpoint);
+            println!(
+                "enrolled {} at {} from bundle {digest}",
+                peer.server_id, peer.endpoint
+            );
             if !peer.catalog_exports.is_empty() {
                 println!("  sees {}", peer.catalog_exports.join(", "));
             }
@@ -189,10 +213,24 @@ fn run(command: Command) -> Result<()> {
             }
         }
         Command::Routes(args) => {
-            let prefix = args.prefix.unwrap_or_else(|| args.peer.split('.').next().unwrap_or(&args.peer).to_owned());
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            let routes = runtime.block_on(admin::routes(&args.dir, &args.peer, &args.client_cert, &prefix))
-                .inspect_err(|error| if error.downcast_ref::<admin::Unreachable>().is_some() { local_network_hint() })?;
+            let prefix = args
+                .prefix
+                .unwrap_or_else(|| args.peer.split('.').next().unwrap_or(&args.peer).to_owned());
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            let routes = runtime
+                .block_on(admin::routes(
+                    &args.dir,
+                    &args.peer,
+                    &args.client_cert,
+                    &prefix,
+                ))
+                .inspect_err(|error| {
+                    if error.downcast_ref::<admin::Unreachable>().is_some() {
+                        local_network_hint();
+                    }
+                })?;
             for route in routes {
                 println!("{} -> {} {}", route.alias, route.peer_id, route.model);
             }

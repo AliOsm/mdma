@@ -104,7 +104,13 @@ impl GgufModel {
     }
 
     fn metadata_array<T>(&self, key: &str, elem: impl Fn(&Value) -> Option<T>) -> Option<Vec<T>> {
-        self.metadata.get(key)?.to_vec().ok()?.iter().map(elem).collect()
+        self.metadata
+            .get(key)?
+            .to_vec()
+            .ok()?
+            .iter()
+            .map(elem)
+            .collect()
     }
 
     pub fn metadata_string_array(&self, key: &str) -> Option<Vec<String>> {
@@ -142,7 +148,9 @@ impl GgufModel {
 
     /// Resident weight bytes, including a prepared layout's padding/headers.
     pub(crate) fn weight_bytes(&self, name: &str) -> usize {
-        self.cached.as_ref().map_or_else(|| self.tensors[name].n_bytes, |cache| cache.bytes(name))
+        self.cached
+            .as_ref()
+            .map_or_else(|| self.tensors[name].n_bytes, |cache| cache.bytes(name))
     }
 
     pub(crate) fn cache_profile(&self) -> Option<&str> {
@@ -169,18 +177,31 @@ impl GgufModel {
     pub fn read_tensor_bytes(&mut self, name: &str) -> Result<Vec<u8>> {
         let (bytes, layout) = self.read_weight_bytes(name)?;
         if layout != crate::cache::WeightLayout::Gguf {
-            return Err(Error::Parse(format!("{name}: prepared weight is not in GGUF layout")));
+            return Err(Error::Parse(format!(
+                "{name}: prepared weight is not in GGUF layout"
+            )));
         }
         Ok(bytes)
     }
 
-    pub(crate) fn read_weight_bytes(&mut self, name: &str) -> Result<(Vec<u8>, crate::cache::WeightLayout)> {
+    pub(crate) fn read_weight_bytes(
+        &mut self,
+        name: &str,
+    ) -> Result<(Vec<u8>, crate::cache::WeightLayout)> {
         self.check_cache_source()?;
         if let Some(cache) = &mut self.cached {
             return Ok(cache.read(name)?);
         }
-        let desc = self.tensors.get(name).ok_or_else(|| Error::UnknownTensor(name.to_string()))?;
-        let start = tensor_start(name, desc, self.tensor_data_offset, self.file.metadata()?.len())?;
+        let desc = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| Error::UnknownTensor(name.to_string()))?;
+        let start = tensor_start(
+            name,
+            desc,
+            self.tensor_data_offset,
+            self.file.metadata()?.len(),
+        )?;
         let mut buf = vec![0u8; desc.n_bytes];
         self.file.seek(SeekFrom::Start(start))?;
         self.file.read_exact(&mut buf)?;
@@ -190,11 +211,18 @@ impl GgufModel {
 
 fn tensor_n_bytes(name: &str, dtype: GgmlDType, shape: &[usize]) -> Result<usize> {
     let overflow = || Error::Parse(format!("{name}: tensor byte size overflows usize"));
-    let elements = shape.iter().try_fold(1usize, |n, &dim| n.checked_mul(dim)).ok_or_else(overflow)?;
+    let elements = shape
+        .iter()
+        .try_fold(1usize, |n, &dim| n.checked_mul(dim))
+        .ok_or_else(overflow)?;
     if !elements.is_multiple_of(dtype.block_size()) {
-        return Err(Error::Parse(format!("{name}: element count {elements} is not aligned to {dtype:?} blocks")));
+        return Err(Error::Parse(format!(
+            "{name}: element count {elements} is not aligned to {dtype:?} blocks"
+        )));
     }
-    (elements / dtype.block_size()).checked_mul(dtype.type_size()).ok_or_else(overflow)
+    (elements / dtype.block_size())
+        .checked_mul(dtype.type_size())
+        .ok_or_else(overflow)
 }
 
 fn tensor_start(name: &str, desc: &TensorDesc, data_offset: u64, file_len: u64) -> Result<u64> {
@@ -203,7 +231,9 @@ fn tensor_start(name: &str, desc: &TensorDesc, data_offset: u64, file_len: u64) 
     let bytes = u64::try_from(desc.n_bytes).map_err(|_| overflow())?;
     let end = start.checked_add(bytes).ok_or_else(overflow)?;
     if end > file_len {
-        return Err(Error::Parse(format!("{name}: tensor byte range {start}..{end} exceeds file length {file_len}")));
+        return Err(Error::Parse(format!(
+            "{name}: tensor byte range {start}..{end} exceeds file length {file_len}"
+        )));
     }
     Ok(start)
 }

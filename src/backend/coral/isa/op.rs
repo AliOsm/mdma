@@ -40,23 +40,43 @@ pub static OP: LazyLock<Layout> = LazyLock::new(|| {
     f.extend([spec("in_tflags", 507, 8), spec("in_twait", 522, 14)]);
     f.extend(ttu_fields("out", 574, 18, false, 17, 18));
     f.extend([
-        spec("out_tflags", 890, 3), sspec("out_last_inc", 901, 17), spec("out_last_cnt", 918, 18), spec("out_last_mode", 936, 2),
+        spec("out_tflags", 890, 3),
+        sspec("out_last_inc", 901, 17),
+        spec("out_last_cnt", 918, 18),
+        spec("out_last_mode", 936, 2),
         spec("out_last_skip", 941, 16),
     ]);
     f.extend(ttu_fields("par", 957, 13, true, 13, 14));
     f.extend([spec("par_tflags", 1205, 8), spec("par_fifo", 1216, 14)]);
     f.extend(ttu_fields("psum", 1260, 13, true, 13, 14));
-    f.extend([spec("psum_tflags", 1508, 15), spec("cfg0", 1563, 9), spec("cfg1", 1578, 10)]);
+    f.extend([
+        spec("psum_tflags", 1508, 15),
+        spec("cfg0", 1563, 9),
+        spec("cfg1", 1578, 10),
+    ]);
     f.extend((0..5).map(|j| spec(&format!("sync{j}"), 1588 + 16 * j, 16)));
     f.extend([
-        spec("cfg2", 1843, 5), spec("cfg3", 1850, 4), spec("w_zp", 1854, 8), spec("in_zp", 1870, 8), spec("dp_mode", 1923, 3),
-        spec("reduce_mask", 1926, 8), spec("out_ch_last", 1934, 6), spec("out_ch", 1940, 6), spec("mult_bits", 1949, 32),
-        spec("clamp_max_bits", 1981, 32), spec("clamp_min_bits", 2013, 32), sspec("offset", 2045, 32), spec("out_zp", 2077, 8), spec("cfg4", 2093, 1),
+        spec("cfg2", 1843, 5),
+        spec("cfg3", 1850, 4),
+        spec("w_zp", 1854, 8),
+        spec("in_zp", 1870, 8),
+        spec("dp_mode", 1923, 3),
+        spec("reduce_mask", 1926, 8),
+        spec("out_ch_last", 1934, 6),
+        spec("out_ch", 1940, 6),
+        spec("mult_bits", 1949, 32),
+        spec("clamp_max_bits", 1981, 32),
+        spec("clamp_min_bits", 2013, 32),
+        sspec("offset", 2045, 32),
+        spec("out_zp", 2077, 8),
+        spec("cfg4", 2093, 1),
     ]);
     Layout::new("op", &[0x01, 0x02], 17, f, Fields::new())
 });
 
-pub fn encode_op(f: &Fields) -> Vec<u128> { OP.encode(f) }
+pub fn encode_op(f: &Fields) -> Vec<u128> {
+    OP.encode(f)
+}
 
 pub struct FcTile {
     pub n: usize,
@@ -85,28 +105,71 @@ pub fn fc_tile_fields(a: &FcTile) -> Fields {
     let p = cdiv(g, 16);
     let gt = p.min(g - p * a.t);
     assert!(gt >= 1, "tile has no outputs");
-    assert!(kw > 1 || p == 1, "K<=4 with N>1024 uses a different schedule (loop1=1, psum TTU active); not modelled");
+    assert!(
+        kw > 1 || p == 1,
+        "K<=4 with N>1024 uses a different schedule (loop1=1, psum TTU active); not modelled"
+    );
     let nt = (64 * p).min(a.n - 64 * p * a.t);
     let (ch, last) = (64.min(round_up(nt, 4)), round_up(nt - 64 * (gt - 1), 4));
     let w0 = (ch / 4) as i64;
     let (kw, gt, ch, last) = (kw as i64, gt as i64, ch as i64, last as i64);
     let mut d = fields(&[
-        ("tile_mask", 1 << a.t), ("seq", a.seq), ("loop0", kw - 1), ("loop3", gt - 1), ("in_base", a.in_base), ("in_mode7", 3),
-        ("in_tflags", 1), ("out_base", a.out_base), ("out_mode7", 3), ("out_tflags", 1), ("par_base", a.par_base), ("par_mode7", 1),
-        ("par_tflags", 3), ("psum_mode7", 2), ("psum_hmode", i64::from(kw == 1)), ("psum_tflags", if gt > 1 { 0x8C0 } else { 0 }),
+        ("tile_mask", 1 << a.t),
+        ("seq", a.seq),
+        ("loop0", kw - 1),
+        ("loop3", gt - 1),
+        ("in_base", a.in_base),
+        ("in_mode7", 3),
+        ("in_tflags", 1),
+        ("out_base", a.out_base),
+        ("out_mode7", 3),
+        ("out_tflags", 1),
+        ("par_base", a.par_base),
+        ("par_mode7", 1),
+        ("par_tflags", 3),
+        ("psum_mode7", 2),
+        ("psum_hmode", i64::from(kw == 1)),
+        ("psum_tflags", if gt > 1 { 0x8C0 } else { 0 }),
     ])
-    .merge(ttu("in_", &[1, kw, kw, 0], &[kw, 1, 1, gt], 8, "cnt"))              // x, re-read once per pass
-    .merge(ttu("out_", &[1, cdiv(a.n, 4) as i64, w0], &[w0, 1, gt], 8, "cnt"))  // row stride ceil(N/4) words, passes contiguous
-    .merge(ttu("par_", &[1, 0, kw, kw], &[kw, 1, 1, gt], 8, "cnt"))             // kw rows of 256 B per pass
-    .merge(ttu("psum_", &[0, 1, 0, 0], &[kw, 1, 1, gt], 8, "cnt"));            // not read, but the nest mirrors the main loop
+    .merge(ttu("in_", &[1, kw, kw, 0], &[kw, 1, 1, gt], 8, "cnt")) // x, re-read once per pass
+    .merge(ttu(
+        "out_",
+        &[1, cdiv(a.n, 4) as i64, w0],
+        &[w0, 1, gt],
+        8,
+        "cnt",
+    )) // row stride ceil(N/4) words, passes contiguous
+    .merge(ttu("par_", &[1, 0, kw, kw], &[kw, 1, 1, gt], 8, "cnt")) // kw rows of 256 B per pass
+    .merge(ttu("psum_", &[0, 1, 0, 0], &[kw, 1, 1, gt], 8, "cnt")); // not read, but the nest mirrors the main loop
     if last != ch {
-        d = d.merge(fields(&[("out_last_cnt", last / 4 - 1), ("out_last_mode", 2), ("out_last_skip", w0 - last / 4)]));
+        d = d.merge(fields(&[
+            ("out_last_cnt", last / 4 - 1),
+            ("out_last_mode", 2),
+            ("out_last_skip", w0 - last / 4),
+        ]));
     }
     d.merge(fields(&[
-        ("cfg0", 0xA5), ("cfg1", 0x16C), ("sync0", 0x4000), ("sync1", 0x4000), ("cfg2", if kw == 1 { 6 } else { 7 }), ("cfg4", 1), ("dp_mode", 3),
-        ("reduce_mask", 0b101), ("out_ch", ch - 1), ("out_ch_last", last - 1), ("w_zp", a.w_zp), ("in_zp", a.in_zp), ("out_zp", a.out_zp),
+        ("cfg0", 0xA5),
+        ("cfg1", 0x16C),
+        ("sync0", 0x4000),
+        ("sync1", 0x4000),
+        ("cfg2", if kw == 1 { 6 } else { 7 }),
+        ("cfg4", 1),
+        ("dp_mode", 3),
+        ("reduce_mask", 0b101),
+        ("out_ch", ch - 1),
+        ("out_ch_last", last - 1),
+        ("w_zp", a.w_zp),
+        ("in_zp", a.in_zp),
+        ("out_zp", a.out_zp),
         ("mult_bits", f32_bits(a.mult)),
-        ("clamp_max_bits", f32_bits(a.clamp_max.unwrap_or((255 - a.out_zp) as f32))),
-        ("clamp_min_bits", f32_bits(a.clamp_min.unwrap_or((-a.out_zp) as f32))),
+        (
+            "clamp_max_bits",
+            f32_bits(a.clamp_max.unwrap_or((255 - a.out_zp) as f32)),
+        ),
+        (
+            "clamp_min_bits",
+            f32_bits(a.clamp_min.unwrap_or((-a.out_zp) as f32)),
+        ),
     ]))
 }

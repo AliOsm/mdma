@@ -176,7 +176,12 @@ fn write_string(s: &str, out: &mut String) {
 /// array/object nesting (the catalog spec caps this at 16).
 pub fn parse(input: &[u8], max_depth: usize) -> Result<Value, Error> {
     let text = std::str::from_utf8(input).map_err(|_| Error::InvalidUtf8)?;
-    let mut p = Parser { bytes: text.as_bytes(), pos: 0, depth: 0, max_depth };
+    let mut p = Parser {
+        bytes: text.as_bytes(),
+        pos: 0,
+        depth: 0,
+        max_depth,
+    };
     p.skip_ws();
     let value = p.parse_value()?;
     p.skip_ws();
@@ -372,7 +377,8 @@ impl Parser<'_> {
                 _ => {
                     let start = self.pos;
                     let end = start + utf8_char_len(self.bytes[start]);
-                    let slice = std::str::from_utf8(&self.bytes[start..end]).map_err(|_| Error::InvalidUtf8)?;
+                    let slice = std::str::from_utf8(&self.bytes[start..end])
+                        .map_err(|_| Error::InvalidUtf8)?;
                     s.push_str(slice);
                     self.pos = end;
                 }
@@ -385,8 +391,10 @@ impl Parser<'_> {
         if self.pos + 4 > self.bytes.len() {
             return Err(Error::UnexpectedEof);
         }
-        let hex = std::str::from_utf8(&self.bytes[self.pos..self.pos + 4]).map_err(|_| Error::InvalidUtf8)?;
-        let v = u32::from_str_radix(hex, 16).map_err(|_| Error::UnexpectedByte(self.bytes[self.pos], self.pos))?;
+        let hex = std::str::from_utf8(&self.bytes[self.pos..self.pos + 4])
+            .map_err(|_| Error::InvalidUtf8)?;
+        let v = u32::from_str_radix(hex, 16)
+            .map_err(|_| Error::UnexpectedByte(self.bytes[self.pos], self.pos))?;
         self.pos += 4;
         Ok(v)
     }
@@ -427,7 +435,9 @@ impl Parser<'_> {
         if is_float {
             return Err(Error::NonInteger);
         }
-        let n: i64 = text.parse().map_err(|_| Error::IntegerOutOfRange(text.to_string()))?;
+        let n: i64 = text
+            .parse()
+            .map_err(|_| Error::IntegerOutOfRange(text.to_string()))?;
         if !(MIN_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&n) {
             return Err(Error::IntegerOutOfRange(text.to_string()));
         }

@@ -14,7 +14,9 @@ impl Drop for MachineLock {
         // Explicit unlock also avoids transient inherited descriptors in a
         // concurrently forked child keeping the lock alive until exec.
         if let Err(error) = self.file.unlock() {
-            eprintln!("mdma: machine lock unlock failed; closing the descriptor releases it: {error}");
+            eprintln!(
+                "mdma: machine lock unlock failed; closing the descriptor releases it: {error}"
+            );
         }
     }
 }

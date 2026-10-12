@@ -10,10 +10,10 @@
 mod auth;
 #[path = "mdma-web/config.rs"]
 mod config;
-#[path = "mdma-web/leases.rs"]
-mod leases;
 #[path = "mdma-client/deadline.rs"]
 mod deadline;
+#[path = "mdma-web/leases.rs"]
+mod leases;
 #[path = "mdma-web/pages.rs"]
 mod pages;
 #[path = "mdma-web/playground.rs"]
@@ -35,7 +35,9 @@ use rama::http::layer::error_handling::ErrorHandler;
 use rama::http::server::HttpServer;
 use rama::http::service::web::Router;
 use rama::http::service::web::extract::{Path, State};
-use rama::http::service::web::response::{Css, DatastarScript, DatastarSourceMap, Html, IntoResponse, Script};
+use rama::http::service::web::response::{
+    Css, DatastarScript, DatastarSourceMap, Html, IntoResponse, Script,
+};
 use rama::rt::Executor;
 use rama::tcp::server::TcpListener;
 use std::sync::Arc;
@@ -61,20 +63,36 @@ async fn index(State(upstream): State<Arc<Upstream>>) -> impl IntoResponse {
     render(View::Memory, &upstream)
 }
 
-async fn view(State(upstream): State<Arc<Upstream>>, Path(path): Path<ViewPath>) -> impl IntoResponse {
+async fn view(
+    State(upstream): State<Arc<Upstream>>,
+    Path(path): Path<ViewPath>,
+) -> impl IntoResponse {
     render(path.view, &upstream)
 }
 
 async fn serve(config: Config, guard: ShutdownGuard) -> Result<(), BoxError> {
-    let client = mdma::grpc::client::mtls_client(&config.server, config.tls_cert.as_ref(), config.tls_key.as_ref(), config.tls_ca.as_ref())?;
+    let client = mdma::grpc::client::mtls_client(
+        &config.server,
+        config.tls_cert.as_ref(),
+        config.tls_key.as_ref(),
+        config.tls_ca.as_ref(),
+    )?;
     let rpc_timeout = deadline::timeout(|name| std::env::var(name))?.or(Some(DEFAULT_RPC_TIMEOUT));
     let executor = Executor::graceful(guard.clone());
     let listener = TcpListener::bind_address(config.listen.to_string(), executor.clone()).await?;
     let bound = listener.local_addr()?;
     let token = auth::generate_token()?;
     let capability = auth::Capability::new(token.clone(), bound.port());
-    let pin = mdma::grpc::client::spki_pin(config.tls_cert.as_ref()).map_err(|e| format!("MDMA_TLS_CERT {}: {e}", config.tls_cert))?;
-    let upstream = Upstream::start(client, pin, rpc_timeout, config.max_streams, config.watch_interval, &guard);
+    let pin = mdma::grpc::client::spki_pin(config.tls_cert.as_ref())
+        .map_err(|e| format!("MDMA_TLS_CERT {}: {e}", config.tls_cert))?;
+    let upstream = Upstream::start(
+        client,
+        pin,
+        rpc_timeout,
+        config.max_streams,
+        config.watch_interval,
+        &guard,
+    );
 
     let router = Router::new_with_state(upstream)
         .with_get("/", index)
@@ -88,17 +106,25 @@ async fn serve(config: Config, guard: ShutdownGuard) -> Result<(), BoxError> {
         .with_get("/assets/datastar.js.map", DatastarSourceMap::default())
         .with_get("/assets/scene.js", Script(SCENE_JS))
         .with_get("/assets/style.css", Css(STYLE_CSS));
-    let app = CompressionLayer::new().into_layer(auth::Guard::new(ErrorHandler::new(router), capability));
+    let app =
+        CompressionLayer::new().into_layer(auth::Guard::new(ErrorHandler::new(router), capability));
 
     eprintln!("mdma-web listening on http://{bound}/?token={token}");
-    eprintln!("mdma-web: forwarding to {} (max {} concurrent generations)", config.server, config.max_streams);
-    listener.serve(HttpServer::auto(executor).service(Arc::new(app))).await;
+    eprintln!(
+        "mdma-web: forwarding to {} (max {} concurrent generations)",
+        config.server, config.max_streams
+    );
+    listener
+        .serve(HttpServer::auto(executor).service(Arc::new(app)))
+        .await;
     Ok(())
 }
 
 fn main() -> Result<(), BoxError> {
     let config = Config::load(|name| std::env::var(name))?;
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     let result = runtime.block_on(async {
         let shutdown = Shutdown::new(async {
             rama::graceful::default_signal().await;

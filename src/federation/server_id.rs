@@ -36,7 +36,9 @@ pub enum Error {
     LabelTooLong(String),
     #[error("server_id label {0:?} must start and end with a letter or digit")]
     LabelBoundary(String),
-    #[error("server_id label {0:?} contains a character other than ASCII letters, digits or hyphens")]
+    #[error(
+        "server_id label {0:?} contains a character other than ASCII letters, digits or hyphens"
+    )]
     InvalidLabelChar(String),
 }
 

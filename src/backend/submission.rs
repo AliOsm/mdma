@@ -15,7 +15,9 @@ impl Submission {
 
     fn check(&self) -> Result<()> {
         if self.failed {
-            return Err(Error::Backend("command submission failed; backend must be recreated".into()));
+            return Err(Error::Backend(
+                "command submission failed; backend must be recreated".into(),
+            ));
         }
         Ok(())
     }

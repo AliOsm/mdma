@@ -15,7 +15,13 @@ fn names(found: &[(String, Source)]) -> Vec<&str> {
 #[test]
 fn ggufs_and_complete_laya_folders_are_models_sorted_by_name() {
     let dir = tempfile::tempdir().unwrap();
-    for file in ["tiny.gguf", "Minicheck-7B.Q4.gguf", ".hidden.gguf", "notes.txt", "bad name.gguf"] {
+    for file in [
+        "tiny.gguf",
+        "Minicheck-7B.Q4.gguf",
+        ".hidden.gguf",
+        "notes.txt",
+        "bad name.gguf",
+    ] {
         std::fs::write(dir.path().join(file), b"").unwrap();
     }
     laya(&dir.path().join("laya"));
@@ -34,9 +40,21 @@ fn symlinks_count_where_they_point_and_dangling_ones_are_skipped() {
     let elsewhere = tempfile::tempdir().unwrap();
     std::fs::write(elsewhere.path().join("real.gguf"), b"").unwrap();
     laya(&elsewhere.path().join("checkpoint"));
-    std::os::unix::fs::symlink(elsewhere.path().join("real.gguf"), models.path().join("alias.gguf")).unwrap();
-    std::os::unix::fs::symlink(elsewhere.path().join("checkpoint"), models.path().join("decider")).unwrap();
-    std::os::unix::fs::symlink(elsewhere.path().join("gone.gguf"), models.path().join("gone.gguf")).unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("real.gguf"),
+        models.path().join("alias.gguf"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("checkpoint"),
+        models.path().join("decider"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("gone.gguf"),
+        models.path().join("gone.gguf"),
+    )
+    .unwrap();
     assert_eq!(names(&scan(models.path()).unwrap()), ["alias", "decider"]);
 }
 

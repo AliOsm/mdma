@@ -53,26 +53,38 @@ pub(super) fn launch_with_charge<B>(
     charge: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
     boundary: crate::session::tracked::Boundary,
 ) -> (Tokens, CompletionTask)
-where B: Backend + Send + Sync + 'static, B::Buf: Send + Sync {
+where
+    B: Backend + Send + Sync + 'static,
+    B::Buf: Send + Sync,
+{
     launch_inner(prepared, claim, cancel, guard, charge, boundary)
 }
 
 fn launch_inner<B, C: Send + 'static>(
-    prepared: Prepared<B>, claim: Claim, cancel: CancellationToken,
-    guard: Option<ShutdownGuard>, charge: C, boundary: crate::session::tracked::Boundary,
+    prepared: Prepared<B>,
+    claim: Claim,
+    cancel: CancellationToken,
+    guard: Option<ShutdownGuard>,
+    charge: C,
+    boundary: crate::session::tracked::Boundary,
 ) -> (Tokens, CompletionTask)
-where B: Backend + Send + Sync + 'static, B::Buf: Send + Sync {
+where
+    B: Backend + Send + Sync + 'static,
+    B::Buf: Send + Sync,
+{
     let (tokens, job) = prepared.into_job_checked(cancel, guard, boundary);
     let (report, receive) = oneshot::channel();
-    let worker = claim.spawn_dedicated(move || {
-        // The native job consumes/drops KV, workspaces and its shutdown guard
-        // before reporting. The outer claimed job then releases accounting.
-        let result = job();
-        drop(charge);
-        let terminal = outcome(&result);
-        let _ = report.send(result);
-        terminal
-    }).ok();
+    let worker = claim
+        .spawn_dedicated(move || {
+            // The native job consumes/drops KV, workspaces and its shutdown guard
+            // before reporting. The outer claimed job then releases accounting.
+            let result = job();
+            drop(charge);
+            let terminal = outcome(&result);
+            let _ = report.send(result);
+            terminal
+        })
+        .ok();
     (
         tokens,
         CompletionTask {

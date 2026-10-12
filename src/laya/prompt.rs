@@ -63,7 +63,11 @@ impl Question {
             Some("choice") => Kind::Choice,
             Some("score") => Kind::Score,
             Some("noul") => Kind::Noul,
-            other => return Err(Error::Question(format!("unknown question type {other:?}; expected choice, score, or noul"))),
+            other => {
+                return Err(Error::Question(format!(
+                    "unknown question type {other:?}; expected choice, score, or noul"
+                )));
+            }
         };
         let instructions = match def.get("instructions") {
             None => return Err(Error::Question("question is missing instructions".into())),
@@ -76,7 +80,14 @@ impl Question {
             Kind::Choice => {
                 let entries: Vec<(&str, &Value)> = match criteria {
                     Value::Array(items) => {
-                        let labels: Vec<&str> = items.iter().map(|c| c.as_str().ok_or_else(|| Error::Question("choice labels must be strings".into()))).collect::<Result<_>>()?;
+                        let labels: Vec<&str> = items
+                            .iter()
+                            .map(|c| {
+                                c.as_str().ok_or_else(|| {
+                                    Error::Question("choice labels must be strings".into())
+                                })
+                            })
+                            .collect::<Result<_>>()?;
                         let mut seen = std::collections::HashSet::new();
                         if !labels.iter().all(|l| seen.insert(*l)) {
                             return Err(Error::Question("choice labels must be unique".into()));
@@ -84,25 +95,48 @@ impl Question {
                         labels.into_iter().map(|l| (l, &Value::Null)).collect()
                     }
                     Value::Object(map) => map.iter().map(|(k, v)| (k.as_str(), v)).collect(),
-                    _ => return Err(Error::Question("choice criteria must be a nonempty dictionary or list".into())),
+                    _ => {
+                        return Err(Error::Question(
+                            "choice criteria must be a nonempty dictionary or list".into(),
+                        ));
+                    }
                 };
                 if entries.is_empty() {
-                    return Err(Error::Question("choice criteria must be a nonempty dictionary or list".into()));
+                    return Err(Error::Question(
+                        "choice criteria must be a nonempty dictionary or list".into(),
+                    ));
                 }
                 let options = entries
                     .iter()
-                    .map(|&(k, v)| if blank(v) { k.to_owned() } else { format!("{k}: {}", render_criterion(v)) })
+                    .map(|&(k, v)| {
+                        if blank(v) {
+                            k.to_owned()
+                        } else {
+                            format!("{k}: {}", render_criterion(v))
+                        }
+                    })
                     .collect();
-                (options, entries.into_iter().map(|(k, _)| k.to_owned()).collect())
+                (
+                    options,
+                    entries.into_iter().map(|(k, _)| k.to_owned()).collect(),
+                )
             }
             Kind::Score => {
                 let Value::Array(items) = criteria else {
-                    return Err(Error::Question("score criteria must be a nonempty list".into()));
+                    return Err(Error::Question(
+                        "score criteria must be a nonempty list".into(),
+                    ));
                 };
                 if items.is_empty() {
-                    return Err(Error::Question("score criteria must be a nonempty list".into()));
+                    return Err(Error::Question(
+                        "score criteria must be a nonempty list".into(),
+                    ));
                 }
-                let options = items.iter().enumerate().map(|(i, c)| format!("level {i}: {}", render_criterion(c))).collect();
+                let options = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("level {i}: {}", render_criterion(c)))
+                    .collect();
                 legend.clone_from(items);
                 (options, Vec::new())
             }
@@ -110,20 +144,34 @@ impl Question {
                 let map = match criteria {
                     Value::Null => None,
                     Value::Object(map) => Some(map),
-                    _ => return Err(Error::Question("noul criteria must be a dictionary with false/true descriptions".into())),
+                    _ => {
+                        return Err(Error::Question(
+                            "noul criteria must be a dictionary with false/true descriptions"
+                                .into(),
+                        ));
+                    }
                 };
                 let desc = |key: &str, default: &'static str| match map.and_then(|m| m.get(key)) {
                     Some(v) if !blank(v) => render_criterion(v),
                     _ => Cow::Borrowed(default),
                 };
                 let options = vec![
-                    format!("false: {}", desc("false", "no, the statement does not hold")),
+                    format!(
+                        "false: {}",
+                        desc("false", "no, the statement does not hold")
+                    ),
                     format!("true: {}", desc("true", "yes, the statement holds")),
                 ];
                 (options, Vec::new())
             }
         };
-        Ok(Self { kind, instructions, options, labels, legend })
+        Ok(Self {
+            kind,
+            instructions,
+            options,
+            labels,
+            legend,
+        })
     }
 }
 
@@ -170,7 +218,13 @@ fn build_prefix(tok: &Tokenizer, q: &Question, head_max_len: usize) -> Result<Se
     Ok(Sequence { ids, markers })
 }
 
-pub fn build_sequence(tok: &Tokenizer, state: &Value, q: &Question, max_len: usize, head_max_len: usize) -> Result<Sequence> {
+pub fn build_sequence(
+    tok: &Tokenizer,
+    state: &Value,
+    q: &Question,
+    max_len: usize,
+    head_max_len: usize,
+) -> Result<Sequence> {
     let Sequence { mut ids, markers } = build_prefix(tok, q, head_max_len)?;
     let room = max_len.saturating_sub(ids.len() + 1);
     let state_ids = tok.encode(&render_criterion(state).replace(tok.mask_token.as_str(), " "))?;
@@ -206,7 +260,10 @@ pub fn collate(items: &[Item], pad_id: u32) -> Result<Batch> {
 }
 
 /// Copy borrowed items directly into the padded batch.
-pub(super) fn collate_iter<'a>(items: impl ExactSizeIterator<Item = &'a Item> + Clone, pad_id: u32) -> Result<Batch> {
+pub(super) fn collate_iter<'a>(
+    items: impl ExactSizeIterator<Item = &'a Item> + Clone,
+    pad_id: u32,
+) -> Result<Batch> {
     let n = items.len();
     if n == 0 {
         return Err(Error::Question("cannot collate an empty batch".into()));

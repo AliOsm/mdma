@@ -11,7 +11,11 @@ impl<B: Backend> Norm<B> {
     pub fn load(backend: &B, w: &Weights, name: &str, bias: bool) -> LoadResult<Self> {
         Ok(Self {
             w: w.vector(backend, &format!("{name}.weight"), None)?,
-            b: if bias { Some(w.vector(backend, &format!("{name}.bias"), None)?) } else { None },
+            b: if bias {
+                Some(w.vector(backend, &format!("{name}.bias"), None)?)
+            } else {
+                None
+            },
         })
     }
 
@@ -29,21 +33,39 @@ impl<B: Backend> Linear<B> {
     pub fn load(backend: &B, w: &Weights, name: &str, bias: bool) -> LoadResult<Self> {
         Ok(Self {
             w: w.matrix(backend, &format!("{name}.weight"), None)?,
-            b: if bias { Some(w.vector(backend, &format!("{name}.bias"), None)?) } else { None },
+            b: if bias {
+                Some(w.vector(backend, &format!("{name}.bias"), None)?)
+            } else {
+                None
+            },
         })
     }
 
     /// Row slice `i` of a fused `[parts * width, in]` projection and bias.
-    pub fn part(backend: &B, w: &Weights, wname: &str, bname: &str, bias: bool, i: usize, width: usize) -> LoadResult<Self> {
+    pub fn part(
+        backend: &B,
+        w: &Weights,
+        wname: &str,
+        bname: &str,
+        bias: bool,
+        i: usize,
+        width: usize,
+    ) -> LoadResult<Self> {
         Ok(Self {
             w: w.matrix(backend, wname, Some(i * width..(i + 1) * width))?,
-            b: if bias { Some(w.vector(backend, bname, Some(i * width..(i + 1) * width))?) } else { None },
+            b: if bias {
+                Some(w.vector(backend, bname, Some(i * width..(i + 1) * width))?)
+            } else {
+                None
+            },
         })
     }
 
     pub fn forward(&self, backend: &B, x: &B::Buf, y: &mut B::Buf) -> Result<()> {
         backend.qmatmul(&self.w, x, y)?;
-        if let Some(b) = &self.b { backend.add_bias(b, y)?; }
+        if let Some(b) = &self.b {
+            backend.add_bias(b, y)?;
+        }
         Ok(())
     }
 }
@@ -64,19 +86,36 @@ impl<B: Backend> AttentionWorkspace<B> {
     pub fn alloc(backend: &B, rows: usize, width: usize) -> Result<Self> {
         let alloc = || backend.alloc(rows * width * 4, Pool::Scratch);
         Ok(Self {
-            x: alloc()?, x_alt: alloc()?, normed: alloc()?,
-            q: alloc()?, k: alloc()?, v: alloc()?, attn_out: alloc()?, proj: alloc()?,
+            x: alloc()?,
+            x_alt: alloc()?,
+            normed: alloc()?,
+            q: alloc()?,
+            k: alloc()?,
+            v: alloc()?,
+            attn_out: alloc()?,
+            proj: alloc()?,
         })
     }
 
     /// `x += wo(attn(q(normed), k(normed), v(normed)))`.
     #[allow(clippy::too_many_arguments)]
-    pub fn attention(&mut self, backend: &B, lens: &[u32], spec: &EncoderSpec, rope: Option<f32>,
-        wq: &Linear<B>, wk: &Linear<B>, wv: &Linear<B>, wo: &Linear<B>) -> Result<()> {
+    pub fn attention(
+        &mut self,
+        backend: &B,
+        lens: &[u32],
+        spec: &EncoderSpec,
+        rope: Option<f32>,
+        wq: &Linear<B>,
+        wk: &Linear<B>,
+        wv: &Linear<B>,
+        wo: &Linear<B>,
+    ) -> Result<()> {
         wq.forward(backend, &self.normed, &mut self.q)?;
         wk.forward(backend, &self.normed, &mut self.k)?;
         wv.forward(backend, &self.normed, &mut self.v)?;
-        if let Some(theta) = rope { backend.rope_neox(&mut self.q, &mut self.k, spec, theta)?; }
+        if let Some(theta) = rope {
+            backend.rope_neox(&mut self.q, &mut self.k, spec, theta)?;
+        }
         backend.attn_bidir(&self.q, &self.k, &self.v, lens, spec, &mut self.attn_out)?;
         wo.forward(backend, &self.attn_out, &mut self.proj)?;
         backend.add(&self.x, &self.proj, &mut self.x_alt)?;

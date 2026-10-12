@@ -4,9 +4,15 @@
 use super::{
     catalog::{self, ModelDescriptor},
     catalog_cache::Cache,
-    config::{self, CaRoot, ControlPermissions, ExecuteExport, Operation, RouteImport, SigningKey, TlsPin, TlsRole, Window},
+    config::{
+        self, CaRoot, ControlPermissions, ExecuteExport, Operation, RouteImport, SigningKey,
+        TlsPin, TlsRole, Window,
+    },
     routing::Route,
-    runtime::{Config, outbound::{self, Credentials}},
+    runtime::{
+        Config,
+        outbound::{self, Credentials},
+    },
     signing::KeyPairHandle,
     tls,
     trust::{Disclosure, State, Store},
@@ -14,8 +20,8 @@ use super::{
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rama::error::BoxError;
 use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyPair, KeyUsagePurpose, SanType,
+    BasicConstraints, CertificateParams, CertifiedIssuer, DistinguishedName, DnType,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose, SanType,
 };
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use serde::{Deserialize, Serialize};
@@ -79,7 +85,9 @@ fn secret(path: &Path, bytes: impl AsRef<[u8]>) -> Result<(), BoxError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     file.write_all(bytes.as_ref())?;
     file.sync_all()?;
     Ok(())
@@ -110,7 +118,10 @@ fn root(server_id: &str, window: Window) -> Result<CertifiedIssuer<'static, KeyP
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
     let mut name = DistinguishedName::new();
-    name.push(DnType::CommonName, format!("mdma federation root for {server_id}"));
+    name.push(
+        DnType::CommonName,
+        format!("mdma federation root for {server_id}"),
+    );
     params.distinguished_name = name;
     validity(&mut params, window)?;
     Ok(CertifiedIssuer::self_signed(params, KeyPair::generate()?)?)
@@ -118,20 +129,32 @@ fn root(server_id: &str, window: Window) -> Result<CertifiedIssuer<'static, KeyP
 
 /// The identity leaf: the server id as DNS name and identity URI, usable for
 /// both TLS roles. Returns (certificate PEM, key PEM).
-pub(crate) fn leaf(server_id: &str, issuer: &CertifiedIssuer<'_, KeyPair>, window: Window) -> Result<(String, String), BoxError> {
+pub(crate) fn leaf(
+    server_id: &str,
+    issuer: &CertifiedIssuer<'_, KeyPair>,
+    window: Window,
+) -> Result<(String, String), BoxError> {
     let key = KeyPair::generate()?;
     let mut params = CertificateParams::new(vec![server_id.to_owned()])?;
-    params.subject_alt_names.push(SanType::URI(format!("https://{server_id}/.well-known/mdma/identity").try_into()?));
+    params.subject_alt_names.push(SanType::URI(
+        format!("https://{server_id}/.well-known/mdma/identity").try_into()?,
+    ));
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+    params.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
     validity(&mut params, window)?;
     let cert = params.signed_by(&key, issuer)?;
     Ok((cert.pem(), key.serialize_pem()))
 }
 
 fn load(dir: &Path) -> Result<(PathBuf, Config), BoxError> {
-    let dir = dir.canonicalize().map_err(|e| format!("{}: {e}", dir.display()))?;
-    let config = Config::load(&dir.join(RUNTIME)).map_err(|e| format!("{}: {e}", dir.join(RUNTIME).display()))?;
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", dir.display()))?;
+    let config = Config::load(&dir.join(RUNTIME))
+        .map_err(|e| format!("{}: {e}", dir.join(RUNTIME).display()))?;
     Ok((dir, config))
 }
 
@@ -154,13 +177,20 @@ fn chain(config: &Config) -> Result<Vec<CertificateDer<'static>>, BoxError> {
 
 /// When the peer's TLS pins run out.
 fn pins_until(peer: &config::Peer) -> Option<u64> {
-    peer.tls_pins.iter().map(|pin| pin.window.valid_until_ms).min()
+    peer.tls_pins
+        .iter()
+        .map(|pin| pin.window.valid_until_ms)
+        .min()
 }
 
 fn open_store(config: &Config) -> Result<Store, BoxError> {
     Store::open(&config.trust_state, &config.server_id).map_err(|error| {
         if matches!(error, super::trust::Error::Denied(reason) if reason.contains("owner")) {
-            format!("{} is in use; stop mdma-serve first", config.trust_state.display()).into()
+            format!(
+                "{} is in use; stop mdma-serve first",
+                config.trust_state.display()
+            )
+            .into()
         } else {
             BoxError::from(error)
         }
@@ -180,12 +210,19 @@ pub fn init(dir: &Path, server_id: &str, endpoint: &str, days: u32) -> Result<Co
     if !(1..=MAX_DAYS).contains(&days) {
         return Err(format!("--days must be 1..={MAX_DAYS}").into());
     }
-    let uri: rama::net::uri::Uri = endpoint.parse().map_err(|e| format!("endpoint {endpoint:?}: {e}"))?;
-    let port = uri.port_u16().ok_or("endpoint needs an explicit port, e.g. https://192.168.1.10:6365")?;
+    let uri: rama::net::uri::Uri = endpoint
+        .parse()
+        .map_err(|e| format!("endpoint {endpoint:?}: {e}"))?;
+    let port = uri
+        .port_u16()
+        .ok_or("endpoint needs an explicit port, e.g. https://192.168.1.10:6365")?;
     private_dir(dir)?;
     let dir = dir.canonicalize()?;
     let now = tls::utc_ms()?;
-    let window = Window { valid_from_ms: now - 60_000, valid_until_ms: now + u64::from(days) * DAY_MS };
+    let window = Window {
+        valid_from_ms: now - 60_000,
+        valid_until_ms: now + u64::from(days) * DAY_MS,
+    };
     let issuer = root(server_id, window)?;
     let (cert, key) = leaf(server_id, &issuer, window)?;
     let signer = KeyPairHandle::generate()?;
@@ -207,7 +244,10 @@ pub fn init(dir: &Path, server_id: &str, endpoint: &str, days: u32) -> Result<Co
         tls_name: server_id.into(),
         tls_cert: dir.join("tls.pem"),
         tls_key: dir.join("tls-key.pem"),
-        identity_roots: vec![CaRoot { path: dir.join("root.pem"), certificate_sha256: tls::sha256(issuer.der()) }],
+        identity_roots: vec![CaRoot {
+            path: dir.join("root.pem"),
+            certificate_sha256: tls::sha256(issuer.der()),
+        }],
         signer_id: signing.key_id,
         signer_key: dir.join("catalog.pk8"),
         endpoint: Some(endpoint.into()),
@@ -224,10 +264,14 @@ pub fn init(dir: &Path, server_id: &str, endpoint: &str, days: u32) -> Result<Co
 /// This node's bundle for its peers to enroll.
 pub fn export(dir: &Path) -> Result<Bundle, BoxError> {
     let (_, config) = load(dir)?;
-    let endpoint = config.endpoint.clone().ok_or("runtime.toml has no endpoint for peers to dial")?;
+    let endpoint = config
+        .endpoint
+        .clone()
+        .ok_or("runtime.toml has no endpoint for peers to dial")?;
     let store = open_store(&config)?;
     let signing = store.local_signer(&config.signer_id, tls::utc_ms()?)?;
-    let spki = tls::certificate_spki_sha256(chain(&config)?.first().ok_or("empty certificate chain")?)?;
+    let spki =
+        tls::certificate_spki_sha256(chain(&config)?.first().ok_or("empty certificate chain")?)?;
     let [own] = config.identity_roots.as_slice() else {
         return Err("runtime.toml must name exactly one identity root".into());
     };
@@ -236,9 +280,16 @@ pub fn export(dir: &Path) -> Result<Bundle, BoxError> {
         server_id: config.server_id,
         endpoint,
         tls_name: config.tls_name,
-        ca_roots: vec![CaRoot { path: "root.pem".into(), certificate_sha256: own.certificate_sha256.clone() }],
+        ca_roots: vec![CaRoot {
+            path: "root.pem".into(),
+            certificate_sha256: own.certificate_sha256.clone(),
+        }],
         tls_pins: [TlsRole::ClientAuth, TlsRole::ServerAuth]
-            .map(|role| TlsPin { role, spki_sha256: spki.clone(), window: signing.window })
+            .map(|role| TlsPin {
+                role,
+                spki_sha256: spki.clone(),
+                window: signing.window,
+            })
             .into(),
         signing_keys: vec![signing],
         control_permissions: ControlPermissions::default(),
@@ -248,20 +299,32 @@ pub fn export(dir: &Path) -> Result<Bundle, BoxError> {
         limits: config::Limits::default(),
     };
     peer.validate()?;
-    Ok(Bundle { format: BUNDLE_FORMAT.into(), peer, root_pem })
+    Ok(Bundle {
+        format: BUNDLE_FORMAT.into(),
+        peer,
+        root_pem,
+    })
 }
 
 fn same_credentials(a: &config::Peer, b: &config::Peer) -> bool {
     a.tls_name == b.tls_name
         && a.tls_pins == b.tls_pins
         && a.signing_keys == b.signing_keys
-        && a.ca_roots.iter().map(|r| &r.certificate_sha256).eq(b.ca_roots.iter().map(|r| &r.certificate_sha256))
+        && a.ca_roots
+            .iter()
+            .map(|r| &r.certificate_sha256)
+            .eq(b.ca_roots.iter().map(|r| &r.certificate_sha256))
 }
 
 /// Trusts the peer in `bundle` for control and gives it `grants`, dialing it
 /// at `endpoint` instead of its own when given. Enrolling the same bundle
 /// again replaces the grants; other credentials for a known peer are refused.
-pub fn enroll(dir: &Path, bundle: &Bundle, endpoint: Option<&str>, grants: Grants) -> Result<config::Peer, BoxError> {
+pub fn enroll(
+    dir: &Path,
+    bundle: &Bundle,
+    endpoint: Option<&str>,
+    grants: Grants,
+) -> Result<config::Peer, BoxError> {
     let (dir, mut config) = load(dir)?;
     if bundle.format != BUNDLE_FORMAT {
         return Err(format!("not a {BUNDLE_FORMAT} bundle").into());
@@ -276,7 +339,8 @@ pub fn enroll(dir: &Path, bundle: &Bundle, endpoint: Option<&str>, grants: Grant
     let [root] = peer.ca_roots.as_mut_slice() else {
         return Err("a bundle names exactly one root".into());
     };
-    let der = CertificateDer::from_pem_slice(bundle.root_pem.as_bytes()).map_err(|e| format!("bundle root: {e}"))?;
+    let der = CertificateDer::from_pem_slice(bundle.root_pem.as_bytes())
+        .map_err(|e| format!("bundle root: {e}"))?;
     if tls::sha256(&der) != root.certificate_sha256 {
         return Err("bundle root does not match its pin".into());
     }
@@ -287,10 +351,17 @@ pub fn enroll(dir: &Path, bundle: &Bundle, endpoint: Option<&str>, grants: Grant
     root.path = roots.join(format!("{}.pem", peer.server_id));
     match std::fs::read(&root.path) {
         Ok(on_file) if on_file != bundle.root_pem.as_bytes() => {
-            return Err(format!("{} holds another root for {}", root.path.display(), peer.server_id).into());
+            return Err(format!(
+                "{} holds another root for {}",
+                root.path.display(),
+                peer.server_id
+            )
+            .into());
         }
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => secret(&root.path, &bundle.root_pem)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            secret(&root.path, &bundle.root_pem)?;
+        }
         Err(error) => return Err(error.into()),
     }
     if let Some(endpoint) = endpoint {
@@ -301,17 +372,30 @@ pub fn enroll(dir: &Path, bundle: &Bundle, endpoint: Option<&str>, grants: Grant
     match store.snapshot()?.peer(&peer.server_id) {
         None => {
             store.stage(peer.clone())?;
-            store.activate_control(&peer.server_id, ControlPermissions { identify: true, scan_capabilities: true })?;
+            store.activate_control(
+                &peer.server_id,
+                ControlPermissions {
+                    identify: true,
+                    scan_capabilities: true,
+                },
+            )?;
         }
         Some(record) if !same_credentials(&record.policy, &peer) => {
             return Err(format!("{} is enrolled with other credentials", peer.server_id).into());
         }
         Some(record) if record.state != State::Active => {
-            return Err(format!("{} is {:?}; it cannot be granted anything", peer.server_id, record.state).into());
+            return Err(format!(
+                "{} is {:?}; it cannot be granted anything",
+                peer.server_id, record.state
+            )
+            .into());
         }
         Some(record) => peer.route_imports.clone_from(&record.policy.route_imports),
     }
-    peer.control_permissions = ControlPermissions { identify: true, scan_capabilities: true };
+    peer.control_permissions = ControlPermissions {
+        identify: true,
+        scan_capabilities: true,
+    };
     peer.catalog_exports = grants.catalog;
     peer.execute_exports = grants.execute;
     store.approve_policy(peer.clone())?;
@@ -325,9 +409,17 @@ pub fn enroll(dir: &Path, bundle: &Bundle, endpoint: Option<&str>, grants: Grant
 /// Routes every ready model in `peer`'s signed catalog as `prefix-model`,
 /// for the local client whose certificate is `client_cert`. Replaces the
 /// peer's earlier routes.
-pub async fn routes(dir: &Path, peer: &str, client_cert: &Path, prefix: &str) -> Result<Vec<Route>, BoxError> {
+pub async fn routes(
+    dir: &Path,
+    peer: &str,
+    client_cert: &Path,
+    prefix: &str,
+) -> Result<Vec<Route>, BoxError> {
     let (dir, config) = load(dir)?;
-    let caller = tls::certificate_spki_sha256(&CertificateDer::from_pem_file(client_cert).map_err(|e| format!("{}: {e}", client_cert.display()))?)?;
+    let caller = tls::certificate_spki_sha256(
+        &CertificateDer::from_pem_file(client_cert)
+            .map_err(|e| format!("{}: {e}", client_cert.display()))?,
+    )?;
     let store = Arc::new(open_store(&config)?);
     let now = tls::utc_ms()?;
     let signing_key = store.local_signer(&config.signer_id, now)?.bytes()?;
@@ -335,17 +427,28 @@ pub async fn routes(dir: &Path, peer: &str, client_cert: &Path, prefix: &str) ->
     let credentials = Credentials {
         store: store.clone(),
         key: Arc::new(PrivateKeyDer::from_pem_file(&config.tls_key)?),
-        local_expires_ms: tls::local_client_expiry(&chain, &config.local_policy(), &signing_key, now)?,
+        local_expires_ms: tls::local_client_expiry(
+            &chain,
+            &config.local_policy(),
+            &signing_key,
+            now,
+        )?,
         chain,
         signing_key,
     };
-    let catalog = credentials.poll(&Cache::default(), peer, rama::rt::Executor::default()).await.map_err(|cause| {
-        if outbound::connect_failed(&cause) {
-            BoxError::from(Unreachable { peer: peer.to_owned(), cause })
-        } else {
-            format!("{peer}'s catalog: {cause}").into()
-        }
-    })?;
+    let catalog = credentials
+        .poll(&Cache::default(), peer, rama::rt::Executor::default())
+        .await
+        .map_err(|cause| {
+            if outbound::connect_failed(&cause) {
+                BoxError::from(Unreachable {
+                    peer: peer.to_owned(),
+                    cause,
+                })
+            } else {
+                format!("{peer}'s catalog: {cause}").into()
+            }
+        })?;
     if catalog.server_state.forces_unready() {
         return Err(format!("{peer} is not accepting work").into());
     }
@@ -377,15 +480,31 @@ pub(crate) fn apply_routes(
         })
         .collect();
     if routes.is_empty() {
-        return Err(format!("{peer_id} offers no ready models; has it granted this node its catalog?").into());
+        return Err(format!(
+            "{peer_id} offers no ready models; has it granted this node its catalog?"
+        )
+        .into());
     }
     for route in &routes {
         route.validate()?;
-        if config.routes.iter().any(|old| old.alias == route.alias && old.peer_id != peer_id) {
-            return Err(format!("alias {} already routes to another peer; pick another --prefix", route.alias).into());
+        if config
+            .routes
+            .iter()
+            .any(|old| old.alias == route.alias && old.peer_id != peer_id)
+        {
+            return Err(format!(
+                "alias {} already routes to another peer; pick another --prefix",
+                route.alias
+            )
+            .into());
         }
     }
-    let mut policy = store.snapshot()?.peer(peer_id).ok_or_else(|| format!("{peer_id} is not enrolled"))?.policy.clone();
+    let mut policy = store
+        .snapshot()?
+        .peer(peer_id)
+        .ok_or_else(|| format!("{peer_id} is not enrolled"))?
+        .policy
+        .clone();
     let until = pins_until(&policy).ok_or("peer has no TLS pins")?;
     policy.route_imports = routes
         .iter()
@@ -407,7 +526,10 @@ pub(crate) fn apply_routes(
             peer_id: peer_id.into(),
             model: route.model.clone(),
             operation: route.operation,
-            window: Window { valid_from_ms: now, valid_until_ms: until },
+            window: Window {
+                valid_from_ms: now,
+                valid_until_ms: until,
+            },
         })?;
     }
     config.routes.retain(|old| old.peer_id != peer_id);
@@ -439,26 +561,62 @@ pub fn status(dir: &Path) -> Result<String, BoxError> {
     let now = tls::utc_ms()?;
     let flag = |on: bool| if on { "on" } else { "off" };
     let mut out = String::new();
-    writeln!(out, "node     {} at {}", config.server_id, config.endpoint.as_deref().unwrap_or("(no endpoint)"))?;
-    writeln!(out, "listen   {}  execution {}  routing {}  polling {}", config.listen,
-        flag(config.enable_execution), flag(config.enable_routing), flag(config.poll_catalogs))?;
+    writeln!(
+        out,
+        "node     {} at {}",
+        config.server_id,
+        config.endpoint.as_deref().unwrap_or("(no endpoint)")
+    )?;
+    writeln!(
+        out,
+        "listen   {}  execution {}  routing {}  polling {}",
+        config.listen,
+        flag(config.enable_execution),
+        flag(config.enable_routing),
+        flag(config.poll_catalogs)
+    )?;
     for record in snapshot.records() {
         let policy = &record.policy;
         let until = pins_until(policy).unwrap_or(0);
-        writeln!(out, "peer     {} {:?} at {} ({})", policy.server_id, record.state, policy.endpoint, remaining(until, now))?;
+        writeln!(
+            out,
+            "peer     {} {:?} at {} ({})",
+            policy.server_id,
+            record.state,
+            policy.endpoint,
+            remaining(until, now)
+        )?;
         if !policy.catalog_exports.is_empty() {
             writeln!(out, "  sees     {}", policy.catalog_exports.join(", "))?;
         }
         if !policy.execute_exports.is_empty() {
-            let runs: Vec<_> = policy.execute_exports.iter().map(|e| format!("{} ({})", e.model, operation(e.operation))).collect();
+            let runs: Vec<_> = policy
+                .execute_exports
+                .iter()
+                .map(|e| format!("{} ({})", e.model, operation(e.operation)))
+                .collect();
             writeln!(out, "  runs     {}", runs.join(", "))?;
         }
     }
     for route in &config.routes {
-        let callers = snapshot.disclosures().iter()
-            .filter(|d| d.peer_id == route.peer_id && d.model == route.model && d.operation == route.operation && d.window.contains(now))
+        let callers = snapshot
+            .disclosures()
+            .iter()
+            .filter(|d| {
+                d.peer_id == route.peer_id
+                    && d.model == route.model
+                    && d.operation == route.operation
+                    && d.window.contains(now)
+            })
             .count();
-        writeln!(out, "route    {} -> {} {} ({}, {callers} client(s))", route.alias, route.peer_id, route.model, operation(route.operation))?;
+        writeln!(
+            out,
+            "route    {} -> {} {} ({}, {callers} client(s))",
+            route.alias,
+            route.peer_id,
+            route.model,
+            operation(route.operation)
+        )?;
     }
     Ok(out)
 }

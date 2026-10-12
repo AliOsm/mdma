@@ -38,34 +38,85 @@ impl RemoteLeases {
 
     /// A lease on `alias`, or the holder's existing one renewed. The flag says
     /// whether the alias needs a keeper started.
-    pub(super) fn take(&self, holder: Holder, alias: &str, requested: Option<Duration>) -> Result<(Lease, bool), LeaseError> {
+    pub(super) fn take(
+        &self,
+        holder: Holder,
+        alias: &str,
+        requested: Option<Duration>,
+    ) -> Result<(Lease, bool), LeaseError> {
         let ttl = lease::ttl(requested);
         let mut state = self.lock();
-        if let Some((id, local)) = state.local.iter_mut().find(|(_, local)| local.holder == holder && local.alias == alias) {
+        if let Some((id, local)) = state
+            .local
+            .iter_mut()
+            .find(|(_, local)| local.holder == holder && local.alias == alias)
+        {
             local.expires = Instant::now() + ttl;
-            return Ok((Lease { id: id.clone(), model: alias.to_owned(), ttl }, false));
+            return Ok((
+                Lease {
+                    id: id.clone(),
+                    model: alias.to_owned(),
+                    ttl,
+                },
+                false,
+            ));
         }
-        let mine = state.local.values().filter(|local| local.holder == holder).count();
+        let mine = state
+            .local
+            .values()
+            .filter(|local| local.holder == holder)
+            .count();
         if mine >= PER_HOLDER {
             return Err(LeaseError::Limit(holder, mine));
         }
         let id = new_id();
-        state.local.insert(id.clone(), Local { holder, alias: alias.to_owned(), expires: Instant::now() + ttl });
+        state.local.insert(
+            id.clone(),
+            Local {
+                holder,
+                alias: alias.to_owned(),
+                expires: Instant::now() + ttl,
+            },
+        );
         let start = state.keepers.insert(alias.to_owned());
-        Ok((Lease { id, model: alias.to_owned(), ttl }, start))
+        Ok((
+            Lease {
+                id,
+                model: alias.to_owned(),
+                ttl,
+            },
+            start,
+        ))
     }
 
-    pub(super) fn renew(&self, holder: &Holder, id: &str, requested: Option<Duration>) -> Result<Lease, LeaseError> {
+    pub(super) fn renew(
+        &self,
+        holder: &Holder,
+        id: &str,
+        requested: Option<Duration>,
+    ) -> Result<Lease, LeaseError> {
         let ttl = lease::ttl(requested);
         let mut state = self.lock();
-        let local = state.local.get_mut(id).filter(|local| local.holder == *holder).ok_or(LeaseError::Unknown)?;
+        let local = state
+            .local
+            .get_mut(id)
+            .filter(|local| local.holder == *holder)
+            .ok_or(LeaseError::Unknown)?;
         local.expires = Instant::now() + ttl;
-        Ok(Lease { id: id.to_owned(), model: local.alias.clone(), ttl })
+        Ok(Lease {
+            id: id.to_owned(),
+            model: local.alias.clone(),
+            ttl,
+        })
     }
 
     pub(super) fn release(&self, holder: &Holder, id: &str) -> Result<(), LeaseError> {
         let mut state = self.lock();
-        if !state.local.get(id).is_some_and(|local| local.holder == *holder) {
+        if !state
+            .local
+            .get(id)
+            .is_some_and(|local| local.holder == *holder)
+        {
             return Err(LeaseError::Unknown);
         }
         state.local.remove(id);
@@ -76,7 +127,12 @@ impl RemoteLeases {
 
     /// Live local leases on `alias`.
     pub(super) fn count(&self, alias: &str, now: Instant) -> u32 {
-        let count = self.lock().local.values().filter(|local| local.alias == alias && local.expires > now).count();
+        let count = self
+            .lock()
+            .local
+            .values()
+            .filter(|local| local.alias == alias && local.expires > now)
+            .count();
         u32::try_from(count).unwrap_or(u32::MAX)
     }
 

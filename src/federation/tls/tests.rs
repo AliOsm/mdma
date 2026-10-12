@@ -53,7 +53,12 @@ pub(crate) struct Fixture {
 }
 
 impl Fixture {
-    pub(crate) fn outbound_material(&self) -> (Vec<CertificateDer<'static>>, rustls_pki_types::PrivateKeyDer<'static>) {
+    pub(crate) fn outbound_material(
+        &self,
+    ) -> (
+        Vec<CertificateDer<'static>>,
+        rustls_pki_types::PrivateKeyDer<'static>,
+    ) {
         (vec![self.remote_leaf.clone()], private(&self.remote_key))
     }
 
@@ -341,23 +346,54 @@ fn issuer_and_leaf_separation_compare_key_material_not_spki_encoding() {
         let spki = parsed.public_key().raw;
         let offset = bytes.windows(spki.len()).position(|w| w == spki).unwrap();
         let curve_oid = [0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
-        let curve = spki.windows(curve_oid.len()).position(|w| w == curve_oid).unwrap();
+        let curve = spki
+            .windows(curve_oid.len())
+            .position(|w| w == curve_oid)
+            .unwrap();
         bytes[offset + curve + curve_oid.len() - 1] = 0x06;
         let changed = CertificateDer::from(bytes);
-        assert_ne!(parse(cert.as_ref()).unwrap().public_key().raw,
-            parse(changed.as_ref()).unwrap().public_key().raw);
-        assert_eq!(parse(cert.as_ref()).unwrap().public_key().subject_public_key.data,
-            parse(changed.as_ref()).unwrap().public_key().subject_public_key.data);
+        assert_ne!(
+            parse(cert.as_ref()).unwrap().public_key().raw,
+            parse(changed.as_ref()).unwrap().public_key().raw
+        );
+        assert_eq!(
+            parse(cert.as_ref())
+                .unwrap()
+                .public_key()
+                .subject_public_key
+                .data,
+            parse(changed.as_ref())
+                .unwrap()
+                .public_key()
+                .subject_public_key
+                .data
+        );
         changed
     }
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let f = Fixture::new();
     let changed = variant(f.issuer.der());
-    let mut policy = f.store.snapshot().unwrap().peer("remote.mdma.test").unwrap().policy.clone();
+    let mut policy = f
+        .store
+        .snapshot()
+        .unwrap()
+        .peer("remote.mdma.test")
+        .unwrap()
+        .policy
+        .clone();
     let root_path = f.dir.path().join("variant-root.pem");
-    std::fs::write(&root_path, format!("-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
-        STANDARD.encode(&changed))).unwrap();
-    policy.ca_roots = vec![CaRoot { path: root_path, certificate_sha256: sha256(&changed) }];
+    std::fs::write(
+        &root_path,
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            STANDARD.encode(&changed)
+        ),
+    )
+    .unwrap();
+    policy.ca_roots = vec![CaRoot {
+        path: root_path,
+        certificate_sha256: sha256(&changed),
+    }];
     assert!(reject_client_root_overlap(&[policy], &[f.issuer.der().clone()]).is_err());
     assert!(reject_shared_leaf_key(&f.local_leaf, &variant(&f.local_leaf)).is_err());
 }

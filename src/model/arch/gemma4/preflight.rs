@@ -3,17 +3,30 @@ use crate::model::preflight::validate_tensor;
 
 impl<B: Backend> Gemma<B> {
     pub(in crate::model) fn validate(b: &B, g: &GgufModel) -> Result<(ModelConfig, Config)> {
-        for operation in [Operation::Scale, Operation::GeluTanhMul, Operation::Softcap,
-            Operation::RopeSplitHalf, Operation::WindowedAttention] {
+        for operation in [
+            Operation::Scale,
+            Operation::GeluTanhMul,
+            Operation::Softcap,
+            Operation::RopeSplitHalf,
+            Operation::WindowedAttention,
+        ] {
             if !b.supports(operation) {
-                return Err(Error::NotImplemented("Gemma 4 requires scale, GELU gating, softcap, split-half RoPE, and windowed attention"));
+                return Err(Error::NotImplemented(
+                    "Gemma 4 requires scale, GELU gating, softcap, split-half RoPE, and windowed attention",
+                ));
             }
         }
         let (c, config) = Config::read(g)?;
-        let vocab = g.tensor_desc("token_embd.weight").and_then(|t| t.shape.first()).copied()
-            .filter(|&n| n > 0).ok_or_else(|| invalid("missing Gemma vocabulary"))?;
+        let vocab = g
+            .tensor_desc("token_embd.weight")
+            .and_then(|t| t.shape.first())
+            .copied()
+            .filter(|&n| n > 0)
+            .ok_or_else(|| invalid("missing Gemma vocabulary"))?;
         let tensor = |name: &str, shape: &[usize], norm: bool| -> Result<()> {
-            let desc = g.tensor_desc(name).ok_or_else(|| invalid(format!("missing tensor {name}")))?;
+            let desc = g
+                .tensor_desc(name)
+                .ok_or_else(|| invalid(format!("missing tensor {name}")))?;
             validate_tensor(b, name, desc, shape, norm)
         };
         tensor("token_embd.weight", &[vocab, c.n_embd], false)?;
@@ -34,7 +47,13 @@ impl<B: Backend> Gemma<B> {
             }
             let q = product(&[c.n_heads, d])?;
             let kv = product(&[c.n_kv_heads, d])?;
-            for suffix in ["attn_norm", "post_attention_norm", "ffn_norm", "post_ffw_norm", "post_norm"] {
+            for suffix in [
+                "attn_norm",
+                "post_attention_norm",
+                "ffn_norm",
+                "post_ffw_norm",
+                "post_norm",
+            ] {
                 tensor(&name(suffix), &[c.n_embd], true)?;
             }
             tensor(&name("attn_q"), &[q, c.n_embd], false)?;

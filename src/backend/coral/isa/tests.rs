@@ -17,9 +17,25 @@ fn ttu_rewinds_inner_levels() {
 
 #[test]
 fn layouts_round_trip_and_fill_gaps() {
-    let layout = Layout::new("t", &[0x21], 2, vec![spec("code", 14, 5), sspec("delta", 130, 17), spec("flag", 255, 1)], Fields::new().set("flag", 1));
+    let layout = Layout::new(
+        "t",
+        &[0x21],
+        2,
+        vec![
+            spec("code", 14, 5),
+            sspec("delta", 130, 17),
+            spec("flag", 255, 1),
+        ],
+        Fields::new().set("flag", 1),
+    );
     let names: Vec<&str> = layout.fields.iter().map(|f| f.name.as_str()).collect();
-    assert_eq!(names, ["gate", "pred_reg", "pred_pol", "rsv5", "opcode", "rsv12", "code", "rsv19", "delta", "rsv147", "flag"]);
+    assert_eq!(
+        names,
+        [
+            "gate", "pred_reg", "pred_pol", "rsv5", "opcode", "rsv12", "code", "rsv19", "delta",
+            "rsv147", "flag"
+        ]
+    );
     let words = layout.encode(&Fields::new().set("code", 4).set("delta", -3));
     assert_eq!(opcode(words[0]), 0x21);
     assert_eq!(words[0] >> 14 & 0x1f, 4);
@@ -29,13 +45,18 @@ fn layouts_round_trip_and_fill_gaps() {
     assert_eq!(decoded.get("delta"), Some(-3));
     assert_eq!(decoded.get("code"), Some(4));
     assert_eq!(decoded.get("flag"), Some(1));
-    assert_eq!(layout.encode(&decoded), words, "encode(decode) is the identity");
+    assert_eq!(
+        layout.encode(&decoded),
+        words,
+        "encode(decode) is the identity"
+    );
 }
 
 #[test]
 #[should_panic(expected = "t.code=32 does not fit 5 bits")]
 fn values_must_fit() {
-    Layout::new("t", &[0x21], 1, vec![spec("code", 14, 5)], Fields::new()).encode(&Fields::new().set("code", 32));
+    Layout::new("t", &[0x21], 1, vec![spec("code", 14, 5)], Fields::new())
+        .encode(&Fields::new().set("code", 32));
 }
 
 #[test]

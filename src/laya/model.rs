@@ -65,7 +65,12 @@ pub struct Output {
 }
 
 impl<B: Backend> DecisionModel<B> {
-    pub fn load(backend: &B, w: &Weights, encoder: EncoderConfig, agent: AgentConfig) -> Result<Self> {
+    pub fn load(
+        backend: &B,
+        w: &Weights,
+        encoder: EncoderConfig,
+        agent: AgentConfig,
+    ) -> Result<Self> {
         let d = encoder.hidden_size;
         let encoder = ModernBert::load(backend, w, encoder, "encoder")?;
         let norm = |name: &str, bias: bool| Norm::load(backend, w, name, bias);
@@ -73,7 +78,17 @@ impl<B: Backend> DecisionModel<B> {
         let mut head = Vec::with_capacity(agent.head_layers);
         for i in 0..agent.head_layers {
             let p = format!("head.layers.{i}");
-            let qkv = |j| Linear::part(backend, w, &format!("{p}.self_attn.in_proj_weight"), &format!("{p}.self_attn.in_proj_bias"), true, j, d);
+            let qkv = |j| {
+                Linear::part(
+                    backend,
+                    w,
+                    &format!("{p}.self_attn.in_proj_weight"),
+                    &format!("{p}.self_attn.in_proj_bias"),
+                    true,
+                    j,
+                    d,
+                )
+            };
             head.push(HeadLayer {
                 norm1: norm(&format!("{p}.norm1"), true)?,
                 wq: qkv(0)?,
@@ -98,8 +113,14 @@ impl<B: Backend> DecisionModel<B> {
         };
         let act_in = model.act_1.w.shape[1];
         let n_act = model.act_2.w.shape[0];
-        if act_in != d + ACTION_FEATURE_COUNT || n_act != model.agent.n_act() || model.type_emb.shape != [3, d] {
-            return Err(Error::Checkpoint(format!("head geometry: act_head {act_in}->{n_act}, type_emb {:?}, hidden {d}", model.type_emb.shape)));
+        if act_in != d + ACTION_FEATURE_COUNT
+            || n_act != model.agent.n_act()
+            || model.type_emb.shape != [3, d]
+        {
+            return Err(Error::Checkpoint(format!(
+                "head geometry: act_head {act_in}->{n_act}, type_emb {:?}, hidden {d}",
+                model.type_emb.shape
+            )));
         }
         Ok(model)
     }
@@ -131,7 +152,13 @@ impl<B: Backend> DecisionModel<B> {
         Ok(product(&[elements, size_of::<f32>()])?)
     }
 
-    pub fn alloc_workspace(&self, backend: &B, n: usize, seq_len: usize, kmax: usize) -> Result<Workspace<B>> {
+    pub fn alloc_workspace(
+        &self,
+        backend: &B,
+        n: usize,
+        seq_len: usize,
+        kmax: usize,
+    ) -> Result<Workspace<B>> {
         let d = self.encoder.config().hidden_size;
         let t = n * seq_len;
         let rows = |r: usize, c: usize| backend.alloc(r * c * size_of::<f32>(), Pool::Scratch);
@@ -156,26 +183,51 @@ impl<B: Backend> DecisionModel<B> {
 
     pub fn forward(&self, backend: &B, ws: &mut Workspace<B>, batch: &Batch) -> Result<Output> {
         if (ws.n, ws.seq_len, ws.kmax) != (batch.n, batch.seq_len, batch.kmax) {
-            return Err(Error::Checkpoint("workspace does not match the batch shape".into()));
+            return Err(Error::Checkpoint(
+                "workspace does not match the batch shape".into(),
+            ));
         }
         let config = self.encoder.config();
         let d = config.hidden_size;
-        let spec = EncoderSpec { seq_len: batch.seq_len, n_heads: config.num_attention_heads, head_dim: config.head_dim(), window: None };
-        self.encoder.forward(backend, &mut ws.encoder, &batch.ids, &batch.lens)?;
+        let spec = EncoderSpec {
+            seq_len: batch.seq_len,
+            n_heads: config.num_attention_heads,
+            head_dim: config.head_dim(),
+            window: None,
+        };
+        self.encoder
+            .forward(backend, &mut ws.encoder, &batch.ids, &batch.lens)?;
         // Reuse the encoder's attention scratch for decision layers.
         let h = &mut ws.encoder.hidden;
 
         // h += type_emb[qtype], broadcast over the sequence.
-        let type_ids: Vec<u32> = batch.kinds.iter().flat_map(|k| std::iter::repeat_n(k.index(), batch.seq_len)).collect();
+        let type_ids: Vec<u32> = batch
+            .kinds
+            .iter()
+            .flat_map(|k| std::iter::repeat_n(k.index(), batch.seq_len))
+            .collect();
         backend.embed(&self.type_emb, &type_ids, &mut h.proj)?;
         backend.add(&h.x, &h.proj, &mut h.x_alt)?;
         std::mem::swap(&mut h.x, &mut h.x_alt);
 
         // PyTorch TransformerEncoderLayer, norm_first, ReLU.
         for layer in &self.head {
-            layer.norm1.forward(backend, &h.x, &mut h.normed, HEAD_NORM_EPS)?;
-            h.attention(backend, &batch.lens, &spec, None, &layer.wq, &layer.wk, &layer.wv, &layer.wo)?;
-            layer.norm2.forward(backend, &h.x, &mut h.normed, HEAD_NORM_EPS)?;
+            layer
+                .norm1
+                .forward(backend, &h.x, &mut h.normed, HEAD_NORM_EPS)?;
+            h.attention(
+                backend,
+                &batch.lens,
+                &spec,
+                None,
+                &layer.wq,
+                &layer.wk,
+                &layer.wv,
+                &layer.wo,
+            )?;
+            layer
+                .norm2
+                .forward(backend, &h.x, &mut h.normed, HEAD_NORM_EPS)?;
             layer.linear1.forward(backend, &h.normed, &mut ws.h1)?;
             backend.relu(&ws.h1, &mut ws.h2)?;
             layer.linear2.forward(backend, &ws.h2, &mut h.proj)?;
@@ -186,11 +238,17 @@ impl<B: Backend> DecisionModel<B> {
         for b in 0..batch.n {
             for j in 0..batch.kmax {
                 let pos = batch.markers[b * batch.kmax + j];
-                backend.copy(&h.x, (b * batch.seq_len + pos) * d * size_of::<f32>(),
-                    &mut ws.markers, (b * batch.kmax + j) * d * size_of::<f32>(), d * size_of::<f32>())?;
+                backend.copy(
+                    &h.x,
+                    (b * batch.seq_len + pos) * d * size_of::<f32>(),
+                    &mut ws.markers,
+                    (b * batch.kmax + j) * d * size_of::<f32>(),
+                    d * size_of::<f32>(),
+                )?;
             }
         }
-        self.scorer_norm.forward(backend, &ws.markers, &mut ws.s_norm, HEAD_NORM_EPS)?;
+        self.scorer_norm
+            .forward(backend, &ws.markers, &mut ws.s_norm, HEAD_NORM_EPS)?;
         self.scorer_1.forward(backend, &ws.s_norm, &mut ws.s_h)?;
         backend.gelu(&ws.s_h, &mut ws.s_g)?;
         self.scorer_2.forward(backend, &ws.s_g, &mut ws.s_out)?;
@@ -207,12 +265,26 @@ impl<B: Backend> DecisionModel<B> {
             }
             let p = super::calibrate::softmax(row);
             let k = batch.counts[b].max(2) as f32;
-            let entropy = -p.iter().map(|&v| v * v.max(ACTION_ENTROPY_EPS).ln()).sum::<f32>() / k.ln();
+            let entropy = -p
+                .iter()
+                .map(|&v| v * v.max(ACTION_ENTROPY_EPS).ln())
+                .sum::<f32>()
+                / k.ln();
             let mut sorted = p.clone();
             sorted.sort_by(|a, b| b.total_cmp(a));
-            let out = &mut pooled[b * (d + ACTION_FEATURE_COUNT)..(b + 1) * (d + ACTION_FEATURE_COUNT)];
-            backend.download(&h.x, b * batch.seq_len * d * size_of::<f32>(), bytemuck::cast_slice_mut(&mut out[..d]))?;
-            out[d..].copy_from_slice(&[sorted[0], sorted[0] - sorted[1], entropy, k / OPTION_COUNT_SCALE]);
+            let out =
+                &mut pooled[b * (d + ACTION_FEATURE_COUNT)..(b + 1) * (d + ACTION_FEATURE_COUNT)];
+            backend.download(
+                &h.x,
+                b * batch.seq_len * d * size_of::<f32>(),
+                bytemuck::cast_slice_mut(&mut out[..d]),
+            )?;
+            out[d..].copy_from_slice(&[
+                sorted[0],
+                sorted[0] - sorted[1],
+                entropy,
+                k / OPTION_COUNT_SCALE,
+            ]);
             logits.push(row.to_vec());
         }
         backend.upload(&mut ws.pooled, 0, bytemuck::cast_slice(&pooled))?;

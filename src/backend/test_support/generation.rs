@@ -29,19 +29,38 @@ fn assert_sequential_continuation<B: Backend>(
     let mut pos = 0u32;
     let mut logits = Vec::new();
     for &tok in prompt {
-        logits = model.forward(backend, &mut kv, &mut ws, tok, pos).expect("forward");
+        logits = model
+            .forward(backend, &mut kv, &mut ws, tok, pos)
+            .expect("forward");
         pos += 1;
     }
-    let generated = greedy_continuation(backend, model, &mut kv, &mut ws, logits, pos, expected.len());
+    let generated = greedy_continuation(
+        backend,
+        model,
+        &mut kv,
+        &mut ws,
+        logits,
+        pos,
+        expected.len(),
+    );
     assert_eq!(generated, expected);
 }
 
 /// Deterministic benchmark prefix, entirely outside the timed decode region.
-pub(crate) fn benchmark_prefix<B: Backend>(backend: &B, model: &Model<B>, kv: &mut KvCache<B>, prefix: u32) {
+pub(crate) fn benchmark_prefix<B: Backend>(
+    backend: &B,
+    model: &Model<B>,
+    kv: &mut KvCache<B>,
+    prefix: u32,
+) {
     if prefix > 0 {
         let tokens: Vec<u32> = (0..prefix).map(|i| i % 128 + 1).collect();
-        let mut ws = model.alloc_workspace(backend, tokens.len()).expect("prefill workspace");
-        model.prefill(backend, kv, &mut ws, &tokens, 0).expect("prefix prefill");
+        let mut ws = model
+            .alloc_workspace(backend, tokens.len())
+            .expect("prefill workspace");
+        model
+            .prefill(backend, kv, &mut ws, &tokens, 0)
+            .expect("prefix prefill");
     }
 }
 
@@ -77,23 +96,53 @@ fn continuation_preserves_tokens_positions_and_final_cache_write() {
         let mut expected_ws = model.alloc_workspace(&backend, 1).unwrap();
         let mut logits = Vec::new();
         for (pos, token) in [1, 7, 13].into_iter().enumerate() {
-            logits = model.forward(&backend, &mut actual_kv, &mut actual_ws, token, pos as u32).unwrap();
-            model.forward(&backend, &mut expected_kv, &mut expected_ws, token, pos as u32).unwrap();
+            logits = model
+                .forward(&backend, &mut actual_kv, &mut actual_ws, token, pos as u32)
+                .unwrap();
+            model
+                .forward(
+                    &backend,
+                    &mut expected_kv,
+                    &mut expected_ws,
+                    token,
+                    pos as u32,
+                )
+                .unwrap();
         }
-        let actual = greedy_continuation(&backend, &model, &mut actual_kv, &mut actual_ws, logits.clone(), 3, steps);
+        let actual = greedy_continuation(
+            &backend,
+            &model,
+            &mut actual_kv,
+            &mut actual_ws,
+            logits.clone(),
+            3,
+            steps,
+        );
         let mut expected = Vec::new();
         for pos in 3..3 + steps {
             let token = greedy(&logits);
             expected.push(token);
-            logits = model.forward(&backend, &mut expected_kv, &mut expected_ws, token, pos as u32).unwrap();
+            logits = model
+                .forward(
+                    &backend,
+                    &mut expected_kv,
+                    &mut expected_ws,
+                    token,
+                    pos as u32,
+                )
+                .unwrap();
         }
         assert_eq!(actual, expected);
         assert_sequential_continuation(&backend, &model, 16, &[1, 7, 13], &expected);
         assert_eq!(actual_kv.len(), 3 + steps);
         let pos = (3 + steps) as u32;
         assert_eq!(
-            model.forward(&backend, &mut actual_kv, &mut actual_ws, 19, pos).unwrap(),
-            model.forward(&backend, &mut expected_kv, &mut expected_ws, 19, pos).unwrap(),
+            model
+                .forward(&backend, &mut actual_kv, &mut actual_ws, 19, pos)
+                .unwrap(),
+            model
+                .forward(&backend, &mut expected_kv, &mut expected_ws, 19, pos)
+                .unwrap(),
         );
     }
 }
@@ -109,13 +158,19 @@ fn benchmark_prefix_matches_explicit_prefill() {
         if prefix > 0 {
             let tokens: Vec<u32> = (1..=prefix).collect();
             let mut ws = model.alloc_workspace(&backend, tokens.len()).unwrap();
-            model.prefill(&backend, &mut expected, &mut ws, &tokens, 0).unwrap();
+            model
+                .prefill(&backend, &mut expected, &mut ws, &tokens, 0)
+                .unwrap();
         }
         assert_eq!(actual.len(), prefix as usize);
         let mut ws = model.alloc_workspace(&backend, 1).unwrap();
         assert_eq!(
-            model.forward(&backend, &mut actual, &mut ws, 19, prefix).unwrap(),
-            model.forward(&backend, &mut expected, &mut ws, 19, prefix).unwrap(),
+            model
+                .forward(&backend, &mut actual, &mut ws, 19, prefix)
+                .unwrap(),
+            model
+                .forward(&backend, &mut expected, &mut ws, 19, prefix)
+                .unwrap(),
         );
     }
 }

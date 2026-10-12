@@ -103,7 +103,8 @@ impl NvmlProbe {
         }
         // SAFETY: the same live handle as above; `default_mw` is a live u32
         // (c_uint) out-pointer.
-        let r = unsafe { nvmlDeviceGetPowerManagementDefaultLimit(self.device, &raw mut default_mw) };
+        let r =
+            unsafe { nvmlDeviceGetPowerManagementDefaultLimit(self.device, &raw mut default_mw) };
         if r != NVML_SUCCESS {
             return Err(io::Error::other(describe(
                 "nvmlDeviceGetPowerManagementDefaultLimit",

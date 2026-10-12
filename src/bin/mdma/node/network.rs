@@ -29,23 +29,34 @@ fn underlying(name: &str, networks: &sysinfo::Networks) -> Vec<proto::NetworkInt
     let Ok(entries) = std::fs::read_dir(format!("/sys/class/net/{name}")) else {
         return Vec::new();
     };
-    let mut names: Vec<_> = entries.flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.strip_prefix("lower_").map(str::to_owned))
+    let mut names: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            entry
+                .file_name()
+                .to_str()?
+                .strip_prefix("lower_")
+                .map(str::to_owned)
+        })
         .collect();
     names.sort();
-    names.into_iter().take(8).map(|name| {
-        let network = networks.list().get(&name);
-        let mut nic = proto::NetworkInterface {
-            address: String::new(), // Members need not own an IP.
-            mtu_bytes: network.map_or(0, sysinfo::NetworkData::mtu),
-            link_speed_bps: link_speed(&name),
-            name,
-            underlying_interfaces: Vec::new(),
-            ..Default::default()
-        };
-        classify(&mut nic);
-        nic
-    }).collect()
+    names
+        .into_iter()
+        .take(8)
+        .map(|name| {
+            let network = networks.list().get(&name);
+            let mut nic = proto::NetworkInterface {
+                address: String::new(), // Members need not own an IP.
+                mtu_bytes: network.map_or(0, sysinfo::NetworkData::mtu),
+                link_speed_bps: link_speed(&name),
+                name,
+                underlying_interfaces: Vec::new(),
+                ..Default::default()
+            };
+            classify(&mut nic);
+            nic
+        })
+        .collect()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -85,20 +96,27 @@ fn link_speed(_: &str) -> Option<u64> {
 }
 
 fn mbps(value: &str) -> Option<u64> {
-    value.parse::<u64>().ok()?.checked_mul(1_000_000).filter(|v| *v > 0)
+    value
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1_000_000)
+        .filter(|v| *v > 0)
 }
 
 // Parse only selected media, never the interface's supported/max capabilities.
 #[cfg(any(target_os = "macos", target_os = "freebsd", test))]
 fn media_speed(output: &str) -> Option<u64> {
-    let line = output.lines().find(|line| line.trim_start().starts_with("media:"))?;
+    let line = output
+        .lines()
+        .find(|line| line.trim_start().starts_with("media:"))?;
     let selected = line.split_once('(')?.1.split_once(')')?.0;
     let rate = selected.split("base").next()?.trim();
     match rate {
         "2.5G" => Some(2_500_000_000),
         _ if rate.ends_with('G') => rate
             .strip_suffix('G')?
-            .parse::<u64>().ok()?
+            .parse::<u64>()
+            .ok()?
             .checked_mul(1_000_000_000),
         _ => mbps(rate),
     }
@@ -159,9 +177,12 @@ fn guest() -> bool {
 
 #[cfg(target_os = "linux")]
 fn guest_platform() -> bool {
-    std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default()
-        .lines().any(|line| line.starts_with("flags")
-            && line.split_whitespace().any(|word| word == "hypervisor"))
+    std::fs::read_to_string("/proc/cpuinfo")
+        .unwrap_or_default()
+        .lines()
+        .any(|line| {
+            line.starts_with("flags") && line.split_whitespace().any(|word| word == "hypervisor")
+        })
         || std::fs::read_to_string("/sys/hypervisor/type")
             .is_ok_and(|value| !value.trim().is_empty())
 }
@@ -172,47 +193,78 @@ fn guest_platform() -> bool {
     let key = "kern.vm_guest";
     #[cfg(target_os = "macos")]
     let key = "kern.hv_vmm_present";
-    let Some(value) = command("/usr/sbin/sysctl", &["-n", key])
-        .or_else(|| command("/sbin/sysctl", &["-n", key])) else { return false };
+    let Some(value) =
+        command("/usr/sbin/sysctl", &["-n", key]).or_else(|| command("/sbin/sysctl", &["-n", key]))
+    else {
+        return false;
+    };
     #[cfg(target_os = "freebsd")]
-    { !value.trim().is_empty() && value.trim() != "none" }
+    {
+        !value.trim().is_empty() && value.trim() != "none"
+    }
     #[cfg(target_os = "macos")]
-    { value.trim() == "1" }
+    {
+        value.trim() == "1"
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "macos")))]
-fn guest_platform() -> bool { false }
+fn guest_platform() -> bool {
+    false
+}
 
 fn command(path: &str, args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new(path).args(args)
-        .env("LC_ALL", "C").output().ok()?;
-    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    let output = std::process::Command::new(path)
+        .args(args)
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(target_os = "linux")]
 fn classify_platform(nic: &mut proto::NetworkInterface) {
     let root = std::path::PathBuf::from(format!("/sys/class/net/{}", nic.name));
     nic.classification_source = "linux_sysfs".into();
-    nic.driver = std::fs::read_link(root.join("device/driver")).ok()
-        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+    nic.driver = std::fs::read_link(root.join("device/driver"))
+        .ok()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
         .unwrap_or_default();
-    nic.interface_kind = if nic.name == "lo" { "loopback" }
-        else if root.join("bridge").exists() { "bridge" }
-        else if root.join("bonding").exists() { "bond" }
-        else if root.join("wireless").exists() || root.join("phy80211").exists() { "wifi" }
-        else if virtual_driver(&nic.driver) || !root.join("device").exists() { "virtual" }
-        else if std::fs::read_to_string(root.join("type")).is_ok_and(|v| v.trim() == "1") { "ethernet" }
-        else { "unknown" }.into();
+    nic.interface_kind = if nic.name == "lo" {
+        "loopback"
+    } else if root.join("bridge").exists() {
+        "bridge"
+    } else if root.join("bonding").exists() {
+        "bond"
+    } else if root.join("wireless").exists() || root.join("phy80211").exists() {
+        "wifi"
+    } else if virtual_driver(&nic.driver) || !root.join("device").exists() {
+        "virtual"
+    } else if std::fs::read_to_string(root.join("type")).is_ok_and(|v| v.trim() == "1") {
+        "ethernet"
+    } else {
+        "unknown"
+    }
+    .into();
     if virtual_driver(&nic.driver) {
         nic.visibility = "guest".into();
     }
-    if nic.visibility == "guest" { return; }
+    if nic.visibility == "guest" {
+        return;
+    }
     if nic.interface_kind == "wifi" {
         nic.physical_medium = "wireless".into();
     } else if nic.interface_kind == "ethernet" {
         // Optional tool: absence or denied access leaves the medium unknown.
         let output = ["/usr/sbin/ethtool", "/sbin/ethtool", "/usr/bin/ethtool"]
-            .iter().find_map(|path| command(path, &[&nic.name]));
+            .iter()
+            .find_map(|path| command(path, &[&nic.name]));
         if let Some(output) = output {
             nic.physical_medium = ethtool_medium(&output).into();
             nic.classification_source = "linux_sysfs+ethtool_reported_port".into();
@@ -222,13 +274,18 @@ fn classify_platform(nic: &mut proto::NetworkInterface) {
 
 #[cfg(any(target_os = "linux", test))]
 fn virtual_driver(driver: &str) -> bool {
-    matches!(driver, "virtio_net" | "vmxnet3" | "hv_netvsc" | "xen-netfront"
-        | "xen_netfront" | "netfront")
+    matches!(
+        driver,
+        "virtio_net" | "vmxnet3" | "hv_netvsc" | "xen-netfront" | "xen_netfront" | "netfront"
+    )
 }
 
 #[cfg(any(target_os = "linux", test))]
 fn ethtool_medium(output: &str) -> &'static str {
-    match output.lines().find_map(|line| line.trim().strip_prefix("Port:").map(str::trim)) {
+    match output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Port:").map(str::trim))
+    {
         Some("Twisted Pair") => "copper",
         Some("FIBRE") => "fiber",
         _ => "unknown", // Direct Attach, Other and SFP ambiguity are not guessed.
@@ -237,12 +294,17 @@ fn ethtool_medium(output: &str) -> &'static str {
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 fn classify_platform(nic: &mut proto::NetworkInterface) {
-    let Some(output) = command("/sbin/ifconfig", &[&nic.name]) else { return };
+    let Some(output) = command("/sbin/ifconfig", &[&nic.name]) else {
+        return;
+    };
     nic.classification_source = "ifconfig_selected_media".into();
     #[cfg(target_os = "freebsd")]
     for driver in ["vtnet", "vmx", "xn", "hn"] {
-        if nic.name.strip_prefix(driver)
-            .is_some_and(|unit| !unit.is_empty() && unit.bytes().all(|c| c.is_ascii_digit())) {
+        if nic
+            .name
+            .strip_prefix(driver)
+            .is_some_and(|unit| !unit.is_empty() && unit.bytes().all(|c| c.is_ascii_digit()))
+        {
             nic.driver = driver.into();
             nic.interface_kind = "virtual".into();
             nic.visibility = "guest".into();
@@ -282,18 +344,36 @@ fn hardware_wifi(output: &str, name: &str) -> bool {
             wifi = matches!(port.trim(), "Wi-Fi" | "AirPort");
         }
         if let Some(device) = line.strip_prefix("Device: ")
-            && device.trim() == name { return wifi; }
+            && device.trim() == name
+        {
+            return wifi;
+        }
     }
     false
 }
 
 #[cfg(any(target_os = "macos", target_os = "freebsd", test))]
 fn selected_medium(output: &str) -> &'static str {
-    let Some(line) = output.lines().find(|line| line.trim_start().starts_with("media:")) else { return "unknown" };
-    let Some((_, selected)) = line.split_once('(') else { return "unknown" };
-    let Some((selected, _)) = selected.split_once(')') else { return "unknown" };
-    let token = selected.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-    let Some((_, suffix)) = token.split_once("base") else { return "unknown" };
+    let Some(line) = output
+        .lines()
+        .find(|line| line.trim_start().starts_with("media:"))
+    else {
+        return "unknown";
+    };
+    let Some((_, selected)) = line.split_once('(') else {
+        return "unknown";
+    };
+    let Some((selected, _)) = selected.split_once(')') else {
+        return "unknown";
+    };
+    let token = selected
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let Some((_, suffix)) = token.split_once("base") else {
+        return "unknown";
+    };
     match suffix.trim_start_matches('-') {
         "t" | "tx" | "t1" => "copper",
         "sx" | "lx" | "sr" | "lr" | "er" | "zr" | "sr4" | "lr4" => "fiber",

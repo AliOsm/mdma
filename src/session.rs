@@ -10,15 +10,15 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
 mod prefix;
 use prefix::{PrefixSlot, PromptLease, SharedPrefix};
-pub(crate) mod worker;
 #[allow(dead_code)] // Native tracked path precedes authenticated workload RPC integration.
 pub(crate) mod tracked;
+pub(crate) mod worker;
 
 const TOKEN_STREAM_CAPACITY: usize = 16;
 
@@ -82,8 +82,21 @@ where
 {
     /// `n_ctx` caps prompt plus output, bounded by the model's context.
     /// Fresh KV caches allocate only the rows this request can evaluate.
-    pub fn new(backend: Arc<B>, model: Arc<Model<B>>, tokenizer: Arc<Tokenizer>, sampler_config: SamplerConfig, n_ctx: usize) -> Self {
-        Self { backend, model, tokenizer, sampler_config, n_ctx, prefix: None }
+    pub fn new(
+        backend: Arc<B>,
+        model: Arc<Model<B>>,
+        tokenizer: Arc<Tokenizer>,
+        sampler_config: SamplerConfig,
+        n_ctx: usize,
+    ) -> Self {
+        Self {
+            backend,
+            model,
+            tokenizer,
+            sampler_config,
+            n_ctx,
+            prefix: None,
+        }
     }
 
     /// Retain one idle prompt KV cache for reuse within this Session only.
@@ -128,22 +141,34 @@ where
         guard: Option<ShutdownGuard>,
     ) -> BResult<CancelOnDrop<ReceiverStream<BResult<GeneratedToken>>>> {
         let (tx, rx) = mpsc::channel(TOKEN_STREAM_CAPACITY);
-        let prepared = self.prepare(prompt, max_tokens, !cancel.is_cancelled(), self.prefix.clone())?;
+        let prepared = self.prepare(
+            prompt,
+            max_tokens,
+            !cancel.is_cancelled(),
+            self.prefix.clone(),
+        )?;
         let loop_cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
             let result = prepared.run(
                 || loop_cancel.is_cancelled() || tx.is_closed(),
                 |token_id, decode| {
                     let text = decode(token_id)?;
-                    Ok(tx.blocking_send(Ok(GeneratedToken { token_id, text })).is_ok())
+                    Ok(tx
+                        .blocking_send(Ok(GeneratedToken { token_id, text }))
+                        .is_ok())
                 },
             );
             // A closed channel means the client already disconnected; there is no one to tell.
-            if let Err(error) = result { let _ = tx.blocking_send(Err(error)); }
+            if let Err(error) = result {
+                let _ = tx.blocking_send(Err(error));
+            }
             drop(guard);
         });
 
-        Ok(CancelOnDrop { inner: ReceiverStream::new(rx), cancel })
+        Ok(CancelOnDrop {
+            inner: ReceiverStream::new(rx),
+            cancel,
+        })
     }
 }
 

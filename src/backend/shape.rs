@@ -25,14 +25,18 @@ pub fn elems(op: &str, bytes: usize) -> Result<usize> {
 pub fn range(op: &str, offset: usize, len: usize, cap: usize) -> Result<()> {
     match offset.checked_add(len) {
         Some(end) if end <= cap => Ok(()),
-        _ => Err(err(format!("{op}: {len} bytes at offset {offset} exceeds {cap} byte buffer"))),
+        _ => Err(err(format!(
+            "{op}: {len} bytes at offset {offset} exceeds {cap} byte buffer"
+        ))),
     }
 }
 
 pub fn rank2(op: &str, shape: &[usize]) -> Result<(usize, usize)> {
     match *shape {
         [rows, cols] => Ok((rows, cols)),
-        _ => Err(err(format!("{op} expects a rank-2 weight shape, got {shape:?}"))),
+        _ => Err(err(format!(
+            "{op} expects a rank-2 weight shape, got {shape:?}"
+        ))),
     }
 }
 
@@ -50,20 +54,31 @@ pub fn matmul(shape: &[usize], x_elems: usize, y_elems: usize) -> Result<Matmul>
         return Err(err(format!("qmatmul: empty weight {shape:?}")));
     }
     if x_elems == 0 || !x_elems.is_multiple_of(n_in) {
-        return Err(err(format!("qmatmul: x has {x_elems} elems, not whole rows of n_in {n_in}")));
+        return Err(err(format!(
+            "qmatmul: x has {x_elems} elems, not whole rows of n_in {n_in}"
+        )));
     }
     let n_tokens = x_elems / n_in;
     if y_elems < n_tokens * n_out {
-        return Err(err(format!("qmatmul: y has {y_elems} elems, needs {}", n_tokens * n_out)));
+        return Err(err(format!(
+            "qmatmul: y has {y_elems} elems, needs {}",
+            n_tokens * n_out
+        )));
     }
-    Ok(Matmul { n_out, n_in, n_tokens })
+    Ok(Matmul {
+        n_out,
+        n_in,
+        n_tokens,
+    })
 }
 
 /// K-quant kernels walk 256-wide superblocks along the reduced dimension.
 pub fn kquant_aligned(op: &str, dtype: crate::gguf::GgmlDType, n: usize) -> Result<()> {
     use crate::gguf::GgmlDType::{Q4K, Q5K, Q6K};
     if matches!(dtype, Q4K | Q5K | Q6K) && !n.is_multiple_of(256) {
-        return Err(err(format!("{op}: K-quant width {n} is not a multiple of 256")));
+        return Err(err(format!(
+            "{op}: K-quant width {n} is not a multiple of 256"
+        )));
     }
     Ok(())
 }
@@ -80,10 +95,15 @@ pub fn embed(shape: &[usize], token_ids: &[u32], out_elems: usize) -> Result<Emb
         return Err(err("embed: no tokens".into()));
     }
     if out_elems < token_ids.len() * n_embd {
-        return Err(err(format!("embed: out has {out_elems} elems, needs {}", token_ids.len() * n_embd)));
+        return Err(err(format!(
+            "embed: out has {out_elems} elems, needs {}",
+            token_ids.len() * n_embd
+        )));
     }
     if let Some(id) = token_ids.iter().find(|&&id| id as usize >= vocab) {
-        return Err(err(format!("embed: token_id {id} out of range (vocab {vocab})")));
+        return Err(err(format!(
+            "embed: token_id {id} out of range (vocab {vocab})"
+        )));
     }
     Ok(Embed { vocab, n_embd })
 }
@@ -92,7 +112,9 @@ pub fn embed(shape: &[usize], token_ids: &[u32], out_elems: usize) -> Result<Emb
 /// per-row bias). Returns the row count.
 pub fn rows(op: &str, dim: usize, x_elems: usize, y_elems: usize) -> Result<usize> {
     if dim == 0 || x_elems == 0 || !x_elems.is_multiple_of(dim) {
-        return Err(err(format!("{op}: x has {x_elems} elems, not whole rows of {dim}")));
+        return Err(err(format!(
+            "{op}: x has {x_elems} elems, not whole rows of {dim}"
+        )));
     }
     if y_elems < x_elems {
         return Err(err(format!("{op}: y has {y_elems} elems, needs {x_elems}")));
@@ -108,7 +130,9 @@ pub fn elementwise(op: &str, inputs: &[usize], outputs: &[usize]) -> Result<usiz
         return Err(err(format!("{op}: input lengths differ: {inputs:?}")));
     }
     if outputs.iter().any(|&l| l < n) {
-        return Err(err(format!("{op}: outputs {outputs:?} cannot hold {n} elems")));
+        return Err(err(format!(
+            "{op}: outputs {outputs:?} cannot hold {n} elems"
+        )));
     }
     Ok(n)
 }
@@ -121,30 +145,55 @@ pub struct Rope {
 /// q/k are `[n_tokens, heads, head_dim]` with an even head_dim.
 pub fn rope(spec: &RopeSpec, q_elems: usize, k_elems: usize, n_tokens: usize) -> Result<Rope> {
     if n_tokens == 0 || !q_elems.is_multiple_of(n_tokens) || !k_elems.is_multiple_of(n_tokens) {
-        return Err(err(format!("rope: q {q_elems} k {k_elems} elems are not whole tokens of n_tokens {n_tokens}")));
+        return Err(err(format!(
+            "rope: q {q_elems} k {k_elems} elems are not whole tokens of n_tokens {n_tokens}"
+        )));
     }
     let (q_stride, k_stride) = (q_elems / n_tokens, k_elems / n_tokens);
-    if spec.head_dim == 0 || !spec.head_dim.is_multiple_of(2) || !q_stride.is_multiple_of(spec.head_dim) || !k_stride.is_multiple_of(spec.head_dim) {
-        return Err(err(format!("rope: token strides {q_stride}/{k_stride} are not whole even heads of {}", spec.head_dim)));
+    if spec.head_dim == 0
+        || !spec.head_dim.is_multiple_of(2)
+        || !q_stride.is_multiple_of(spec.head_dim)
+        || !k_stride.is_multiple_of(spec.head_dim)
+    {
+        return Err(err(format!(
+            "rope: token strides {q_stride}/{k_stride} are not whole even heads of {}",
+            spec.head_dim
+        )));
     }
-    Ok(Rope { n_q_heads: q_stride / spec.head_dim, n_kv_heads: k_stride / spec.head_dim })
+    Ok(Rope {
+        n_q_heads: q_stride / spec.head_dim,
+        n_kv_heads: k_stride / spec.head_dim,
+    })
 }
 
 /// Complete split-half heads and one frequency divisor per pair.
 pub fn rope_split_half(n: usize, factors: usize, spec: &RopeSpec) -> Result<()> {
-    if spec.head_dim == 0 || !spec.head_dim.is_multiple_of(2) || n == 0 || !n.is_multiple_of(spec.head_dim)
-        || factors != spec.head_dim / 2 || !spec.theta.is_finite() || spec.theta <= 0.0
+    if spec.head_dim == 0
+        || !spec.head_dim.is_multiple_of(2)
+        || n == 0
+        || !n.is_multiple_of(spec.head_dim)
+        || factors != spec.head_dim / 2
+        || !spec.theta.is_finite()
+        || spec.theta <= 0.0
     {
-        return Err(err("split-half RoPE requires complete heads and one factor per pair".into()));
+        return Err(err(
+            "split-half RoPE requires complete heads and one factor per pair".into(),
+        ));
     }
     Ok(())
 }
 
 /// Complete heads with an even, nonempty rotary prefix. Returns rotated pairs.
 pub fn rope_partial_interleaved(n: usize, spec: &RopeSpec, rotary_dim: usize) -> Result<usize> {
-    if spec.head_dim == 0 || !spec.head_dim.is_multiple_of(2) || n == 0 || !n.is_multiple_of(spec.head_dim)
-        || rotary_dim == 0 || !rotary_dim.is_multiple_of(2) || rotary_dim > spec.head_dim
-        || !spec.theta.is_finite() || spec.theta <= 0.0
+    if spec.head_dim == 0
+        || !spec.head_dim.is_multiple_of(2)
+        || n == 0
+        || !n.is_multiple_of(spec.head_dim)
+        || rotary_dim == 0
+        || !rotary_dim.is_multiple_of(2)
+        || rotary_dim > spec.head_dim
+        || !spec.theta.is_finite()
+        || spec.theta <= 0.0
     {
         return Err(err("partial interleaved RoPE requires complete heads and an even rotary prefix within head width".into()));
     }
@@ -172,13 +221,25 @@ pub struct Attn {
 
 /// Causal attention of `q[n_q, n_q_heads, head_dim]` over `kv_len` cached
 /// keys. `k_elems`/`v_elems` are counted in the cache's own element size.
-pub fn attn(spec: &AttnSpec, q_elems: usize, kv_len: usize, k_elems: usize, v_elems: usize, o_elems: usize) -> Result<Attn> {
+pub fn attn(
+    spec: &AttnSpec,
+    q_elems: usize,
+    kv_len: usize,
+    k_elems: usize,
+    v_elems: usize,
+    o_elems: usize,
+) -> Result<Attn> {
     let per = spec.n_q_heads * spec.head_dim;
     if per == 0 || q_elems == 0 || !q_elems.is_multiple_of(per) {
-        return Err(err(format!("attn: q has {q_elems} elems, not whole tokens of n_q_heads*head_dim {per}")));
+        return Err(err(format!(
+            "attn: q has {q_elems} elems, not whole tokens of n_q_heads*head_dim {per}"
+        )));
     }
     if spec.n_kv_heads == 0 || !spec.n_q_heads.is_multiple_of(spec.n_kv_heads) {
-        return Err(err(format!("attn: {} q heads are not a multiple of {} KV heads", spec.n_q_heads, spec.n_kv_heads)));
+        return Err(err(format!(
+            "attn: {} q heads are not a multiple of {} KV heads",
+            spec.n_q_heads, spec.n_kv_heads
+        )));
     }
     let n_q = q_elems / per;
     if n_q > kv_len {
@@ -186,19 +247,26 @@ pub fn attn(spec: &AttnSpec, q_elems: usize, kv_len: usize, k_elems: usize, v_el
     }
     let need = kv_len * spec.n_kv_heads * spec.head_dim;
     if k_elems < need || v_elems < need {
-        return Err(err(format!("attn: K {k_elems} V {v_elems} elems for kv.len {kv_len}, need {need}")));
+        return Err(err(format!(
+            "attn: K {k_elems} V {v_elems} elems for kv.len {kv_len}, need {need}"
+        )));
     }
     if o_elems < q_elems {
         return Err(err(format!("attn: o has {o_elems} elems, needs {q_elems}")));
     }
-    Ok(Attn { n_q, prefix: kv_len - n_q })
+    Ok(Attn {
+        n_q,
+        prefix: kv_len - n_q,
+    })
 }
 
 /// Sequences in a `[batch, seq_len, n_heads, head_dim]` buffer.
 pub fn encoder_batch(op: &str, spec: &EncoderSpec, elems: usize) -> Result<usize> {
     let per_seq = spec.seq_len * spec.n_heads * spec.head_dim;
     if per_seq == 0 || elems == 0 || !elems.is_multiple_of(per_seq) {
-        return Err(err(format!("{op}: {elems} elems are not whole sequences of {per_seq}")));
+        return Err(err(format!(
+            "{op}: {elems} elems are not whole sequences of {per_seq}"
+        )));
     }
     Ok(elems / per_seq)
 }
@@ -214,14 +282,27 @@ pub fn rope_neox(spec: &EncoderSpec, q_elems: usize, k_elems: usize) -> Result<u
 
 /// q/k/v share one layout and `o` holds it; `lens` gives each sequence's
 /// valid prefix.
-pub fn attn_bidir(spec: &EncoderSpec, lens: &[u32], q_elems: usize, k_elems: usize, v_elems: usize, o_elems: usize) -> Result<usize> {
+pub fn attn_bidir(
+    spec: &EncoderSpec,
+    lens: &[u32],
+    q_elems: usize,
+    k_elems: usize,
+    v_elems: usize,
+    o_elems: usize,
+) -> Result<usize> {
     elementwise("attn_bidir", &[q_elems, k_elems, v_elems], &[o_elems])?;
     let batch = encoder_batch("attn_bidir", spec, q_elems)?;
     if batch != lens.len() {
-        return Err(err(format!("attn_bidir: {batch} sequences but {} lengths", lens.len())));
+        return Err(err(format!(
+            "attn_bidir: {batch} sequences but {} lengths",
+            lens.len()
+        )));
     }
     if let Some(len) = lens.iter().find(|&&l| l as usize > spec.seq_len) {
-        return Err(err(format!("attn_bidir: len {len} exceeds seq_len {}", spec.seq_len)));
+        return Err(err(format!(
+            "attn_bidir: len {len} exceeds seq_len {}",
+            spec.seq_len
+        )));
     }
     Ok(batch)
 }
@@ -229,7 +310,9 @@ pub fn attn_bidir(spec: &EncoderSpec, lens: &[u32], q_elems: usize, k_elems: usi
 /// Rows of `dim` with an optional bias of the same width.
 pub fn layernorm(dim: usize, bias: Option<usize>, x_elems: usize, y_elems: usize) -> Result<usize> {
     if bias.is_some_and(|b| b != dim) {
-        return Err(err(format!("layernorm: bias has {bias:?} elems, weight {dim}")));
+        return Err(err(format!(
+            "layernorm: bias has {bias:?} elems, weight {dim}"
+        )));
     }
     rows("layernorm", dim, x_elems, y_elems)
 }

@@ -1,6 +1,9 @@
 //! Private request-owned encoding. Public Backend operations remain synchronous.
 use super::*;
-use crate::{kv_cache::KvCache, model::{Model, Workspace, decoder::Decoder}};
+use crate::{
+    kv_cache::KvCache,
+    model::{Model, Workspace, decoder::Decoder},
+};
 use objc2_metal::MTLBarrierScope;
 use std::sync::Mutex;
 
@@ -17,7 +20,10 @@ pub(super) struct Batch {
 // SAFETY: command buffers/encoders may move between threads but must not be
 // encoded concurrently. This private value has exclusive access (or is under
 // Pending's mutex); retained resources are accessed only by the owning request.
-#[expect(clippy::non_send_fields_in_send_ty, reason = "justified by the SAFETY comment above")]
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "justified by the SAFETY comment above"
+)]
 unsafe impl Send for Batch {}
 
 fn key(buffer: &MetalBuf) -> usize {
@@ -26,11 +32,17 @@ fn key(buffer: &MetalBuf) -> usize {
 
 impl Batch {
     pub(super) fn new(queue: &ProtocolObject<dyn MTLCommandQueue>) -> Result<Self> {
-        let command = queue.commandBuffer()
+        let command = queue
+            .commandBuffer()
             .ok_or_else(|| Error::Backend("Metal command buffer allocation failed".into()))?;
-        let encoder = command.computeCommandEncoder()
+        let encoder = command
+            .computeCommandEncoder()
             .ok_or_else(|| Error::Backend("Metal compute encoder allocation failed".into()))?;
-        Ok(Self { command, encoder: Some(encoder), buffers: HashMap::new() })
+        Ok(Self {
+            command,
+            encoder: Some(encoder),
+            buffers: HashMap::new(),
+        })
     }
 
     pub(super) fn references(&self, buffer: &MetalBuf) -> bool {
@@ -54,23 +66,35 @@ impl Batch {
         encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
         encoder.setComputePipelineState(pipeline);
         for (index, buf) in buffers.iter().enumerate() {
-            self.buffers.entry(key(buf)).or_insert_with(|| buf.buffer.clone());
+            self.buffers
+                .entry(key(buf))
+                .or_insert_with(|| buf.buffer.clone());
             // SAFETY: caller checked accesses; retained allocations survive completion.
             unsafe { encoder.setBuffer_offset_atIndex(Some(&buf.buffer), 0, index) };
         }
         // SAFETY: setBytes copies the caller's POD scalar ABI during encoding.
         unsafe {
-            encoder.setBytes_length_atIndex(NonNull::from(params).cast(), std::mem::size_of::<P>(), buffers.len());
+            encoder.setBytes_length_atIndex(
+                NonNull::from(params).cast(),
+                std::mem::size_of::<P>(),
+                buffers.len(),
+            );
         }
         encoder.dispatchThreadgroups_threadsPerThreadgroup(groups, threads);
     }
 
     pub(super) fn finish(mut self) -> Result<()> {
-        self.encoder.take().expect("open Metal encoder").endEncoding();
+        self.encoder
+            .take()
+            .expect("open Metal encoder")
+            .endEncoding();
         self.command.commit();
         self.command.waitUntilCompleted();
         if self.command.status() != MTLCommandBufferStatus::Completed {
-            let detail = self.command.error().map_or_else(|| format!("status {:?}", self.command.status()), |e| e.to_string());
+            let detail = self.command.error().map_or_else(
+                || format!("status {:?}", self.command.status()),
+                |e| e.to_string(),
+            );
             return Err(Error::Backend(format!("Metal command batch: {detail}")));
         }
         Ok(())
@@ -101,14 +125,21 @@ impl<'a> BatchedDecoder<'a> {
         kv: &'a mut KvCache<MetalBackend>,
         ws: &'a mut Workspace<MetalBackend>,
     ) -> Result<Self> {
-        Ok(Self { backend: backend.request_backend()?, model, kv, ws })
+        Ok(Self {
+            backend: backend.request_backend()?,
+            model,
+            kv,
+            ws,
+        })
     }
 }
 
 impl Decoder for BatchedDecoder<'_> {
     fn forward(&mut self, token: u32, pos: u32) -> Result<Vec<f32>> {
         self.model.validate_decode(self.kv, self.ws, token, pos)?;
-        let result = self.model.forward(&self.backend, self.kv, self.ws, token, pos);
+        let result = self
+            .model
+            .forward(&self.backend, self.kv, self.ws, token, pos);
         // Join partial work on errors too, before returning request buffers.
         self.backend.finish()?;
         result
@@ -119,7 +150,9 @@ impl MetalBackend {
     // Only BatchedDecoder may expose this backend to model operations. It
     // exclusively borrows KV/workspace, and shares only immutable model weights.
     pub(super) fn request_backend(&self) -> Result<Self> {
-        let queue = self.device.newCommandQueue()
+        let queue = self
+            .device
+            .newCommandQueue()
             .ok_or_else(|| Error::Backend("Metal request queue allocation failed".into()))?;
         Ok(Self {
             device: self.device.clone(),
@@ -137,23 +170,29 @@ impl MetalBackend {
 
     pub(super) fn finish(&self) -> Result<()> {
         self.health.check((|| {
-        if let Some(pending) = &self.pending {
-            let batch = pending.lock()
-                .map_err(|_| Error::Backend("Metal batch lock poisoned".into()))?.take();
-            if let Some(batch) = batch {
-                return self.health.check(autoreleasepool(|_| batch.finish()));
+            if let Some(pending) = &self.pending {
+                let batch = pending
+                    .lock()
+                    .map_err(|_| Error::Backend("Metal batch lock poisoned".into()))?
+                    .take();
+                if let Some(batch) = batch {
+                    return self.health.check(autoreleasepool(|_| batch.finish()));
+                }
             }
-        }
-        Ok(())
+            Ok(())
         })())
     }
 
     pub(super) fn before_upload(&self, buffer: &MetalBuf) -> Result<()> {
         if let Some(pending) = &self.pending {
-            let referenced = pending.lock()
+            let referenced = pending
+                .lock()
                 .map_err(|_| Error::Backend("Metal batch lock poisoned".into()))?
-                .as_ref().is_some_and(|batch| batch.references(buffer));
-            if referenced { self.finish()?; }
+                .as_ref()
+                .is_some_and(|batch| batch.references(buffer));
+            if referenced {
+                self.finish()?;
+            }
         }
         Ok(())
     }

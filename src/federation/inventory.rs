@@ -23,7 +23,11 @@ impl Snapshot {
     pub(crate) fn same_offer(&self, other: &Self) -> bool {
         self.state == other.state
             && self.models.len() == other.models.len()
-            && self.models.iter().zip(&other.models).all(|(a, b)| a.same_selection(b))
+            && self
+                .models
+                .iter()
+                .zip(&other.models)
+                .all(|(a, b)| a.same_selection(b))
     }
 }
 
@@ -84,7 +88,10 @@ where
             ServerState::Serving
         };
         if state == ServerState::Serving
-            && self.registry.entries().any(|entry| entry.phase == Phase::Failed)
+            && self
+                .registry
+                .entries()
+                .any(|entry| entry.phase == Phase::Failed)
         {
             state = ServerState::Degraded;
         }
@@ -122,9 +129,14 @@ where
                     // Use the power observation, not registry degradation, for
                     // request caps, exactly as the native service does.
                     let (n_ctx, output) = match power {
-                        Some((power, caps, _)) if power.state == crate::power::ServerState::Degraded => {
+                        Some((power, caps, _))
+                            if power.state == crate::power::ServerState::Degraded =>
+                        {
                             let n_ctx = n_ctx.min(caps.n_ctx);
-                            (n_ctx, n_ctx.min(caps.max_tokens).min(self.max_output_tokens))
+                            (
+                                n_ctx,
+                                n_ctx.min(caps.max_tokens).min(self.max_output_tokens),
+                            )
                         }
                         _ => (n_ctx, n_ctx.min(self.max_output_tokens)),
                     };
@@ -169,7 +181,11 @@ where
                 models.push(descriptor);
             }
         }
-        Snapshot { state, models, host: self.registry.live_host(&self.host) }
+        Snapshot {
+            state,
+            models,
+            host: self.registry.live_host(&self.host),
+        }
     }
 }
 

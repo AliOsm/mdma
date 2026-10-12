@@ -11,7 +11,10 @@ fn packed_dot_selection_and_disabling_are_explicit() {
     assert_eq!(gpu.int8_dot(), gpu.int8_dot_available());
     gpu.set_int8(true);
     assert_eq!(gpu.int8(), gpu.int8_available());
-    assert_eq!(gpu.int8_dot(), !gpu.int8_coopmat_available() && gpu.int8_dot_available());
+    assert_eq!(
+        gpu.int8_dot(),
+        !gpu.int8_coopmat_available() && gpu.int8_dot_available()
+    );
     gpu.set_int8_dot(false);
     assert!(!gpu.int8());
     gpu.set_int8_dot(true);
@@ -41,7 +44,10 @@ fn packed_dot_keeps_decode_and_other_weights_on_existing_paths() {
 #[ignore = "requires MDMA_TEST_GGUF and accelerated packed-dot Vulkan hardware"]
 fn packed_dot_matches_requantized_cpu_on_real_rows() {
     let gpu = gpu();
-    assert!(gpu.int8_dot(), "requires accelerated packed signed 4x8 dot products");
+    assert!(
+        gpu.int8_dot(),
+        "requires accelerated packed signed 4x8 dot products"
+    );
     shared::real_rows(&gpu);
 }
 
@@ -49,6 +55,9 @@ fn packed_dot_matches_requantized_cpu_on_real_rows() {
 #[ignore = "requires MDMA_TEST_GGUF and accelerated packed-dot Vulkan hardware"]
 fn packed_dot_prefill_then_greedy_matches_llama_cpp() {
     let gpu = gpu();
-    assert!(gpu.int8_dot(), "requires accelerated packed signed 4x8 dot products");
+    assert!(
+        gpu.int8_dot(),
+        "requires accelerated packed signed 4x8 dot products"
+    );
     super::super::tests::prefill_greedy(&gpu);
 }

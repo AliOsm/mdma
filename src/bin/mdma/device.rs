@@ -29,7 +29,9 @@ pub(super) fn dispatch<T: Task>(name: &str, task: T) -> Result<T::Output> {
         "rocm" => {
             let backend = if std::env::var("MDMA_HIP_F32").as_deref() == Ok("1") {
                 mdma::backend::rocm::HipBackend::new_f32()?
-            } else { mdma::backend::rocm::HipBackend::new()? };
+            } else {
+                mdma::backend::rocm::HipBackend::new()?
+            };
             task.run(backend)
         }
         #[cfg(feature = "cuda")]
@@ -38,11 +40,16 @@ pub(super) fn dispatch<T: Task>(name: &str, task: T) -> Result<T::Output> {
         "metal" => task.run(mdma::backend::metal::MetalBackend::new()?),
         #[cfg(feature = "level0")]
         "level0" => task.run(mdma::backend::level0::Level0Backend::new()?),
-        name if NAMES.contains(&name) => Err(format!("{name} backend not built for this target; rebuild mdma with --features {name}").into()),
+        name if NAMES.contains(&name) => Err(format!(
+            "{name} backend not built for this target; rebuild mdma with --features {name}"
+        )
+        .into()),
         _ => Err(format!("unknown backend {name:?}; expected {}", NAMES.join(", ")).into()),
     }
 }
 
 pub(super) fn mib(value: usize) -> Result<usize> {
-    value.checked_mul(1024 * 1024).ok_or_else(|| "MiB byte count overflow".into())
+    value
+        .checked_mul(1024 * 1024)
+        .ok_or_else(|| "MiB byte count overflow".into())
 }

@@ -14,8 +14,13 @@ pub(super) struct DeviceMemory<T> {
 impl<T> DeviceMemory<T> {
     pub(super) fn new(count: usize, budget: &BufferBudget) -> Result<Self> {
         let bytes = product(&[count, size_of::<T>()])?;
-        let (mem, charge) = budget.allocate(MemoryDomain::Device, bytes, || HipMemory::new(count).map_err(hip_err))?;
-        Ok(Self { mem: ManuallyDrop::new(mem), charge })
+        let (mem, charge) = budget.allocate(MemoryDomain::Device, bytes, || {
+            HipMemory::new(count).map_err(hip_err)
+        })?;
+        Ok(Self {
+            mem: ManuallyDrop::new(mem),
+            charge,
+        })
     }
 
     pub(super) fn as_ptr(&self) -> *mut c_void {

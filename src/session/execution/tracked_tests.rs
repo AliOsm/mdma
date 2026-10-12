@@ -125,16 +125,26 @@ async fn device_join_precedes_memory_release_and_cannot_turn_failure_into_succes
     let (session, budget, weights) = budget_session(peak);
     let observed = budget.clone();
     *session.backend.on_join.lock().unwrap() = Some(Box::new(move || {
-        assert_eq!(observed.used(), weights + peak, "request reservation survives device completion");
+        assert_eq!(
+            observed.used(),
+            weights + peak,
+            "request reservation survives device completion"
+        );
     }));
     let (_, end) = tracked(&session, "abc", 4).await;
     assert!(matches!(end, WorkerEnd::Completed(_)));
     assert_eq!(session.backend.joins.load(SeqCst), 1);
     assert_eq!(budget.used(), weights);
     session.backend.fail_join.store(true, SeqCst);
-    let running = session.prepare_federated("abc", 4).unwrap().start(CancellationToken::new(), None);
+    let running = session
+        .prepare_federated("abc", 4)
+        .unwrap()
+        .start(CancellationToken::new(), None);
     let _ = running.tokens.collect::<Vec<_>>().await;
-    assert!(running.worker.await.unwrap().is_err(), "token EOF cannot hide a failed device join");
+    assert!(
+        running.worker.await.unwrap().is_err(),
+        "token EOF cannot hide a failed device join"
+    );
     assert_eq!(session.backend.joins.load(SeqCst), 2);
 }
 
@@ -143,7 +153,10 @@ async fn panic_and_precancelled_jobs_still_join_the_device_before_finishing() {
     let session = tiny_session(64);
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let running = session.prepare_federated("abc", 4).unwrap().start(cancel, None);
+    let running = session
+        .prepare_federated("abc", 4)
+        .unwrap()
+        .start(cancel, None);
     assert!(running.tokens.collect::<Vec<_>>().await.is_empty());
     assert_eq!(running.worker.await.unwrap().unwrap(), WorkerEnd::Cancelled);
     assert_eq!(session.backend.joins.load(SeqCst), 1);
@@ -260,7 +273,8 @@ async fn cancellation_unblocks_a_full_handoff_even_with_receiver_retained() {
     .unwrap();
     let count = session.backend.embeds.lock().unwrap().len();
     assert_eq!(
-        count, crate::session::tracked::SLOTS + 1,
+        count,
+        crate::session::tracked::SLOTS + 1,
         "charged tokens then one next-step logits boundary"
     );
     assert!(!running.worker.is_finished());

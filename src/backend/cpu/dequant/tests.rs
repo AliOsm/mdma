@@ -1,7 +1,7 @@
 use super::dequantize_row;
-use candle_core::quantized::gguf_file::Content;
-use candle_core::quantized::GgmlDType;
 use candle_core::Device;
+use candle_core::quantized::GgmlDType;
+use candle_core::quantized::gguf_file::Content;
 use std::fs::File;
 
 use crate::backend::test_support::fixture;
@@ -18,7 +18,9 @@ fn matches_candles_own_dequant_for_a_q4k_tensor() {
         .expect("fixture has a Q4_K tensor");
     let name = name.clone();
 
-    let qtensor = content.tensor(&mut file, &name, &Device::Cpu).expect("candle load");
+    let qtensor = content
+        .tensor(&mut file, &name, &Device::Cpu)
+        .expect("candle load");
     let expected = qtensor.dequantize(&Device::Cpu).expect("candle dequant");
     let expected: Vec<f32> = expected.flatten_all().unwrap().to_vec1().unwrap();
 
@@ -37,7 +39,9 @@ fn matches_candles_own_dequant_for_a_q4k_tensor() {
 fn dequantize_row_rejects_misaligned_rows_and_decodes_aligned_ones() {
     let values = [1.5f32, -2.0, 0.25];
     let mut storage = vec![0u8; values.len() * 4 + 4];
-    let offset = (0..4).find(|&o| storage[o..].as_ptr().align_offset(align_of::<f32>()) == 0).expect("an aligned offset");
+    let offset = (0..4)
+        .find(|&o| storage[o..].as_ptr().align_offset(align_of::<f32>()) == 0)
+        .expect("an aligned offset");
     let misaligned = if offset == 0 { 1 } else { offset - 1 };
     for (i, v) in values.iter().enumerate() {
         storage[offset + i * 4..offset + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
@@ -45,6 +49,13 @@ fn dequantize_row_rejects_misaligned_rows_and_decodes_aligned_ones() {
     let mut out = [0f32; 3];
     dequantize_row(GgmlDType::F32, &storage[offset..offset + 12], &mut out).expect("aligned row");
     assert_eq!(out, values);
-    let err = dequantize_row(GgmlDType::F32, &storage[misaligned..misaligned + 12], &mut out);
-    assert!(err.is_err(), "misaligned f32 row must be rejected, not reinterpreted");
+    let err = dequantize_row(
+        GgmlDType::F32,
+        &storage[misaligned..misaligned + 12],
+        &mut out,
+    );
+    assert!(
+        err.is_err(),
+        "misaligned f32 row must be rejected, not reinterpreted"
+    );
 }

@@ -39,7 +39,10 @@ fn pair(value: &str) -> Option<(f64, f64)> {
     (current.is_finite() && max.is_finite()).then_some((current, max))
 }
 
-#[expect(clippy::cast_sign_loss, reason = "widths are range-checked to 1..=32 before the cast")]
+#[expect(
+    clippy::cast_sign_loss,
+    reason = "widths are range-checked to 1..=32 before the cast"
+)]
 fn links(line: &str) -> Option<(PcieLink, PcieLink)> {
     let (_, rest) = line.split_once("link x")?;
     let mut words = rest.split_whitespace();
@@ -123,7 +126,9 @@ pub(super) fn coral(text: &str) -> Vec<Accelerator> {
             let Some((device, rest)) = line.split_once('@') else {
                 continue;
             };
-            if hex(rest, "vendor").as_deref() != Some("0x1ac1") || hex(rest, "device").as_deref() != Some("0x089a") {
+            if hex(rest, "vendor").as_deref() != Some("0x1ac1")
+                || hex(rest, "device").as_deref() != Some("0x089a")
+            {
                 continue;
             }
             let Some(address) = rest.split_whitespace().next().and_then(address) else {

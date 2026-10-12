@@ -158,7 +158,9 @@ impl Tokenizer {
             .enumerate()
             .map(|(id, p)| (p.clone(), id as u32))
             .collect();
-        let chat = ChatFormat::detect(model.metadata_str("tokenizer.chat_template"), |marker| piece_to_id.contains_key(marker));
+        let chat = ChatFormat::detect(model.metadata_str("tokenizer.chat_template"), |marker| {
+            piece_to_id.contains_key(marker)
+        });
 
         Some(Self {
             pieces,

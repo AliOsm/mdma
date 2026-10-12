@@ -6,11 +6,11 @@ use rama::http::grpc::Status;
 use rama::http::{Body, Request, Response};
 use rama::net::uri::Uri;
 use rama::rt::Executor;
-use rama::tls::rustls::client::RustlsClientConfigExt;
 use rama::service::BoxService;
 use rama::tls::client::{
     ClientAuth, ClientAuthData, TlsClientConfig, TlsServerTrust, TlsServerTrustAnchors,
 };
+use rama::tls::rustls::client::RustlsClientConfigExt;
 use rustls_pki_types::pem::{Error as PemError, PemObject};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::path::Path;

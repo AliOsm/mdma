@@ -41,7 +41,10 @@ pub enum Error {
     #[error("models: {0}")]
     Config(String),
     #[error("model {name}: {source}")]
-    Load { name: String, source: Box<dyn std::error::Error + Send + Sync> },
+    Load {
+        name: String,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -82,7 +85,12 @@ pub struct Options {
 
 impl Options {
     pub const fn new(n_ctx: usize) -> Self {
-        Self { n_ctx, warmup_rounds: 0, frozen: false, budget: None }
+        Self {
+            n_ctx,
+            warmup_rounds: 0,
+            frozen: false,
+            budget: None,
+        }
     }
 }
 
@@ -139,23 +147,42 @@ impl<B: Backend> Registry<B> {
     /// Every `*.gguf` and Laya checkpoint folder in `dir`, named by file stem or
     /// folder. Files that do not preflight are skipped with a log line. The
     /// default is `default`, else the first name.
-    pub fn open(backend: Arc<B>, dir: &Path, default: Option<&str>, options: Options) -> Result<Self> {
+    pub fn open(
+        backend: Arc<B>,
+        dir: &Path,
+        default: Option<&str>,
+        options: Options,
+    ) -> Result<Self> {
         let found = scan::scan(dir)?;
         let mut registry = Self::build(backend, found, default, options, true)?;
         registry.dir = Some(dir.to_path_buf());
         if registry.names.is_empty() {
-            return Err(Error::Config(format!("no usable models in {}", dir.display())));
+            return Err(Error::Config(format!(
+                "no usable models in {}",
+                dir.display()
+            )));
         }
         Ok(registry)
     }
 
     /// Exactly these models, in this order; any preflight failure is an error.
-    pub fn new(backend: Arc<B>, models: Vec<(String, Source)>, default: Option<&str>, options: Options) -> Result<Self> {
+    pub fn new(
+        backend: Arc<B>,
+        models: Vec<(String, Source)>,
+        default: Option<&str>,
+        options: Options,
+    ) -> Result<Self> {
         Self::build(backend, models, default, options, false)
     }
 
     /// One decoder built by the caller, always loaded and never exported.
-    pub fn single(backend: Arc<B>, name: &str, architecture: &str, n_ctx: usize, decoder: Decoder<B>) -> Self {
+    pub fn single(
+        backend: Arc<B>,
+        name: &str,
+        architecture: &str,
+        n_ctx: usize,
+        decoder: Decoder<B>,
+    ) -> Self {
         let info = Info {
             kind: Kind::Gguf,
             architecture: architecture.to_owned(),
@@ -167,24 +194,52 @@ impl<B: Backend> Registry<B> {
         };
         let options = Options::new(info.n_ctx);
         Self {
-            backend, options, dir: None, names: vec![(name.to_owned(), 0)], slots: vec![Slot::fixed(info, decoder)], default: 0,
-            profiles: Profiles::default(), changes: watch::Sender::new(0), admission: Mutex::new(()), leases: lease::Table::default(),
+            backend,
+            options,
+            dir: None,
+            names: vec![(name.to_owned(), 0)],
+            slots: vec![Slot::fixed(info, decoder)],
+            default: 0,
+            profiles: Profiles::default(),
+            changes: watch::Sender::new(0),
+            admission: Mutex::new(()),
+            leases: lease::Table::default(),
         }
     }
 
-    fn build(backend: Arc<B>, models: Vec<(String, Source)>, default: Option<&str>, options: Options, skip_invalid: bool) -> Result<Self> {
+    fn build(
+        backend: Arc<B>,
+        models: Vec<(String, Source)>,
+        default: Option<&str>,
+        options: Options,
+        skip_invalid: bool,
+    ) -> Result<Self> {
         if models.is_empty() && !skip_invalid {
             return Err(Error::Config("no models listed".into()));
         }
         if options.warmup_rounds > MAX_WARMUP_ROUNDS {
-            return Err(Error::Config(format!("warm-up rounds must be between 0 and {MAX_WARMUP_ROUNDS}")));
+            return Err(Error::Config(format!(
+                "warm-up rounds must be between 0 and {MAX_WARMUP_ROUNDS}"
+            )));
         }
-        if options.frozen && models.iter().any(|(_, source)| matches!(source, Source::Gguf(_))) {
+        if options.frozen
+            && models
+                .iter()
+                .any(|(_, source)| matches!(source, Source::Gguf(_)))
+        {
             crate::cache::require_original_source().map_err(|e| Error::Config(e.to_string()))?;
         }
         let mut registry = Self {
-            backend, options, dir: None, names: Vec::new(), slots: Vec::new(), default: 0, profiles: Profiles::default(),
-            changes: watch::Sender::new(0), admission: Mutex::new(()), leases: lease::Table::default(),
+            backend,
+            options,
+            dir: None,
+            names: Vec::new(),
+            slots: Vec::new(),
+            default: 0,
+            profiles: Profiles::default(),
+            changes: watch::Sender::new(0),
+            admission: Mutex::new(()),
+            leases: lease::Table::default(),
         };
         let mut identities: HashMap<same_file::Handle, usize> = HashMap::new();
         for (name, source) in models {
@@ -201,7 +256,10 @@ impl<B: Backend> Registry<B> {
             }
         }
         registry.default = match default {
-            Some(default) => registry.names.iter().position(|(name, _)| name == default)
+            Some(default) => registry
+                .names
+                .iter()
+                .position(|(name, _)| name == default)
                 .ok_or_else(|| Error::Config(format!("default model {default:?} is not listed")))?,
             None => 0,
         };
@@ -209,7 +267,11 @@ impl<B: Backend> Registry<B> {
     }
 
     /// Reads metadata only; aliases of one file or folder share a slot.
-    fn preflight(&mut self, source: &Source, identities: &mut HashMap<same_file::Handle, usize>) -> std::result::Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    fn preflight(
+        &mut self,
+        source: &Source,
+        identities: &mut HashMap<same_file::Handle, usize>,
+    ) -> std::result::Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         match source {
             Source::Gguf(path) => {
                 let (pinned, handle) = native::Pinned::open(path)?;
@@ -222,7 +284,8 @@ impl<B: Backend> Registry<B> {
                 }
                 let gguf = pinned.gguf()?;
                 let config = Model::validate(&*self.backend, &gguf)?;
-                let tokenizer = Tokenizer::from_gguf(&gguf).ok_or("failed to build tokenizer from GGUF metadata")?;
+                let tokenizer = Tokenizer::from_gguf(&gguf)
+                    .ok_or("failed to build tokenizer from GGUF metadata")?;
                 let (class, capabilities) = class::detect(&gguf);
                 let info = Info {
                     kind: Kind::Gguf,
@@ -234,7 +297,13 @@ impl<B: Backend> Registry<B> {
                     chat_format: tokenizer.chat_format(),
                 };
                 identities.insert(handle, self.slots.len());
-                self.slots.push(Slot::new(info, slot::Source::Gguf { pinned, tokenizer: Arc::new(tokenizer) }));
+                self.slots.push(Slot::new(
+                    info,
+                    slot::Source::Gguf {
+                        pinned,
+                        tokenizer: Arc::new(tokenizer),
+                    },
+                ));
             }
             Source::Laya(dir) => {
                 let handle = same_file::Handle::from_path(dir)?;
@@ -252,7 +321,8 @@ impl<B: Backend> Registry<B> {
                     chat_format: None,
                 };
                 identities.insert(handle, self.slots.len());
-                self.slots.push(Slot::new(info, slot::Source::Laya(dir.clone())));
+                self.slots
+                    .push(Slot::new(info, slot::Source::Laya(dir.clone())));
             }
         }
         Ok(self.slots.len() - 1)
@@ -268,7 +338,10 @@ impl<B: Backend> Registry<B> {
 
     /// `host` with live memory and the models folder's disk.
     pub fn live_host(&self, host: &crate::grpc::Host) -> crate::grpc::Host {
-        let device = (self.backend.available_device_bytes().ok().flatten(), self.backend.total_device_bytes());
+        let device = (
+            self.backend.available_device_bytes().ok().flatten(),
+            self.backend.total_device_bytes(),
+        );
         crate::host::live(host, self.dir(), device)
     }
 
@@ -289,7 +362,10 @@ impl<B: Backend> Registry<B> {
         if name.is_empty() {
             return self.names.get(self.default).map(|(_, index)| *index);
         }
-        self.names.iter().find(|(listed, _)| listed == name).map(|(_, index)| *index)
+        self.names
+            .iter()
+            .find(|(listed, _)| listed == name)
+            .map(|(_, index)| *index)
     }
 
     /// The listed name, resolving `""` to the default.
@@ -297,7 +373,10 @@ impl<B: Backend> Registry<B> {
         if name.is_empty() {
             return Some(self.default_name());
         }
-        self.names.iter().find(|(listed, _)| listed == name).map(|(listed, _)| listed.as_str())
+        self.names
+            .iter()
+            .find(|(listed, _)| listed == name)
+            .map(|(listed, _)| listed.as_str())
     }
 
     pub fn info(&self, name: &str) -> Option<&Info> {
@@ -309,7 +388,14 @@ impl<B: Backend> Registry<B> {
         self.names.iter().map(|(name, index)| {
             let slot = &self.slots[*index];
             let (phase, error) = slot.phase();
-            Entry { name, info: &slot.info, phase, error, upload: *index, leases: slot.leases() }
+            Entry {
+                name,
+                info: &slot.info,
+                phase,
+                error,
+                upload: *index,
+                leases: slot.leases(),
+            }
         })
     }
 
@@ -320,7 +406,9 @@ impl<B: Backend> Registry<B> {
 
     /// The model, loading it first if needed. Blocks while it loads.
     pub fn acquire_blocking(&self, name: &str) -> std::result::Result<Use<B>, LoadError> {
-        let slot = self.slot(name).ok_or_else(|| LoadError::Failed(format!("no model named {name:?}")))?;
+        let slot = self
+            .slot(name)
+            .ok_or_else(|| LoadError::Failed(format!("no model named {name:?}")))?;
         let mut loaded = false;
         let result = slot.acquire(|| {
             loaded = true;
@@ -335,8 +423,16 @@ impl<B: Backend> Registry<B> {
 
     /// Keeps `name` loaded for `holder` until the lease is released or expires.
     /// Taking a lease does not load the model; acquiring one does.
-    pub fn lease(&self, holder: Holder, name: &str, ttl: Option<Duration>) -> std::result::Result<Lease, LeaseError> {
-        let listed = self.resolve(name).ok_or_else(|| LeaseError::Missing(name.to_owned()))?.to_owned();
+    pub fn lease(
+        &self,
+        holder: Holder,
+        name: &str,
+        ttl: Option<Duration>,
+    ) -> std::result::Result<Lease, LeaseError> {
+        let listed = self
+            .resolve(name)
+            .ok_or_else(|| LeaseError::Missing(name.to_owned()))?
+            .to_owned();
         let index = self.index(&listed).expect("resolved names are listed");
         let (lease, new) = self.leases.take(holder, listed, index, ttl)?;
         if new {
@@ -347,11 +443,20 @@ impl<B: Backend> Registry<B> {
     }
 
     /// The model a holder's lease keeps loaded.
-    pub fn lease_model(&self, holder: &Holder, id: &str) -> std::result::Result<String, LeaseError> {
+    pub fn lease_model(
+        &self,
+        holder: &Holder,
+        id: &str,
+    ) -> std::result::Result<String, LeaseError> {
         self.leases.model(holder, id)
     }
 
-    pub fn renew(&self, holder: &Holder, id: &str, ttl: Option<Duration>) -> std::result::Result<Lease, LeaseError> {
+    pub fn renew(
+        &self,
+        holder: &Holder,
+        id: &str,
+        ttl: Option<Duration>,
+    ) -> std::result::Result<Lease, LeaseError> {
         self.leases.renew(holder, id, ttl)
     }
 
@@ -370,8 +475,15 @@ impl<B: Backend> Registry<B> {
         }
         let mut unloaded = false;
         if let Some(idle) = idle {
-            for slot in self.slots.iter().filter(|slot| !matches!(slot.source, slot::Source::Fixed)) {
-                if slot.idle_since().is_some_and(|used| now.saturating_duration_since(used) >= idle) {
+            for slot in self
+                .slots
+                .iter()
+                .filter(|slot| !matches!(slot.source, slot::Source::Fixed))
+            {
+                if slot
+                    .idle_since()
+                    .is_some_and(|used| now.saturating_duration_since(used) >= idle)
+                {
                     unloaded |= slot.unload_if_idle();
                 }
             }
@@ -387,7 +499,8 @@ impl<B: Backend> Registry<B> {
     }
 
     fn changed(&self) {
-        self.changes.send_modify(|tick| *tick = tick.wrapping_add(1));
+        self.changes
+            .send_modify(|tick| *tick = tick.wrapping_add(1));
     }
 
     /// Hash every model's files, so federation can advertise a model before
@@ -438,14 +551,25 @@ impl<B: Backend> Registry<B> {
 
     fn load(&self, slot: &Slot<B>) -> std::result::Result<Resident<B>, LoadError> {
         let failed = |e: &dyn std::fmt::Display| LoadError::Failed(e.to_string());
-        let backend = |e: crate::backend::Error| if e.is_memory_exhausted() { LoadError::Memory(e.to_string()) } else { failed(&e) };
+        let backend = |e: crate::backend::Error| {
+            if e.is_memory_exhausted() {
+                LoadError::Memory(e.to_string())
+            } else {
+                failed(&e)
+            }
+        };
         match &slot.source {
             slot::Source::Gguf { pinned, tokenizer } => {
                 pinned.check_unchanged().map_err(|e| failed(&e))?;
                 let (mut gguf, artifact) = if self.options.frozen {
-                    let (frozen, id) = crate::artifact::freeze_file(pinned.reader().map_err(|e| failed(&e))?).map_err(|e| failed(&e))?;
+                    let (frozen, id) =
+                        crate::artifact::freeze_file(pinned.reader().map_err(|e| failed(&e))?)
+                            .map_err(|e| failed(&e))?;
                     same_artifact(slot, &id)?;
-                    (GgufModel::from_file(frozen).map_err(|e| failed(&e))?, Some(id))
+                    (
+                        GgufModel::from_file(frozen).map_err(|e| failed(&e))?,
+                        Some(id),
+                    )
                 } else {
                     let mut gguf = pinned.gguf().map_err(|e| failed(&e))?;
                     Model::prepare_source(&*self.backend, &mut gguf).map_err(backend)?;
@@ -456,19 +580,31 @@ impl<B: Backend> Registry<B> {
                     LoadError::Memory(reason) => LoadError::Memory(self.held(reason)),
                     failed @ LoadError::Failed(_) => failed,
                 })?;
-                let model = Model::load_reserved(&*self.backend, &mut gguf, memory).map_err(backend)?;
+                let model =
+                    Model::load_reserved(&*self.backend, &mut gguf, memory).map_err(backend)?;
                 if artifact.is_none() {
                     pinned.check_unchanged().map_err(|e| failed(&e))?;
                 }
-                warmup::warm_decoder(&*self.backend, &model, slot.info.n_ctx, self.options.warmup_rounds, &mut || false).map_err(backend)?;
+                warmup::warm_decoder(
+                    &*self.backend,
+                    &model,
+                    slot.info.n_ctx,
+                    self.options.warmup_rounds,
+                    &mut || false,
+                )
+                .map_err(backend)?;
                 if let Some(id) = artifact {
                     slot.set_artifact(id);
                 }
-                Ok(Resident::Decoder(Decoder { model: Arc::new(model), tokenizer: tokenizer.clone() }))
+                Ok(Resident::Decoder(Decoder {
+                    model: Arc::new(model),
+                    tokenizer: tokenizer.clone(),
+                }))
             }
             slot::Source::Laya(dir) => {
                 let predictor = if self.options.frozen {
-                    let (predictor, id, _) = Predictor::load_frozen(CpuBackend, dir).map_err(|e| failed(&e))?;
+                    let (predictor, id, _) =
+                        Predictor::load_frozen(CpuBackend, dir).map_err(|e| failed(&e))?;
                     same_artifact(slot, &id)?;
                     slot.set_artifact(id);
                     predictor
@@ -488,11 +624,19 @@ impl<B: Backend> Registry<B> {
         loop {
             match self.reserve(bytes) {
                 Err(error) if error.is_memory_exhausted() => {
-                    let victim = self.slots.iter()
-                        .filter(|other| !std::ptr::eq(*other, slot) && other.info.kind == Kind::Gguf && !matches!(other.source, slot::Source::Fixed))
+                    let victim = self
+                        .slots
+                        .iter()
+                        .filter(|other| {
+                            !std::ptr::eq(*other, slot)
+                                && other.info.kind == Kind::Gguf
+                                && !matches!(other.source, slot::Source::Fixed)
+                        })
                         .filter_map(|other| other.idle_since().map(|used| (used, other)))
                         .min_by_key(|(used, _)| *used);
-                    let Some((_, victim)) = victim else { return Err(error) };
+                    let Some((_, victim)) = victim else {
+                        return Err(error);
+                    };
                     if victim.unload_if_idle() {
                         self.backend.join_execution()?;
                         self.changed();
@@ -505,7 +649,9 @@ impl<B: Backend> Registry<B> {
 
     /// A refusal, naming what holds the memory.
     fn held(&self, reason: String) -> String {
-        let holders: Vec<_> = self.names.iter()
+        let holders: Vec<_> = self
+            .names
+            .iter()
             .filter(|(_, index)| self.slots[*index].phase().0 == Phase::Resident)
             .map(|(name, index)| match self.slots[*index].leases() {
                 0 => format!("{name} (in use)"),
@@ -513,7 +659,11 @@ impl<B: Backend> Registry<B> {
                 n => format!("{name} ({n} leases)"),
             })
             .collect();
-        if holders.is_empty() { reason } else { format!("{reason}; held by {}", holders.join(", ")) }
+        if holders.is_empty() {
+            reason
+        } else {
+            format!("{reason}; held by {}", holders.join(", "))
+        }
     }
 
     /// Free device memory and the native budget for `bytes` of weights.
@@ -521,10 +671,17 @@ impl<B: Backend> Registry<B> {
         if let Some(available) = self.backend.available_device_bytes()? {
             let requested = crate::memory::sum([bytes, DEVICE_HEADROOM])?;
             if requested > available {
-                return Err(crate::backend::Error::InsufficientMemory { requested, available });
+                return Err(crate::backend::Error::InsufficientMemory {
+                    requested,
+                    available,
+                });
             }
         }
-        self.options.budget.as_ref().map(|budget| budget.reserve(bytes, MemoryCategory::Weights)).transpose()
+        self.options
+            .budget
+            .as_ref()
+            .map(|budget| budget.reserve(bytes, MemoryCategory::Weights))
+            .transpose()
     }
 
     /// Exact bytes of a model loaded from a frozen copy. `""` resolves the default.
@@ -537,28 +694,43 @@ impl<B: Backend> Registry<B> {
     /// defined vocabulary. Returns how many models can export. Recapture clears
     /// old snapshots before any fallible work.
     pub fn capture_execution_profiles(&mut self) -> std::io::Result<usize>
-    where B: 'static {
+    where
+        B: 'static,
+    {
         self.capture_execution_profiles_with(ExecutorIdentity::capture)
     }
 
-    fn capture_execution_profiles_with(&mut self, capture: impl FnOnce() -> std::io::Result<ExecutorIdentity>) -> std::io::Result<usize>
-    where B: 'static {
+    fn capture_execution_profiles_with(
+        &mut self,
+        capture: impl FnOnce() -> std::io::Result<ExecutorIdentity>,
+    ) -> std::io::Result<usize>
+    where
+        B: 'static,
+    {
         self.profiles = Profiles::default();
         if !self.options.frozen {
             return Ok(0);
         }
         let cpu = (&*self.backend as &dyn std::any::Any).is::<CpuBackend>();
         let gpu = crate::federation::profile::gpu::capture(&*self.backend)?;
-        let exportable = self.names.iter().filter(|(_, index)| match self.slots[*index].info.kind {
-            Kind::Laya => true,
-            Kind::Gguf => cpu || gpu.is_some(),
-        }).count();
+        let exportable = self
+            .names
+            .iter()
+            .filter(|(_, index)| match self.slots[*index].info.kind {
+                Kind::Laya => true,
+                Kind::Gguf => cpu || gpu.is_some(),
+            })
+            .count();
         if exportable == 0 {
             return Ok(0);
         }
         let executor = Arc::new(capture()?);
         self.profiles = Profiles {
-            decoder: if cpu { Some(ExecutionProfile::cpu(executor.clone(), false)) } else { gpu.map(|gpu| ExecutionProfile::gpu(executor.clone(), gpu)) },
+            decoder: if cpu {
+                Some(ExecutionProfile::cpu(executor.clone(), false))
+            } else {
+                gpu.map(|gpu| ExecutionProfile::gpu(executor.clone(), gpu))
+            },
             laya: Some(ExecutionProfile::cpu(executor, true)),
         };
         Ok(exportable)
@@ -579,13 +751,20 @@ impl<B: Backend> Registry<B> {
 }
 
 /// A load must run the bytes federation already advertised.
-fn same_artifact<B: Backend>(slot: &Slot<B>, id: &ArtifactId) -> std::result::Result<(), LoadError> {
+fn same_artifact<B: Backend>(
+    slot: &Slot<B>,
+    id: &ArtifactId,
+) -> std::result::Result<(), LoadError> {
     match slot.artifact() {
-        Some(known) if known != *id => Err(LoadError::Failed("model file changed since it was hashed".into())),
+        Some(known) if known != *id => Err(LoadError::Failed(
+            "model file changed since it was hashed".into(),
+        )),
         _ => Ok(()),
     }
 }
 
 fn architecture(gguf: &GgufModel) -> String {
-    gguf.metadata_str("general.architecture").unwrap_or_default().to_owned()
+    gguf.metadata_str("general.architecture")
+        .unwrap_or_default()
+        .to_owned()
 }

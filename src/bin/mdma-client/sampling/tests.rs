@@ -2,10 +2,14 @@ use super::*;
 
 #[test]
 fn default_keeps_server_sampling_defaults() {
-    assert!(config(|name| {
-        assert_eq!(name, "MDMA_GREEDY");
-        Err(VarError::NotPresent)
-    }).unwrap().is_none());
+    assert!(
+        config(|name| {
+            assert_eq!(name, "MDMA_GREEDY");
+            Err(VarError::NotPresent)
+        })
+        .unwrap()
+        .is_none()
+    );
     assert!(config(|_| Ok("0".into())).unwrap().is_none());
 }
 

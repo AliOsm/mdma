@@ -12,7 +12,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Instant;
 
 pub(super) enum Source {
-    Gguf { pinned: Pinned, tokenizer: Arc<Tokenizer> },
+    Gguf {
+        pinned: Pinned,
+        tokenizer: Arc<Tokenizer>,
+    },
     Laya(PathBuf),
     /// Built by the caller; always loaded.
     Fixed,
@@ -25,7 +28,10 @@ pub struct Decoder<B: Backend> {
 
 impl<B: Backend> Clone for Decoder<B> {
     fn clone(&self) -> Self {
-        Self { model: self.model.clone(), tokenizer: self.tokenizer.clone() }
+        Self {
+            model: self.model.clone(),
+            tokenizer: self.tokenizer.clone(),
+        }
     }
 }
 
@@ -93,11 +99,14 @@ struct Inner<B: Backend> {
 impl<B: Backend> Inner<B> {
     /// Loaded, unleased and not in use by any request.
     fn idle(&self) -> bool {
-        self.leases == 0 && match &self.state {
-            State::Resident(Resident::Decoder(decoder)) => Arc::strong_count(&decoder.model) == 1,
-            State::Resident(Resident::Laya(predictor)) => Arc::strong_count(predictor) == 1,
-            _ => false,
-        }
+        self.leases == 0
+            && match &self.state {
+                State::Resident(Resident::Decoder(decoder)) => {
+                    Arc::strong_count(&decoder.model) == 1
+                }
+                State::Resident(Resident::Laya(predictor)) => Arc::strong_count(predictor) == 1,
+                _ => false,
+            }
     }
 }
 
@@ -153,14 +162,24 @@ impl<B: Backend> Slot<B> {
     }
 
     pub(super) fn fixed(info: Info, decoder: Decoder<B>) -> Self {
-        Self::with_state(info, Source::Fixed, State::Resident(Resident::Decoder(decoder)))
+        Self::with_state(
+            info,
+            Source::Fixed,
+            State::Resident(Resident::Decoder(decoder)),
+        )
     }
 
     fn with_state(info: Info, source: Source, state: State<B>) -> Self {
         Self {
             info,
             source,
-            inner: Mutex::new(Inner { state, generation: 0, error: None, leases: 0, used: Instant::now() }),
+            inner: Mutex::new(Inner {
+                state,
+                generation: 0,
+                error: None,
+                leases: 0,
+                used: Instant::now(),
+            }),
             changed: Condvar::new(),
             artifact: Mutex::new(None),
         }
@@ -182,13 +201,18 @@ impl<B: Backend> Slot<B> {
 
     pub(super) fn resident(&self) -> Option<Use<B>> {
         match &self.lock().state {
-            State::Resident(resident) => Some(Use { resident: resident.clone() }),
+            State::Resident(resident) => Some(Use {
+                resident: resident.clone(),
+            }),
             _ => None,
         }
     }
 
     pub(super) fn artifact(&self) -> Option<ArtifactId> {
-        self.artifact.lock().expect("artifact lock poisoned").clone()
+        self.artifact
+            .lock()
+            .expect("artifact lock poisoned")
+            .clone()
     }
 
     pub(super) fn set_artifact(&self, id: ArtifactId) {
@@ -197,7 +221,10 @@ impl<B: Backend> Slot<B> {
 
     /// The loaded model, loading it first if needed. Concurrent callers share one load;
     /// a cancelled caller does not cancel it.
-    pub(super) fn acquire(&self, load: impl FnOnce() -> Result<Resident<B>, LoadError>) -> Result<Use<B>, LoadError> {
+    pub(super) fn acquire(
+        &self,
+        load: impl FnOnce() -> Result<Resident<B>, LoadError>,
+    ) -> Result<Use<B>, LoadError> {
         let mut inner = self.lock();
         let start = inner.generation;
         let mut load = Some(load);
@@ -209,7 +236,9 @@ impl<B: Backend> Slot<B> {
                     return Ok(Use { resident });
                 }
                 State::Failed(error) => return Err(LoadError::Failed(error.clone())),
-                State::Loading => inner = self.changed.wait(inner).expect("model slot lock poisoned"),
+                State::Loading => {
+                    inner = self.changed.wait(inner).expect("model slot lock poisoned");
+                }
                 State::Available if inner.generation != start => {
                     return Err(LoadError::Memory(inner.error.clone().unwrap_or_default()));
                 }

@@ -4,7 +4,11 @@
 //! generators build the PARAMETER_CACHING program that loads weights into the
 //! tiles' wide memory and the EXECUTION_ONLY program that runs one call.
 
-#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss, reason = "geometry is small integers moved between usize and i64")]
+#![allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    reason = "geometry is small integers moved between usize and i64"
+)]
 
 pub mod fc;
 
@@ -33,13 +37,33 @@ pub struct Quant {
 
 impl Quant {
     /// The quantization of the compiler references.
-    pub const REFERENCE: Self = Self { in_zp: 128, w_zp: 128, out_zp: 128, mult: (1.0 / 32.0) * (1.0 / 64.0) / (1.0 / 4.0), lo: 0, hi: 255 };
+    pub const REFERENCE: Self = Self {
+        in_zp: 128,
+        w_zp: 128,
+        out_zp: 128,
+        mult: (1.0 / 32.0) * (1.0 / 64.0) / (1.0 / 4.0),
+        lo: 0,
+        hi: 255,
+    };
 
-    pub const fn new(in_zp: u8, w_zp: u8, out_zp: u8, mult: f32) -> Self { Self { in_zp, w_zp, out_zp, mult, lo: 0, hi: 255 } }
+    pub const fn new(in_zp: u8, w_zp: u8, out_zp: u8, mult: f32) -> Self {
+        Self {
+            in_zp,
+            w_zp,
+            out_zp,
+            mult,
+            lo: 0,
+            hi: 255,
+        }
+    }
 
-    pub fn clamp_min(&self) -> f32 { f32::from(self.lo) - f32::from(self.out_zp) }
+    pub fn clamp_min(&self) -> f32 {
+        f32::from(self.lo) - f32::from(self.out_zp)
+    }
 
-    pub fn clamp_max(&self) -> f32 { f32::from(self.hi) - f32::from(self.out_zp) }
+    pub fn clamp_max(&self) -> f32 {
+        f32::from(self.hi) - f32::from(self.out_zp)
+    }
 }
 
 /// Collects 128-bit words; `seq` counts the tile-dispatched instructions
@@ -53,7 +77,9 @@ pub struct Emitter {
 }
 
 impl Emitter {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Tile instructions: each takes one sequence number.
     pub fn tile(&mut self, insn: Vec<u128>) {
@@ -75,18 +101,32 @@ impl Emitter {
 
     /// Scalar words whose first two are the MOVIs of a base address (`hi` then `lo`,
     /// or the reverse), relocated by the runtime.
-    pub fn scalar_with_base(&mut self, words: Vec<u128>, desc: Description, name: Option<&str>, lo_first: bool) {
+    pub fn scalar_with_base(
+        &mut self,
+        words: Vec<u128>,
+        desc: Description,
+        name: Option<&str>,
+        lo_first: bool,
+    ) {
         let at = self.words.len();
         let (hi, lo) = if lo_first { (at + 1, at) } else { (at, at + 1) };
         for (word, upper) in [(hi, true), (lo, false)] {
             // The program gets a start word in front of the body.
-            self.relocs.push(FieldOffset { desc, batch: 0, name: name.map(str::to_owned), upper, offset_bit: 128 * (word + 1) + IMM_BIT });
+            self.relocs.push(FieldOffset {
+                desc,
+                batch: 0,
+                name: name.map(str::to_owned),
+                upper,
+                offset_bit: 128 * (word + 1) + IMM_BIT,
+            });
         }
         self.scalar(words, 0);
     }
 
     /// The program bytes and the relocations into them.
-    pub fn program(self) -> (Vec<u8>, Vec<FieldOffset>) { (sc::program(&self.words), self.relocs) }
+    pub fn program(self) -> (Vec<u8>, Vec<FieldOffset>) {
+        (sc::program(&self.words), self.relocs)
+    }
 }
 
 /// One caching part: the tiles it lands on, their ringConsumer fields (without
@@ -106,12 +146,26 @@ pub fn caching_program(nbytes: i64, parts: &[Vec<CachingPart>]) -> (Vec<u8>, Vec
     let mut head = sc::sync_init(true);
     head.extend(sc::scsync_init());
     e.scalar(head, 1);
-    e.scalar_with_base(sc::host_dma(sc::TAG_PARAMETERS, nbytes, 0, 0, sc::Regs::Par, Some((0, 0))), Description::Parameter, None, true);
+    e.scalar_with_base(
+        sc::host_dma(
+            sc::TAG_PARAMETERS,
+            nbytes,
+            0,
+            0,
+            sc::Regs::Par,
+            Some((0, 0)),
+        ),
+        Description::Parameter,
+        None,
+        true,
+    );
     e.scalar(sc::param_pop(nbytes), 0);
     for part in parts {
         for p in part {
             let seq = e.seq;
-            e.tile(rm::encode_ring_consumer(&p.consumer.clone().set("seq", seq)));
+            e.tile(rm::encode_ring_consumer(
+                &p.consumer.clone().set("seq", seq),
+            ));
         }
         for p in part {
             e.scalar(sc::param_infeed(p.offset, p.bytes, p.tiles, p.lanes), 0);

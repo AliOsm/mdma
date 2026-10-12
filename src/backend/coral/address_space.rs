@@ -21,12 +21,20 @@ pub const MIN_SIMPLE_ENTRIES: u64 = 256;
 /// stays simple, with a floor.
 pub const fn simple_entries(total: u64) -> u64 {
     let simple = total.saturating_sub(MAX_EXTENDED_ENTRIES);
-    if simple < MIN_SIMPLE_ENTRIES { MIN_SIMPLE_ENTRIES } else { simple }
+    if simple < MIN_SIMPLE_ENTRIES {
+        MIN_SIMPLE_ENTRIES
+    } else {
+        simple
+    }
 }
 
-pub const fn extended_entries(total: u64) -> u64 { total - simple_entries(total) }
+pub const fn extended_entries(total: u64) -> u64 {
+    total - simple_entries(total)
+}
 
-pub const fn round_up_to_page(bytes: u64) -> u64 { bytes.div_ceil(PAGE) * PAGE }
+pub const fn round_up_to_page(bytes: u64) -> u64 {
+    bytes.div_ceil(PAGE) * PAGE
+}
 
 /// Page-granular allocator over one contiguous device address range.
 #[derive(Debug)]
@@ -45,27 +53,49 @@ impl AddressSpace {
         if size > 0 {
             free.insert(start, size);
         }
-        Self { start, size, free, allocated: BTreeMap::new() }
+        Self {
+            start,
+            size,
+            free,
+            allocated: BTreeMap::new(),
+        }
     }
 
-    pub fn simple(entries: u64) -> Self { Self::new(0, entries * PAGE) }
+    pub fn simple(entries: u64) -> Self {
+        Self::new(0, entries * PAGE)
+    }
 
-    pub fn extended(entries: u64) -> Self { Self::new(EXTENDED_BIT, entries * EXTENDED_ENTRY_BYTES) }
+    pub fn extended(entries: u64) -> Self {
+        Self::new(EXTENDED_BIT, entries * EXTENDED_ENTRY_BYTES)
+    }
 
-    pub fn contains(&self, address: u64) -> bool { address >= self.start && address - self.start < self.size }
+    pub fn contains(&self, address: u64) -> bool {
+        address >= self.start && address - self.start < self.size
+    }
 
-    pub fn free_bytes(&self) -> u64 { self.free.values().sum() }
+    pub fn free_bytes(&self) -> u64 {
+        self.free.values().sum()
+    }
 
-    pub fn allocated_bytes(&self) -> u64 { self.allocated.values().sum() }
+    pub fn allocated_bytes(&self) -> u64 {
+        self.allocated.values().sum()
+    }
 
     /// A page-aligned run of at least `bytes` (rounded up to whole pages).
     pub fn allocate(&mut self, bytes: u64) -> Result<u64> {
-        let exhausted = |free: u64| Error::AddressSpace { requested: bytes, free };
+        let exhausted = |free: u64| Error::AddressSpace {
+            requested: bytes,
+            free,
+        };
         if bytes == 0 {
             return Err(Error::Protocol("cannot allocate zero device bytes".into()));
         }
         let size = round_up_to_page(bytes);
-        let (&start, &run) = self.free.iter().find(|(_, run)| **run >= size).ok_or_else(|| exhausted(self.free_bytes()))?;
+        let (&start, &run) = self
+            .free
+            .iter()
+            .find(|(_, run)| **run >= size)
+            .ok_or_else(|| exhausted(self.free_bytes()))?;
         self.free.remove(&start);
         if run > size {
             self.free.insert(start + size, run - size);
@@ -81,13 +111,21 @@ impl AddressSpace {
             Some(allocated) if allocated == size => {}
             Some(allocated) => {
                 self.allocated.insert(address, allocated);
-                return Err(Error::Protocol(format!("device address 0x{address:x} holds {allocated} bytes, not {size}")));
+                return Err(Error::Protocol(format!(
+                    "device address 0x{address:x} holds {allocated} bytes, not {size}"
+                )));
             }
-            None => return Err(Error::Protocol(format!("device address 0x{address:x} is not allocated"))),
+            None => {
+                return Err(Error::Protocol(format!(
+                    "device address 0x{address:x} is not allocated"
+                )));
+            }
         }
         let mut start = address;
         let mut run = size;
-        if let Some((&before, &before_run)) = self.free.range(..address).next_back() && before + before_run == address {
+        if let Some((&before, &before_run)) = self.free.range(..address).next_back()
+            && before + before_run == address
+        {
             self.free.remove(&before);
             start = before;
             run += before_run;

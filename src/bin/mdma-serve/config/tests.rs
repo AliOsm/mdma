@@ -22,18 +22,28 @@ fn load(env: &HashMap<&str, String>) -> Result<Config, BoxError> {
 fn defaults_and_overrides() {
     let mut env = environment();
     env.remove("MDMA_LISTEN");
-    assert_eq!(load(&env).unwrap().listen.to_string(), "127.0.0.1:6362", "loopback on the mdma keypad port");
+    assert_eq!(
+        load(&env).unwrap().listen.to_string(),
+        "127.0.0.1:6362",
+        "loopback on the mdma keypad port"
+    );
     env = environment();
     let config = load(&env).unwrap();
     assert_eq!(config.backend, "cpu");
     assert!(!config.rocm_f32);
     assert_eq!(config.n_ctx, None, "each model's trained context");
-    assert_eq!(config.max_output_tokens, 4096, "bounds a request's up-front KV");
+    assert_eq!(
+        config.max_output_tokens, 4096,
+        "bounds a request's up-front KV"
+    );
     assert_eq!(config.native_tensor_bytes, None);
     assert_eq!(config.device_buffer_bytes, None);
     assert_eq!(config.host_buffer_bytes, None);
     assert_eq!(config.shutdown_timeout, Duration::from_secs(30));
-    assert_eq!(config.warmup_rounds, 1, "warm-up delays a model's first request");
+    assert_eq!(
+        config.warmup_rounds, 1,
+        "warm-up delays a model's first request"
+    );
     assert_eq!(config.idle_unload, None, "models stay until evicted");
     assert!(config.federation_config.is_none());
     env.insert("MDMA_BACKEND", "rocm".into());
@@ -73,12 +83,19 @@ fn federation_is_explicitly_opt_in_and_nonempty() {
     env.insert("MDMA_FEDERATION_CONFIG", String::new());
     assert!(load(&env).is_err());
     env.insert("MDMA_FEDERATION_CONFIG", "/private/federation.toml".into());
-    assert_eq!(load(&env).unwrap().federation_config.as_deref(), Some("/private/federation.toml"));
+    assert_eq!(
+        load(&env).unwrap().federation_config.as_deref(),
+        Some("/private/federation.toml")
+    );
     let error = Config::load(|name| {
         if name == "MDMA_FEDERATION_CONFIG" {
             Err(VarError::NotUnicode(std::ffi::OsString::new()))
-        } else { env.get(name).cloned().ok_or(VarError::NotPresent) }
-    }).err().unwrap();
+        } else {
+            env.get(name).cloned().ok_or(VarError::NotPresent)
+        }
+    })
+    .err()
+    .unwrap();
     assert!(error.to_string().contains("MDMA_FEDERATION_CONFIG"));
 }
 
@@ -106,7 +123,13 @@ fn native_tensor_budget_requires_a_positive_byte_count() {
     for value in ["", " ", "0", "-1", "1.5", "8GiB", "18446744073709551616"] {
         let mut env = environment();
         env.insert("MDMA_NATIVE_TENSOR_BYTES", value.into());
-        assert!(load(&env).err().unwrap().to_string().contains("MDMA_NATIVE_TENSOR_BYTES"));
+        assert!(
+            load(&env)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("MDMA_NATIVE_TENSOR_BYTES")
+        );
     }
     let env = environment();
     let error = Config::load(|name| {
@@ -115,7 +138,9 @@ fn native_tensor_budget_requires_a_positive_byte_count() {
         } else {
             env.get(name).cloned().ok_or(VarError::NotPresent)
         }
-    }).err().unwrap();
+    })
+    .err()
+    .unwrap();
     assert!(error.to_string().contains("MDMA_NATIVE_TENSOR_BYTES"));
 }
 
@@ -144,7 +169,9 @@ fn buffer_limits_are_strict_and_require_a_supported_backend() {
             } else {
                 env.get(name).cloned().ok_or(VarError::NotPresent)
             }
-        }).err().unwrap();
+        })
+        .err()
+        .unwrap();
         assert!(error.to_string().contains(key));
     }
 }
@@ -156,7 +183,13 @@ fn models_come_from_one_folder_with_an_optional_default() {
     env.insert("MDMA_DEFAULT_MODEL", " minicheck ".into());
     assert_matches!(load(&env).unwrap().models, ModelsSource::Dir { default: Some(name), .. } if name == "minicheck");
     env.insert("MDMA_DEFAULT_MODEL", " ".into());
-    assert!(load(&env).err().unwrap().to_string().contains("MDMA_DEFAULT_MODEL"));
+    assert!(
+        load(&env)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("MDMA_DEFAULT_MODEL")
+    );
 }
 
 #[test]
@@ -174,7 +207,11 @@ fn required_values_cannot_be_missing_or_blank() {
 
 #[test]
 fn invalid_numeric_configuration_is_not_silently_defaulted() {
-    for key in ["MDMA_N_CTX", "MDMA_MAX_OUTPUT_TOKENS", "MDMA_SHUTDOWN_TIMEOUT_SECS"] {
+    for key in [
+        "MDMA_N_CTX",
+        "MDMA_MAX_OUTPUT_TOKENS",
+        "MDMA_SHUTDOWN_TIMEOUT_SECS",
+    ] {
         for value in ["", "0", "-1", "many", "1.5", "4294967296"] {
             let mut env = environment();
             env.insert(key, value.into());
@@ -260,7 +297,13 @@ fn partial_power_override_keeps_other_defaults() {
     let mut env = environment();
     env.insert("MDMA_POWER_DEBOUNCE", "7".into());
     let power = load(&env).unwrap().power.unwrap();
-    assert_eq!(power.watch, WatchPolicy { debounce: 7, ..WatchPolicy::default() });
+    assert_eq!(
+        power.watch,
+        WatchPolicy {
+            debounce: 7,
+            ..WatchPolicy::default()
+        }
+    );
     assert_eq!(power.degraded, DegradedLimits::default());
 }
 
@@ -268,11 +311,16 @@ fn partial_power_override_keeps_other_defaults() {
 fn numeric_settings_do_not_default_non_unicode_values() {
     let env = environment();
     for key in [
-        "MDMA_N_CTX", "MDMA_MAX_OUTPUT_TOKENS", "MDMA_SHUTDOWN_TIMEOUT_SECS",
+        "MDMA_N_CTX",
+        "MDMA_MAX_OUTPUT_TOKENS",
+        "MDMA_SHUTDOWN_TIMEOUT_SECS",
         "MDMA_WARMUP_ROUNDS",
-        "MDMA_POWER_POLL_SECS", "MDMA_POWER_DEBOUNCE",
-        "MDMA_POWER_CRITICAL_PCT", "MDMA_POWER_GPU_CAP_PCT",
-        "MDMA_DEGRADED_MAX_TOKENS", "MDMA_DEGRADED_N_CTX",
+        "MDMA_POWER_POLL_SECS",
+        "MDMA_POWER_DEBOUNCE",
+        "MDMA_POWER_CRITICAL_PCT",
+        "MDMA_POWER_GPU_CAP_PCT",
+        "MDMA_DEGRADED_MAX_TOKENS",
+        "MDMA_DEGRADED_N_CTX",
     ] {
         let error = Config::load(|name| {
             if name == key {
@@ -280,7 +328,9 @@ fn numeric_settings_do_not_default_non_unicode_values() {
             } else {
                 env.get(name).cloned().ok_or(VarError::NotPresent)
             }
-        }).err().unwrap();
+        })
+        .err()
+        .unwrap();
         assert!(error.to_string().contains(key), "{key}: {error}");
     }
 }
@@ -294,20 +344,37 @@ fn warmup_rounds_are_bounded_and_zero_explicitly_disables() {
     }
     for value in ["", " ", "-1", "1.5", "many", "9", "4294967296"] {
         env.insert("MDMA_WARMUP_ROUNDS", value.into());
-        assert!(load(&env).err().unwrap().to_string().contains("MDMA_WARMUP_ROUNDS"));
+        assert!(
+            load(&env)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("MDMA_WARMUP_ROUNDS")
+        );
     }
 }
 
 #[test]
 fn idle_unload_is_bounded_and_zero_means_never() {
     let mut env = environment();
-    for (value, expected) in [("0", None), ("1", Some(Duration::from_secs(1))), ("86400", Some(Duration::from_hours(24)))] {
+    for (value, expected) in [
+        ("0", None),
+        ("1", Some(Duration::from_secs(1))),
+        ("86400", Some(Duration::from_hours(24))),
+    ] {
         env.insert("MDMA_IDLE_UNLOAD_SECS", value.into());
         assert_eq!(load(&env).unwrap().idle_unload, expected, "{value}");
     }
     for value in ["", "-1", "86401", "soon"] {
         env.insert("MDMA_IDLE_UNLOAD_SECS", value.into());
-        assert!(load(&env).err().unwrap().to_string().contains("MDMA_IDLE_UNLOAD_SECS"), "{value}");
+        assert!(
+            load(&env)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("MDMA_IDLE_UNLOAD_SECS"),
+            "{value}"
+        );
     }
 }
 
@@ -316,9 +383,20 @@ fn operator_pins_are_validated() {
     let mut env = environment();
     assert!(load(&env).unwrap().operators.is_empty());
     let pin = format!("sha256:{}", "ab".repeat(32));
-    env.insert("MDMA_OPERATOR_SPKI", format!(" {pin} , sha256:{} ,", "0".repeat(64)));
-    assert_eq!(load(&env).unwrap().operators, [pin, format!("sha256:{}", "0".repeat(64))]);
-    for bad in ["ab".repeat(32), format!("sha256:{}", "AB".repeat(32)), "sha256:abc".into(), format!("sha1:{}", "0".repeat(64))] {
+    env.insert(
+        "MDMA_OPERATOR_SPKI",
+        format!(" {pin} , sha256:{} ,", "0".repeat(64)),
+    );
+    assert_eq!(
+        load(&env).unwrap().operators,
+        [pin, format!("sha256:{}", "0".repeat(64))]
+    );
+    for bad in [
+        "ab".repeat(32),
+        format!("sha256:{}", "AB".repeat(32)),
+        "sha256:abc".into(),
+        format!("sha1:{}", "0".repeat(64)),
+    ] {
         env.insert("MDMA_OPERATOR_SPKI", bad.clone());
         let error = load(&env).err().unwrap().to_string();
         assert!(error.contains("MDMA_OPERATOR_SPKI"), "{bad}: {error}");
@@ -329,9 +407,18 @@ fn operator_pins_are_validated() {
 fn node_name_defaults_to_the_short_host_name() {
     let mut env = environment();
     let host = sysinfo::System::host_name().unwrap_or_default();
-    assert_eq!(load(&env).unwrap().node, host.split('.').next().unwrap_or_default());
+    assert_eq!(
+        load(&env).unwrap().node,
+        host.split('.').next().unwrap_or_default()
+    );
     env.insert("MDMA_NODE_NAME", " foundry ".into());
     assert_eq!(load(&env).unwrap().node, "foundry");
     env.insert("MDMA_NODE_NAME", " ".into());
-    assert!(load(&env).err().unwrap().to_string().contains("MDMA_NODE_NAME"));
+    assert!(
+        load(&env)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("MDMA_NODE_NAME")
+    );
 }

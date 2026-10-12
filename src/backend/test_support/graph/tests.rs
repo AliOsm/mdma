@@ -1,8 +1,8 @@
 use super::*;
-use std::assert_matches;
 use crate::backend::Error;
 use crate::backend::cpu::CpuBackend;
 use crate::model::decoder::EagerDecoder;
+use std::assert_matches;
 
 // Exercises the forwarding macro on this host without changing CpuBackend's
 // production Backend implementation or its normal eager decoder.
@@ -28,7 +28,12 @@ fn eager_factory<'a>(
     if kv.capacity() == 0 {
         return Err(Error::Backend("test factory failure".into()));
     }
-    Ok(Box::new(EagerDecoder { backend, model, kv, ws }))
+    Ok(Box::new(EagerDecoder {
+        backend,
+        model,
+        kv,
+        ws,
+    }))
 }
 
 // Explicit test double: exercises the shared concurrent scenario, NOT capture
@@ -45,14 +50,22 @@ impl Decoder for MockGraph<'_> {
     }
 }
 
-#[expect(clippy::unnecessary_wraps, reason = "matches the fallible capture callback")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the fallible capture callback"
+)]
 fn mock_capture<'a>(
     backend: &'a CpuBackend,
     model: &'a Model<CpuBackend>,
     kv: &'a mut KvCache<CpuBackend>,
     ws: &'a mut Workspace<CpuBackend>,
 ) -> Result<Box<dyn Decoder + 'a>> {
-    Ok(Box::new(MockGraph(EagerDecoder { backend, model, kv, ws })))
+    Ok(Box::new(MockGraph(EagerDecoder {
+        backend,
+        model,
+        kv,
+        ws,
+    })))
 }
 
 fn expected_tokens(backend: &CpuBackend, model: &Model<CpuBackend>, prompt: &[u32]) -> Vec<u32> {
@@ -77,7 +90,15 @@ fn replay_scenario_and_delegation_preserve_positions_and_borrows() {
     let model = crate::model::tests::tiny_model(&backend);
     let prompt = [1, 7, 13];
     let expected = expected_tokens(&backend, &model, &prompt);
-    replay_matches_eager(&backend, &model, TestDelegate::decoder, &prompt, &expected, 12, 32);
+    replay_matches_eager(
+        &backend,
+        &model,
+        TestDelegate::decoder,
+        &prompt,
+        &expected,
+        12,
+        32,
+    );
     let mut kv = model.new_kv_cache(&backend, 0).unwrap();
     let mut ws = model.alloc_workspace(&backend, 1).unwrap();
     assert_matches!(

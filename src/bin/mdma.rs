@@ -1,20 +1,20 @@
 //! MDMA command-line entry point.
 use usage_rs::Cli;
 
-#[path = "mdma/info.rs"]
-mod info;
+#[path = "mdma/bench.rs"]
+mod bench;
 #[path = "mdma/device.rs"]
 mod device;
 #[path = "mdma/doctor.rs"]
 mod doctor;
+#[path = "mdma/info.rs"]
+mod info;
+#[path = "mdma/node.rs"]
+mod node;
 #[path = "mdma/plan.rs"]
 mod plan;
 #[path = "mdma/run.rs"]
 mod run;
-#[path = "mdma/bench.rs"]
-mod bench;
-#[path = "mdma/node.rs"]
-mod node;
 
 #[derive(Debug, Cli)]
 #[usage(bin = "mdma", version = env!("CARGO_PKG_VERSION"))]

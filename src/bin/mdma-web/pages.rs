@@ -48,7 +48,10 @@ pub(super) fn page(view: View, status: &Status, pin: &str) -> String {
         lang = "en",
         head!(
             meta!(charset = "utf-8"),
-            meta!(name = "viewport", content = "width=device-width,initial-scale=1"),
+            meta!(
+                name = "viewport",
+                content = "width=device-width,initial-scale=1"
+            ),
             title!(format!("mdma · {}", view.label())),
             link!(rel = "stylesheet", href = "/assets/style.css"),
             script!(r#type = "module", src = "/assets/scene.js"),
@@ -56,7 +59,10 @@ pub(super) fn page(view: View, status: &Status, pin: &str) -> String {
         ),
         body!(
             "data-signals" = SIGNALS,
-            "data-init" = format!("@get('/sse/status?view={}', {{filterSignals: {{include: /^$/}}}})", view.key()),
+            "data-init" = format!(
+                "@get('/sse/status?view={}', {{filterSignals: {{include: /^$/}}}})",
+                view.key()
+            ),
             header!(
                 class = "topbar",
                 a!(class = "brand", href = "/", "mdma"),
@@ -75,7 +81,11 @@ pub(super) fn page(view: View, status: &Status, pin: &str) -> String {
                         "data-on-signal-patch-filter" = "{include: /^_(scene|gen)(\\.|$)/}",
                     ),
                 ),
-                aside!(class = "panel", h1!(view.label()), PreEscaped(panel(view, status, pin))),
+                aside!(
+                    class = "panel",
+                    h1!(view.label()),
+                    PreEscaped(panel(view, status, pin))
+                ),
             ),
         ),
     )
@@ -94,24 +104,54 @@ pub(super) fn status_pill(status: &Status) -> impl IntoHtml + use<> {
     let ready = status.models.iter().filter(|m| m.ready).count();
     let text = match &status.error {
         Some(error) => format!("{} · {error}", status.state),
-        None if status.connected => format!("{} · {} · {ready}/{} models", status.state, status.backend, status.models.len()),
+        None if status.connected => format!(
+            "{} · {} · {ready}/{} models",
+            status.state,
+            status.backend,
+            status.models.len()
+        ),
         None => status.state.clone(),
     };
-    let battery = status.on_battery.then(|| format!(" · battery {}", status.battery_percent.map_or_else(|| "?".into(), |p| format!("{p}%"))));
-    span!(id = "status-pill", class = format!("pill state-{}", status.state), text, battery)
+    let battery = status.on_battery.then(|| {
+        format!(
+            " · battery {}",
+            status
+                .battery_percent
+                .map_or_else(|| "?".into(), |p| format!("{p}%"))
+        )
+    });
+    span!(
+        id = "status-pill",
+        class = format!("pill state-{}", status.state),
+        text,
+        battery
+    )
 }
 
 pub(super) fn models_panel(status: &Status) -> impl IntoHtml + use<> {
-    let rows: Vec<_> = status.models.iter().map(|m| {
-        let default = if m.name == status.default_model { " · default" } else { "" };
-        let detail = join([m.architecture.as_str(), m.class.as_str(), m.kind.as_str(), target(m).as_str()]);
-        tr!(
-            td!(m.name.clone(), small!(format!("{detail}{default}"))),
-            td!(class = "num", m.n_ctx.to_string()),
-            td!(class = "num", weights(m)),
-            td!(residency(m)),
-        )
-    }).collect();
+    let rows: Vec<_> = status
+        .models
+        .iter()
+        .map(|m| {
+            let default = if m.name == status.default_model {
+                " · default"
+            } else {
+                ""
+            };
+            let detail = join([
+                m.architecture.as_str(),
+                m.class.as_str(),
+                m.kind.as_str(),
+                target(m).as_str(),
+            ]);
+            tr!(
+                td!(m.name.clone(), small!(format!("{detail}{default}"))),
+                td!(class = "num", m.n_ctx.to_string()),
+                td!(class = "num", weights(m)),
+                td!(residency(m)),
+            )
+        })
+        .collect();
     let total: u64 = status.models.iter().map(|m| m.weight_bytes).sum();
     let hint = if status.memory.is_some() {
         "Live memory by kind, and what each model costs."
@@ -123,10 +163,22 @@ pub(super) fn models_panel(status: &Status) -> impl IntoHtml + use<> {
         p!(class = "hint", hint),
         status.memory.as_ref().map(memory_summary),
         table!(
-            thead!(tr!(th!("model"), th!(class = "num", "n_ctx"), th!(class = "num", "weights"), th!("state"))),
+            thead!(tr!(
+                th!("model"),
+                th!(class = "num", "n_ctx"),
+                th!(class = "num", "weights"),
+                th!("state")
+            )),
             tbody!(rows),
         ),
-        p!(class = "hint", format!("{} on disk across {} models.", bytes(total), status.models.len())),
+        p!(
+            class = "hint",
+            format!(
+                "{} on disk across {} models.",
+                bytes(total),
+                status.models.len()
+            )
+        ),
     )
 }
 
@@ -134,23 +186,49 @@ fn memory_summary(memory: &MemorySnapshot) -> impl IntoHtml + use<> {
     let budget = if memory.limit_bytes == 0 {
         format!("{} reserved · no limit set", bytes(memory.used_bytes))
     } else {
-        format!("{} of {} reserved", bytes(memory.used_bytes), bytes(memory.limit_bytes))
+        format!(
+            "{} of {} reserved",
+            bytes(memory.used_bytes),
+            bytes(memory.limit_bytes)
+        )
     };
     let device = memory.device.as_ref().map(|d| {
-        let free = d.available_bytes.map(|b| format!(" · {} free", bytes(b))).unwrap_or_default();
-        format!("{}{}{free}", d.name, if d.unified_memory { " · unified memory" } else { "" })
+        let free = d
+            .available_bytes
+            .map(|b| format!(" · {} free", bytes(b)))
+            .unwrap_or_default();
+        format!(
+            "{}{}{free}",
+            d.name,
+            if d.unified_memory {
+                " · unified memory"
+            } else {
+                ""
+            }
+        )
     });
-    let buffers = |label: &'static str, usage: Option<MemoryUsage>| usage.map(|u| {
-        let used = if u.limit_bytes == 0 { bytes(u.used_bytes) } else { format!("{} of {}", bytes(u.used_bytes), bytes(u.limit_bytes)) };
-        (dt!(label), dd!(used))
-    });
+    let buffers = |label: &'static str, usage: Option<MemoryUsage>| {
+        usage.map(|u| {
+            let used = if u.limit_bytes == 0 {
+                bytes(u.used_bytes)
+            } else {
+                format!("{} of {}", bytes(u.used_bytes), bytes(u.limit_bytes))
+            };
+            (dt!(label), dd!(used))
+        })
+    };
     dl!(
         class = "stats memory",
-        dt!("native budget"), dd!(budget),
-        dt!(class = "swatch weights", "weights"), dd!(bytes(memory.weights_bytes)),
-        dt!(class = "swatch kv", "KV cache"), dd!(bytes(memory.kv_bytes)),
-        dt!(class = "swatch workspace", "workspace"), dd!(bytes(memory.workspace_bytes)),
-        dt!("in flight"), dd!(format!("{} requests", memory.active_requests)),
+        dt!("native budget"),
+        dd!(budget),
+        dt!(class = "swatch weights", "weights"),
+        dd!(bytes(memory.weights_bytes)),
+        dt!(class = "swatch kv", "KV cache"),
+        dd!(bytes(memory.kv_bytes)),
+        dt!(class = "swatch workspace", "workspace"),
+        dd!(bytes(memory.workspace_bytes)),
+        dt!("in flight"),
+        dd!(format!("{} requests", memory.active_requests)),
         device.map(|d| (dt!("device"), dd!(d))),
         buffers("device buffers", memory.device_buffers),
         buffers("host buffers", memory.host_buffers),
@@ -172,27 +250,51 @@ pub(super) fn remote_panel(status: &Status, pin: &str, held: &[String]) -> impl 
     let local: Vec<&ModelStatus> = status.models.iter().filter(|m| !is_remote(m)).collect();
     let this = li!(
         class = "self",
-        strong!(class = os_class(status.host.as_ref()), status.host.as_ref().map_or("this server", |h| h.name.as_str()).to_owned()),
+        strong!(
+            class = os_class(status.host.as_ref()),
+            status
+                .host
+                .as_ref()
+                .map_or("this server", |h| h.name.as_str())
+                .to_owned()
+        ),
         small!(status.host.as_ref().map(host_line).unwrap_or_default()),
-        small!(class = "resources", status.host.as_ref().map(resources).unwrap_or_default()),
-        span!(class = format!("pill state-{}", status.state), status.state.clone()),
+        small!(
+            class = "resources",
+            status.host.as_ref().map(resources).unwrap_or_default()
+        ),
+        span!(
+            class = format!("pill state-{}", status.state),
+            status.state.clone()
+        ),
         model_list(&local, held),
     );
     let alone = nodes.is_empty();
-    let peers: Vec<_> = nodes.into_iter().map(|(node, models)| {
-        let ready = models.iter().all(|m| m.ready);
-        let backend = models[0].backend.trim_start_matches("federated/");
-        let mut detail = models[0].host.as_ref().map(host_line).unwrap_or_default();
-        if !models[0].host.as_ref().is_some_and(|h| h.device.eq_ignore_ascii_case(backend)) {
-            detail = join([detail.as_str(), backend]);
-        }
-        li!(
-            strong!(class = os_class(models[0].host.as_ref()), node), small!(detail),
-            small!(class = "resources", models[0].host.as_ref().map(resources).unwrap_or_default()),
-            span!(class = health(ready), availability(ready)),
-            model_list(&models, held),
-        )
-    }).collect();
+    let peers: Vec<_> = nodes
+        .into_iter()
+        .map(|(node, models)| {
+            let ready = models.iter().all(|m| m.ready);
+            let backend = models[0].backend.trim_start_matches("federated/");
+            let mut detail = models[0].host.as_ref().map(host_line).unwrap_or_default();
+            if !models[0]
+                .host
+                .as_ref()
+                .is_some_and(|h| h.device.eq_ignore_ascii_case(backend))
+            {
+                detail = join([detail.as_str(), backend]);
+            }
+            li!(
+                strong!(class = os_class(models[0].host.as_ref()), node),
+                small!(detail),
+                small!(
+                    class = "resources",
+                    models[0].host.as_ref().map(resources).unwrap_or_default()
+                ),
+                span!(class = health(ready), availability(ready)),
+                model_list(&models, held),
+            )
+        })
+        .collect();
     let enrolled = match &status.federation {
         Some(federation) if federation.authorized && federation.enabled => Some(PreEscaped(topology(federation).into_string())),
         Some(federation) if !federation.authorized => Some(PreEscaped((
@@ -212,12 +314,23 @@ pub(super) fn remote_panel(status: &Status, pin: &str, held: &[String]) -> impl 
 }
 
 fn model_list(models: &[&ModelStatus], held: &[String]) -> impl IntoHtml + use<> {
-    ul!(models.iter().map(|m| li!(
-        span!(class = format!("class {}", m.class), title = m.class.clone(), m.name.clone()),
-        m.capabilities.iter().map(|c| span!(class = format!("cap {c}"), c.clone())).collect::<Vec<_>>(),
-        " ", residency(m),
-        lease_button(m, held.contains(&m.name)),
-    )).collect::<Vec<_>>())
+    ul!(models
+        .iter()
+        .map(|m| li!(
+            span!(
+                class = format!("class {}", m.class),
+                title = m.class.clone(),
+                m.name.clone()
+            ),
+            m.capabilities
+                .iter()
+                .map(|c| span!(class = format!("cap {c}"), c.clone()))
+                .collect::<Vec<_>>(),
+            " ",
+            residency(m),
+            lease_button(m, held.contains(&m.name)),
+        ))
+        .collect::<Vec<_>>())
 }
 
 /// "loaded · 2 leases", "on disk", "loading", "failed".
@@ -234,19 +347,33 @@ fn residency(m: &ModelStatus) -> impl IntoHtml + use<> {
         1 => " · 1 lease".into(),
         n => format!(" · {n} leases"),
     };
-    span!(class = format!("residency {class}"), title = m.error.clone(), format!("{text}{leases}"))
+    span!(
+        class = format!("residency {class}"),
+        title = m.error.clone(),
+        format!("{text}{leases}")
+    )
 }
 
 /// Load keeps a model loaded under this gateway's lease; Release gives it up.
 fn lease_button(m: &ModelStatus, held: bool) -> Option<impl IntoHtml + use<>> {
     // Names go into a script; servers only allow these characters.
-    let plain = m.name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-    let (action, label, class) = if held { ("release", "Release", "small ghost") } else { ("hold", "Load", "small") };
-    (plain && (held || m.ready && m.residency != "failed")).then(|| button!(
-        r#type = "button", class = class,
-        "data-on:click" = format!("@post('/models/{action}?model={}')", m.name),
-        label,
-    ))
+    let plain = m
+        .name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    let (action, label, class) = if held {
+        ("release", "Release", "small ghost")
+    } else {
+        ("hold", "Load", "small")
+    };
+    (plain && (held || m.ready && m.residency != "failed")).then(|| {
+        button!(
+            r#type = "button",
+            class = class,
+            "data-on:click" = format!("@post('/models/{action}?model={}')", m.name),
+            label,
+        )
+    })
 }
 
 pub(super) fn lease_error(message: &str) -> impl IntoHtml + use<> {
@@ -256,49 +383,117 @@ pub(super) fn lease_error(message: &str) -> impl IntoHtml + use<> {
 fn legend() -> impl IntoHtml {
     div!(
         class = "legend",
-        [("freebsd", "FreeBSD"), ("linux", "Linux"), ("macos", "macOS")].map(|(os, name)| span!(class = format!("os {os}"), name)),
-        ["generative", "decision", "embedding", "reranker"].map(|c| span!(class = format!("class {c}"), c)),
+        [
+            ("freebsd", "FreeBSD"),
+            ("linux", "Linux"),
+            ("macos", "macOS")
+        ]
+        .map(|(os, name)| span!(class = format!("os {os}"), name)),
+        ["generative", "decision", "embedding", "reranker"]
+            .map(|c| span!(class = format!("class {c}"), c)),
         ["reasoning", "tools", "vision", "audio"].map(|c| span!(class = format!("cap {c}"), c)),
-        [("ok", "loaded"), ("idle", "on disk"), ("busy", "loading"), ("bad", "failed")].map(|(c, text)| span!(class = format!("residency {c}"), text)),
+        [
+            ("ok", "loaded"),
+            ("idle", "on disk"),
+            ("busy", "loading"),
+            ("bad", "failed")
+        ]
+        .map(|(c, text)| span!(class = format!("residency {c}"), text)),
     )
 }
 
 fn topology(federation: &FederationTopology) -> impl IntoHtml + use<> {
-    let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
-    let peers: Vec<_> = federation.peers.iter().map(|peer| {
-        let catalog = peer.catalog.as_ref().map_or_else(
-            || "no fresh catalog".to_owned(),
-            |c| format!("{} models · {} · fresh {}s more", c.models.len(), c.server_state, c.expires_at_ms.saturating_sub(now_ms) / 1000),
-        );
-        let grants = format!("sees {} · runs {} · routes {}", peer.catalog_exports.len(), peer.execute_exports.len(), peer.route_imports.len());
-        tr!(
-            td!(peer.peer_id.clone(), small!(peer.endpoint.clone())),
-            td!(peer.host.as_ref().map(|h| (h.name.clone(), small!(host_line(h))))),
-            td!(class = format!("trust {}", peer.state), peer.state.clone()),
-            td!(catalog, small!(grants)),
-        )
-    }).collect();
-    let routes: Vec<_> = federation.routes.iter().map(|r| li!(
-        strong!(r.alias.clone()), " → ", code!(format!("{}/{}", r.peer_id, r.model)), small!(format!(" {}", r.operation)),
-    )).collect();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let peers: Vec<_> = federation
+        .peers
+        .iter()
+        .map(|peer| {
+            let catalog = peer.catalog.as_ref().map_or_else(
+                || "no fresh catalog".to_owned(),
+                |c| {
+                    format!(
+                        "{} models · {} · fresh {}s more",
+                        c.models.len(),
+                        c.server_state,
+                        c.expires_at_ms.saturating_sub(now_ms) / 1000
+                    )
+                },
+            );
+            let grants = format!(
+                "sees {} · runs {} · routes {}",
+                peer.catalog_exports.len(),
+                peer.execute_exports.len(),
+                peer.route_imports.len()
+            );
+            tr!(
+                td!(peer.peer_id.clone(), small!(peer.endpoint.clone())),
+                td!(peer
+                    .host
+                    .as_ref()
+                    .map(|h| (h.name.clone(), small!(host_line(h))))),
+                td!(class = format!("trust {}", peer.state), peer.state.clone()),
+                td!(catalog, small!(grants)),
+            )
+        })
+        .collect();
+    let routes: Vec<_> = federation
+        .routes
+        .iter()
+        .map(|r| {
+            li!(
+                strong!(r.alias.clone()),
+                " → ",
+                code!(format!("{}/{}", r.peer_id, r.model)),
+                small!(format!(" {}", r.operation)),
+            )
+        })
+        .collect();
     (
         h2!("Enrolled peers"),
-        p!(class = "hint", format!("{} · trust generation {}", federation.server_id, federation.trust_generation)),
-        table!(thead!(tr!(th!("peer"), th!("host"), th!("trust"), th!("catalog"))), tbody!(peers)),
-        federation.peers.is_empty().then(|| p!("No peers are enrolled.")),
+        p!(
+            class = "hint",
+            format!(
+                "{} · trust generation {}",
+                federation.server_id, federation.trust_generation
+            )
+        ),
+        table!(
+            thead!(tr!(th!("peer"), th!("host"), th!("trust"), th!("catalog"))),
+            tbody!(peers)
+        ),
+        federation
+            .peers
+            .is_empty()
+            .then(|| p!("No peers are enrolled.")),
         (!routes.is_empty()).then(|| (h2!("Routes"), ul!(routes))),
     )
 }
 
 pub(super) fn model_select(status: &Status) -> impl IntoHtml + use<> {
-    let options: Vec<_> = status.models.iter().filter(|m| m.kind != "laya").map(|m| option!(
-        value = m.name.clone(),
-        format!(
-            "{} · {} · n_ctx {}{}{}", m.name, m.architecture, m.n_ctx,
-            if m.chat_format.is_empty() { String::new() } else { format!(" · {}", m.chat_format) },
-            if m.ready { "" } else { " (unavailable)" },
-        ),
-    )).collect();
+    let options: Vec<_> = status
+        .models
+        .iter()
+        .filter(|m| m.kind != "laya")
+        .map(|m| {
+            option!(
+                value = m.name.clone(),
+                format!(
+                    "{} · {} · n_ctx {}{}{}",
+                    m.name,
+                    m.architecture,
+                    m.n_ctx,
+                    if m.chat_format.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · {}", m.chat_format)
+                    },
+                    if m.ready { "" } else { " (unavailable)" },
+                ),
+            )
+        })
+        .collect();
     select!(
         id = "model-select",
         "data-bind:model" = "",
@@ -308,10 +503,18 @@ pub(super) fn model_select(status: &Status) -> impl IntoHtml + use<> {
 }
 
 fn playground(status: &Status) -> impl IntoHtml + use<> {
-    const BUSY: &str = "$_gen.phase == 'loading' || $_gen.phase == 'prefill' || $_gen.phase == 'decode'";
+    const BUSY: &str =
+        "$_gen.phase == 'loading' || $_gen.phase == 'prefill' || $_gen.phase == 'decode'";
     (
         label!(span!("model"), model_select(status)),
-        label!(span!("prompt"), textarea!(rows = "6", "data-bind:prompt" = "", placeholder = "Write a prompt…")),
+        label!(
+            span!("prompt"),
+            textarea!(
+                rows = "6",
+                "data-bind:prompt" = "",
+                placeholder = "Write a prompt…"
+            )
+        ),
         label!(
             class = "check",
             input!(r#type = "checkbox", "data-bind:chat" = ""),
@@ -320,30 +523,98 @@ fn playground(status: &Status) -> impl IntoHtml + use<> {
         label!(
             "data-show" = "$chat",
             span!("system"),
-            textarea!(rows = "2", "data-bind:system" = "", placeholder = "Optional instructions for the model"),
+            textarea!(
+                rows = "2",
+                "data-bind:system" = "",
+                placeholder = "Optional instructions for the model"
+            ),
         ),
         div!(
             class = "grid",
-            label!(span!("max tokens"), input!(r#type = "number", min = "1", max = "8192", "data-bind:max_tokens" = "")),
-            label!(span!("temperature"), input!(r#type = "number", step = "any", min = "0", placeholder = "0.8", "data-bind:temperature" = "")),
-            label!(span!("top p"), input!(r#type = "number", step = "any", min = "0", max = "1", placeholder = "0.95", "data-bind:top_p" = "")),
-            label!(span!("min p"), input!(r#type = "number", step = "any", min = "0", max = "1", placeholder = "0.05", "data-bind:min_p" = "")),
-            label!(span!("repetition penalty"), input!(r#type = "number", step = "any", min = "0", placeholder = "1.1", "data-bind:repetition_penalty" = "")),
+            label!(
+                span!("max tokens"),
+                input!(
+                    r#type = "number",
+                    min = "1",
+                    max = "8192",
+                    "data-bind:max_tokens" = ""
+                )
+            ),
+            label!(
+                span!("temperature"),
+                input!(
+                    r#type = "number",
+                    step = "any",
+                    min = "0",
+                    placeholder = "0.8",
+                    "data-bind:temperature" = ""
+                )
+            ),
+            label!(
+                span!("top p"),
+                input!(
+                    r#type = "number",
+                    step = "any",
+                    min = "0",
+                    max = "1",
+                    placeholder = "0.95",
+                    "data-bind:top_p" = ""
+                )
+            ),
+            label!(
+                span!("min p"),
+                input!(
+                    r#type = "number",
+                    step = "any",
+                    min = "0",
+                    max = "1",
+                    placeholder = "0.05",
+                    "data-bind:min_p" = ""
+                )
+            ),
+            label!(
+                span!("repetition penalty"),
+                input!(
+                    r#type = "number",
+                    step = "any",
+                    min = "0",
+                    placeholder = "1.1",
+                    "data-bind:repetition_penalty" = ""
+                )
+            ),
         ),
         div!(
             class = "actions",
-            button!(r#type = "button", "data-on:click" = "@post('/playground/run')", "data-attr:disabled" = BUSY, "Run"),
-            button!(r#type = "button", class = "ghost", "data-show" = BUSY,
-                "data-on:click" = "@post('/playground/stop?id=' + $_gen.id)", "Stop"),
+            button!(
+                r#type = "button",
+                "data-on:click" = "@post('/playground/run')",
+                "data-attr:disabled" = BUSY,
+                "Run"
+            ),
+            button!(
+                r#type = "button",
+                class = "ghost",
+                "data-show" = BUSY,
+                "data-on:click" = "@post('/playground/stop?id=' + $_gen.id)",
+                "Stop"
+            ),
         ),
         p!(id = "run-error", class = "error"),
         dl!(
             class = "stats",
-            dt!("phase"), dd!("data-text" = "$_gen.phase + ($_gen.finish_reason ? ' · ' + $_gen.finish_reason : '')"),
-            dt!("prompt"), dd!("data-text" = "$_gen.prompt_tokens + ' tokens of ' + $_gen.n_ctx"),
-            dt!("generated"), dd!("data-text" = "$_gen.emitted + ' / ' + $_gen.max_tokens"),
-            dt!("decode"), dd!("data-text" = "$_gen.tok_s.toFixed(1) + ' tok/s'"),
-            dt!("first token"), dd!("data-text" = "$_gen.ttft_ms + ' ms' + ($_gen.prefill_ms ? ' (server ' + $_gen.prefill_ms + ' ms)' : '')"),
+            dt!("phase"),
+            dd!("data-text" =
+                "$_gen.phase + ($_gen.finish_reason ? ' · ' + $_gen.finish_reason : '')"),
+            dt!("prompt"),
+            dd!("data-text" = "$_gen.prompt_tokens + ' tokens of ' + $_gen.n_ctx"),
+            dt!("generated"),
+            dd!("data-text" = "$_gen.emitted + ' / ' + $_gen.max_tokens"),
+            dt!("decode"),
+            dd!("data-text" = "$_gen.tok_s.toFixed(1) + ' tok/s'"),
+            dt!("first token"),
+            dd!(
+                "data-text" = "$_gen.ttft_ms + ' ms' + ($_gen.prefill_ms ? ' (server ' + $_gen.prefill_ms + ' ms)' : '')"
+            ),
         ),
         pre!(id = "output"),
     )
@@ -370,7 +641,11 @@ const fn health(ready: bool) -> &'static str {
 }
 
 fn weights(m: &ModelStatus) -> String {
-    if m.weight_bytes == 0 { "—".to_owned() } else { bytes(m.weight_bytes) }
+    if m.weight_bytes == 0 {
+        "—".to_owned()
+    } else {
+        bytes(m.weight_bytes)
+    }
 }
 
 fn is_remote(m: &ModelStatus) -> bool {
@@ -379,7 +654,10 @@ fn is_remote(m: &ModelStatus) -> bool {
 
 /// Where a model runs: its node for remote models, else the local backend.
 fn target(m: &ModelStatus) -> String {
-    m.host.as_ref().filter(|host| !host.name.is_empty()).map_or_else(|| m.backend.clone(), |host| host.name.clone())
+    m.host
+        .as_ref()
+        .filter(|host| !host.name.is_empty())
+        .map_or_else(|| m.backend.clone(), |host| host.name.clone())
 }
 
 fn os(m: &ModelStatus) -> &str {
@@ -392,7 +670,11 @@ fn os_class(host: Option<&Host>) -> String {
 
 /// "FreeBSD 16.0-CURRENT · amd64 · CPU"
 fn host_line(host: &Host) -> String {
-    join([host.os_name.as_str(), host.arch.as_str(), host.device.as_str()])
+    join([
+        host.os_name.as_str(),
+        host.arch.as_str(),
+        host.device.as_str(),
+    ])
 }
 
 /// "RAM 41/62 GiB · GPU 4.1/8.0 GiB · disk 1.2/1.8 TiB free"
@@ -401,22 +683,42 @@ fn resources(host: &Host) -> String {
         ("RAM", host.memory_available_bytes, host.memory_bytes),
         ("GPU", host.device_available_bytes, host.device_memory_bytes),
         ("disk", host.disk_available_bytes, host.disk_bytes),
-    ].into_iter().filter(|(_, _, total)| *total > 0).map(|(label, free, total)| format!("{label} {}", share(free, total))).collect::<Vec<_>>();
-    if free.is_empty() { String::new() } else { format!("{} free", free.join(" · ")) }
+    ]
+    .into_iter()
+    .filter(|(_, _, total)| *total > 0)
+    .map(|(label, free, total)| format!("{label} {}", share(free, total)))
+    .collect::<Vec<_>>();
+    if free.is_empty() {
+        String::new()
+    } else {
+        format!("{} free", free.join(" · "))
+    }
 }
 
 /// `free/total` in the unit of `total`.
 fn share(free: u64, total: u64) -> String {
-    let (unit, scale) = if total >= 1 << 40 { ("TiB", (1_u64 << 40) as f64) } else { ("GiB", (1_u64 << 30) as f64) };
+    let (unit, scale) = if total >= 1 << 40 {
+        ("TiB", (1_u64 << 40) as f64)
+    } else {
+        ("GiB", (1_u64 << 30) as f64)
+    };
     let number = |bytes: u64| {
         let value = bytes as f64 / scale;
-        if value < 10.0 { format!("{value:.1}") } else { format!("{value:.0}") }
+        if value < 10.0 {
+            format!("{value:.1}")
+        } else {
+            format!("{value:.0}")
+        }
     };
     format!("{}/{} {unit}", number(free), number(total))
 }
 
 fn join<'a>(parts: impl IntoIterator<Item = &'a str>) -> String {
-    parts.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
+    parts
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 pub(super) fn bytes(n: u64) -> String {
@@ -427,7 +729,11 @@ pub(super) fn bytes(n: u64) -> String {
         value /= 1024.0;
         unit += 1;
     }
-    if unit == 0 { format!("{n} B") } else { format!("{value:.1} {}", UNITS[unit]) }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 #[cfg(test)]

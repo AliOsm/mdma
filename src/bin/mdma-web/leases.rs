@@ -1,19 +1,19 @@
 // Leases this gateway holds to keep models loaded: renewed while held,
 // released on Release and when the gateway stops.
-use mdma::grpc::client::Client;
-use mdma::grpc::{AcquireRequest, ReleaseRequest, RenewRequest};
-use rama::graceful::WeakShutdownGuard;
-use rama::http::grpc::{Code, Request};
 use super::deadline;
 use super::pages;
 use super::sse::element;
 use super::upstream::{Upstream, describe};
+use mdma::grpc::client::Client;
+use mdma::grpc::{AcquireRequest, ReleaseRequest, RenewRequest};
 use rama::futures::async_stream::stream_fn;
+use rama::graceful::WeakShutdownGuard;
+use rama::http::grpc::{Code, Request};
 use rama::http::service::web::extract::{Query, State};
 use rama::http::service::web::response::{IntoResponse, Sse};
 use serde::Deserialize;
-use std::sync::Arc;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -44,8 +44,16 @@ impl Leases {
     }
 
     async fn acquire(client: &Client, model: &str) -> Result<String, String> {
-        let request = call(AcquireRequest { model: model.to_owned(), ttl_ms: TTL_MS, wait: false })?;
-        client.acquire(request).await.map(|r| r.into_inner().lease_id).map_err(|status| describe(&status))
+        let request = call(AcquireRequest {
+            model: model.to_owned(),
+            ttl_ms: TTL_MS,
+            wait: false,
+        })?;
+        client
+            .acquire(request)
+            .await
+            .map(|r| r.into_inner().lease_id)
+            .map_err(|status| describe(&status))
     }
 
     /// Keeps `model` loaded until [`Self::release`].
@@ -59,7 +67,9 @@ impl Leases {
     }
 
     pub async fn release(&self, client: &Client, model: &str) -> Result<(), String> {
-        let Some(id) = self.lock().remove(model) else { return Ok(()) };
+        let Some(id) = self.lock().remove(model) else {
+            return Ok(());
+        };
         match client.release(call(ReleaseRequest { lease_id: id })?).await {
             // Already expired on the server.
             Err(status) if status.code() != Code::NotFound => Err(describe(&status)),
@@ -69,17 +79,32 @@ impl Leases {
 
     /// Renews every lease, taking a new one where the server forgot it.
     async fn renew(&self, client: &Client) {
-        let held: Vec<(String, String)> = self.lock().iter().map(|(m, id)| (m.clone(), id.clone())).collect();
+        let held: Vec<(String, String)> = self
+            .lock()
+            .iter()
+            .map(|(m, id)| (m.clone(), id.clone()))
+            .collect();
         for (model, id) in held {
-            let Ok(request) = call(RenewRequest { lease_id: id.clone(), ttl_ms: TTL_MS }) else { continue };
+            let Ok(request) = call(RenewRequest {
+                lease_id: id.clone(),
+                ttl_ms: TTL_MS,
+            }) else {
+                continue;
+            };
             let replaced = match client.renew(request).await {
                 Ok(_) => continue,
-                Err(status) if status.code() == Code::NotFound => Self::acquire(client, &model).await,
+                Err(status) if status.code() == Code::NotFound => {
+                    Self::acquire(client, &model).await
+                }
                 Err(status) => Err(describe(&status)),
             };
             match replaced {
                 // Unless it was released meanwhile.
-                Ok(new) => if let Some(slot) = self.lock().get_mut(&model).filter(|slot| **slot == id) { *slot = new },
+                Ok(new) => {
+                    if let Some(slot) = self.lock().get_mut(&model).filter(|slot| **slot == id) {
+                        *slot = new;
+                    }
+                }
                 Err(error) => eprintln!("mdma-web: keeping {model} loaded: {error}"),
             }
         }
@@ -110,13 +135,31 @@ pub(super) struct ModelQuery {
 fn answer(upstream: Arc<Upstream>, outcome: Result<(), String>) -> impl IntoResponse {
     Sse::new(stream_fn(move |mut yielder| async move {
         let status = upstream.snapshot();
-        yielder.yield_item(element(pages::remote_panel(&status, &upstream.pin, &upstream.leases.held()))).await;
-        yielder.yield_item(element(pages::lease_error(outcome.err().as_deref().unwrap_or_default()))).await;
+        yielder
+            .yield_item(element(pages::remote_panel(
+                &status,
+                &upstream.pin,
+                &upstream.leases.held(),
+            )))
+            .await;
+        yielder
+            .yield_item(element(pages::lease_error(
+                outcome.err().as_deref().unwrap_or_default(),
+            )))
+            .await;
     }))
 }
 
-pub(super) async fn hold(State(upstream): State<Arc<Upstream>>, Query(query): Query<ModelQuery>) -> impl IntoResponse {
-    let outcome = if upstream.snapshot().models.iter().any(|m| m.name == query.model) {
+pub(super) async fn hold(
+    State(upstream): State<Arc<Upstream>>,
+    Query(query): Query<ModelQuery>,
+) -> impl IntoResponse {
+    let outcome = if upstream
+        .snapshot()
+        .models
+        .iter()
+        .any(|m| m.name == query.model)
+    {
         upstream.leases.hold(&upstream.client, &query.model).await
     } else {
         Err(format!("no model named {:?}", query.model))
@@ -124,7 +167,13 @@ pub(super) async fn hold(State(upstream): State<Arc<Upstream>>, Query(query): Qu
     answer(upstream, outcome)
 }
 
-pub(super) async fn release(State(upstream): State<Arc<Upstream>>, Query(query): Query<ModelQuery>) -> impl IntoResponse {
-    let outcome = upstream.leases.release(&upstream.client, &query.model).await;
+pub(super) async fn release(
+    State(upstream): State<Arc<Upstream>>,
+    Query(query): Query<ModelQuery>,
+) -> impl IntoResponse {
+    let outcome = upstream
+        .leases
+        .release(&upstream.client, &query.model)
+        .await;
     answer(upstream, outcome)
 }

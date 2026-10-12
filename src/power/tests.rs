@@ -42,7 +42,10 @@ impl Drop for FakeSysfs {
     }
 }
 
-#[expect(clippy::unnecessary_wraps, reason = "fixtures stand in for optional sensor readings")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "fixtures stand in for optional sensor readings"
+)]
 fn battery(on_battery: bool, percent: Option<u8>) -> Option<PowerReading> {
     Some(PowerReading {
         on_battery,
@@ -58,7 +61,10 @@ fn gpu(limit_w: u32, default_w: u32) -> GpuCap {
     }
 }
 
-#[expect(clippy::unnecessary_wraps, reason = "fixtures stand in for optional sensor readings")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "fixtures stand in for optional sensor readings"
+)]
 fn on_ac_with_gpu(cap: GpuCap) -> Option<PowerReading> {
     Some(PowerReading {
         on_battery: false,
