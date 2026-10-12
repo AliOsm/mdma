@@ -120,11 +120,14 @@ impl Config {
             }
             other => return Err(format!("MDMA_POWER must be auto or off, not '{other}'").into()),
         };
-        let control_only = match optional("MDMA_FEDERATION_CONTROL_ONLY", "0")?.as_str() {
-            "0" => false,
-            "1" => true,
-            _ => return Err("MDMA_FEDERATION_CONTROL_ONLY must be 0 or 1".into()),
+        let flag = |name: &str| -> Result<bool, BoxError> {
+            match optional(name, "0")?.as_str() {
+                "0" => Ok(false),
+                "1" => Ok(true),
+                _ => Err(format!("{name} must be 0 or 1").into()),
+            }
         };
+        let control_only = flag("MDMA_FEDERATION_CONTROL_ONLY")?;
         let models = if control_only {
             if !matches!(env("MDMA_MODELS_DIR"), Err(VarError::NotPresent)) {
                 return Err("control-only federation cannot load model sources".into());
@@ -151,11 +154,7 @@ impl Config {
         let device_buffer_bytes = byte_limit("MDMA_DEVICE_BUFFER_BYTES")?;
         let host_buffer_bytes = byte_limit("MDMA_HOST_BUFFER_BYTES")?;
         let backend = optional("MDMA_BACKEND", "cpu")?;
-        let rocm_f32 = match optional("MDMA_HIP_F32", "0")?.as_str() {
-            "0" => false,
-            "1" => true,
-            _ => return Err("MDMA_HIP_F32 must be 0 or 1".into()),
-        };
+        let rocm_f32 = flag("MDMA_HIP_F32")?;
         if (device_buffer_bytes.is_some() || host_buffer_bytes.is_some()) && !matches!(backend.as_str(), "rocm" | "cuda" | "vulkan") {
             return Err("MDMA_DEVICE_BUFFER_BYTES / MDMA_HOST_BUFFER_BYTES require rocm, cuda or vulkan".into());
         }
