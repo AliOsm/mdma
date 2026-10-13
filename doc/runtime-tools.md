@@ -32,7 +32,10 @@ execution requires a compatible ROCm runtime and access to `/dev/kfd`.
 
 ## Doctor
 
-`doctor` checks all compiled backends by default. Each receives a tiny
+`doctor` checks every backend the target can host by default: `cpu` and
+`metal` on macOS; `cpu`, `vulkan`, `rocm`, `cuda` and `level0` elsewhere.
+A Coral Edge TPU is listed after the backend checks as a detected
+accelerator, since it has no compute backend yet. Each backend receives a tiny
 allocation/upload/copy/F32 identity-matrix/download test. Reports include the
 selected device, unified-memory status, KV element size, attention head-width
 limit, prepared-cache profile and optional decoder operations.

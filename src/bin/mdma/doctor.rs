@@ -8,7 +8,8 @@ use serde::Serialize;
 
 #[derive(Debug, usage_rs::Args)]
 pub(super) struct Args {
-    /// Check all compiled backends, or cpu/vulkan/rocm/cuda/metal/level0.
+    /// Check every backend this target can host, or one: cpu and metal on macOS;
+    /// cpu, vulkan, rocm, cuda or level0 elsewhere.
     #[usage(long, default = "all")]
     backend: String,
     #[usage(long)]
@@ -115,7 +116,7 @@ pub(super) fn run(args: &Args) -> Result<()> {
                 return Check {
                     backend: name.into(),
                     status: "not_built",
-                    detail: format!("rebuild with --features {name} (Metal requires macOS)"),
+                    detail: format!("rebuild with --features {name}"),
                     capabilities: None,
                 };
             }

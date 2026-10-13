@@ -1,7 +1,11 @@
 use mdma::backend::{Backend, cpu::CpuBackend};
 
 pub(super) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-pub(super) const NAMES: &[&str] = &["cpu", "vulkan", "rocm", "cuda", "metal", "level0"];
+// Backends a target can host: Metal is macOS only; ROCm, CUDA and Level Zero have no macOS driver.
+#[cfg(target_os = "macos")]
+pub(super) const NAMES: &[&str] = &["cpu", "metal"];
+#[cfg(not(target_os = "macos"))]
+pub(super) const NAMES: &[&str] = &["cpu", "vulkan", "rocm", "cuda", "level0"];
 
 pub(super) trait Task {
     type Output;
@@ -11,10 +15,15 @@ pub(super) trait Task {
 pub(super) fn built(name: &str) -> bool {
     match name {
         "cpu" => true,
+        #[cfg(not(target_os = "macos"))]
         "vulkan" => cfg!(feature = "vulkan"),
+        #[cfg(not(target_os = "macos"))]
         "rocm" => cfg!(feature = "rocm"),
+        #[cfg(not(target_os = "macos"))]
         "cuda" => cfg!(feature = "cuda"),
-        "metal" => cfg!(all(feature = "metal", target_os = "macos")),
+        #[cfg(target_os = "macos")]
+        "metal" => cfg!(feature = "metal"),
+        #[cfg(not(target_os = "macos"))]
         "level0" => cfg!(feature = "level0"),
         _ => false,
     }
@@ -23,9 +32,9 @@ pub(super) fn built(name: &str) -> bool {
 pub(super) fn dispatch<T: Task>(name: &str, task: T) -> Result<T::Output> {
     match name {
         "cpu" => task.run(CpuBackend),
-        #[cfg(feature = "vulkan")]
+        #[cfg(all(feature = "vulkan", not(target_os = "macos")))]
         "vulkan" => task.run(mdma::backend::vulkan::VulkanBackend::new()?),
-        #[cfg(feature = "rocm")]
+        #[cfg(all(feature = "rocm", not(target_os = "macos")))]
         "rocm" => {
             let backend = if std::env::var("MDMA_HIP_F32").as_deref() == Ok("1") {
                 mdma::backend::rocm::HipBackend::new_f32()?
@@ -34,11 +43,11 @@ pub(super) fn dispatch<T: Task>(name: &str, task: T) -> Result<T::Output> {
             };
             task.run(backend)
         }
-        #[cfg(feature = "cuda")]
+        #[cfg(all(feature = "cuda", not(target_os = "macos")))]
         "cuda" => task.run(mdma::backend::cuda::CudaBackend::new()?),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         "metal" => task.run(mdma::backend::metal::MetalBackend::new()?),
-        #[cfg(feature = "level0")]
+        #[cfg(all(feature = "level0", not(target_os = "macos")))]
         "level0" => task.run(mdma::backend::level0::Level0Backend::new()?),
         name if NAMES.contains(&name) => Err(format!(
             "{name} backend not built for this target; rebuild mdma with --features {name}"
