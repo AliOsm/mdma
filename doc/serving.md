@@ -92,10 +92,10 @@ routes.
 
 ### Memory, eviction and leases
 
-When a load does not fit, the server unloads the least recently used models
-that nobody holds a lease on and no request is using, until it fits. If it
-still does not fit, the request fails with `RESOURCE_EXHAUSTED` naming what
-holds the memory. CUDA, ROCm, Vulkan and Metal check free device memory before
+When a load, or a request's KV and workspace, does not fit, the server unloads
+the least recently used models that nobody holds a lease on and no request is
+using, until it fits. If it still does not fit, the request fails with
+`RESOURCE_EXHAUSTED` naming what holds the memory. CUDA, ROCm, Vulkan and Metal check free device memory before
 each load; the CPU backend budgets 75% of RAM unless
 `MDMA_NATIVE_TENSOR_BYTES` says otherwise. `MDMA_IDLE_UNLOAD_SECS` (default 0,
 never) also unloads models unused that long.
@@ -117,8 +117,8 @@ catalog.
 model that does not fit in memory stays `available` with its `error` and is
 retried on the next use; a corrupt file or one changed on disk is `failed`
 until restart and marks the server `degraded`. Names for the **same file**
-(symlinks, hardlinks) share one weight upload and tokenizer; request KV is not
-shared, and so is the context: the trained one, or `MDMA_N_CTX` when lower.
+(symlinks, hardlinks) share one weight upload, tokenizer and context (the
+trained one, or `MDMA_N_CTX` when lower); request KV is not shared.
 
 Each model also reports what its file header says, read when the server lists
 it: `parameters` (elements across its tensors), `quantization` (llama.cpp's
