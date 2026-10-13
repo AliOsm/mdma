@@ -45,7 +45,10 @@ Fresh request KV caches are sized to the prompt plus the output tokens
 that actually need evaluation, not the full context limit, and are reserved up
 front for that whole case; the output cap is what bounds it. With 128 KiB of
 f16 KV per token (a 7B model on CUDA), a 4096-token cap reserves at most about
-512 MiB beyond the prompt's share. One-token
+512 MiB beyond the prompt's share. Gemma 4's sliding-window layers keep only
+their window (512 rows on E2B) as a ring, so its KV grows mostly with the few
+global layers; a prefix hit that needs rows the ring already overwrote
+re-prefills from the start. One-token
 verdicts use prefill logits directly, without a decode workspace, graph,
 or extra forward pass. Allocation runs on the blocking inference worker;
 allocation/backend failures are reported through the response stream.
