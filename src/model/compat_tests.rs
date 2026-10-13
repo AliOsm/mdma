@@ -217,7 +217,8 @@ fn window_boundary<B: Backend>(backend: &B, f: &Fixture) -> Vec<f32> {
     let model = Model::load(backend, &mut GgufModel::open(&f.0).unwrap()).unwrap();
     let input: Vec<u32> = (0..528).map(|i| 3 + i % 6).collect();
     let mut kv = model.new_kv_cache(backend, 536).unwrap();
-    let mut seq = model.new_kv_cache(backend, 536).unwrap();
+    // Full-context reference for the sliding-window rings, which wrap at 512.
+    let mut seq = KvCache::with_geometry(backend, &model.kv_widths().unwrap(), 536).unwrap();
     let mut decode = model.alloc_workspace(backend, 1).unwrap();
     let mut start = 0;
     let mut last = Vec::new();
@@ -288,7 +289,8 @@ fn inference<B: Backend>(backend: &B, f: &Fixture) -> Vec<f32> {
         .prefill(backend, &mut kv, &mut ws, &tokens, 0)
         .unwrap();
     assert_eq!(kv.len(), tokens.len());
-    let mut sequential = model.new_kv_cache(backend, 8).unwrap();
+    // Full-context reference: Gemma's window of 2 wraps its rings repeatedly.
+    let mut sequential = KvCache::with_geometry(backend, &model.kv_widths().unwrap(), 8).unwrap();
     let mut decode = model.alloc_workspace(backend, 1).unwrap();
     let mut logits = Vec::new();
     for (pos, &token) in tokens.iter().enumerate() {
@@ -443,7 +445,8 @@ fn compat_memory_budgets_cover_gemma_shared_kv_and_sequential_scratch() {
         let kv_bytes = model.kv_bytes(&CpuBackend, 8).unwrap();
         let scratch = model.workspace_bytes(5).unwrap();
         if gemma {
-            assert_eq!(kv_bytes, (4 + 8) * 8 * 4 * 2);
+            // The local producer keeps its 2-row window, the global one all 8.
+            assert_eq!(kv_bytes, (4 * 2 + 8 * 8) * 4 * 2);
             assert_eq!(scratch, model.workspace_bytes(1).unwrap());
             // Base scratch plus per-layer Q/K/V, FFN and input scratch.
             assert_eq!(scratch, 704 + 192 + 2 * 400 + 656);
@@ -454,6 +457,10 @@ fn compat_memory_budgets_cover_gemma_shared_kv_and_sequential_scratch() {
             assert_eq!(weights, payload + (2 + 4 + 8 + 4) * 4);
         }
         let mut kv = model.new_kv_cache(&CpuBackend, 8).unwrap();
+        let stored: usize = (0..model.kv_widths().unwrap().len())
+            .map(|layer| kv.view(layer).k.0.len() + kv.view(layer).v.0.len())
+            .sum();
+        assert_eq!(stored, kv_bytes);
         let mut ws = model.alloc_workspace(&CpuBackend, 5).unwrap();
         assert_eq!(budget.used(), weights + kv_bytes + scratch);
         model

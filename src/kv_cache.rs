@@ -1,17 +1,36 @@
 //! Preallocated per-layer KV buffers, updated in place.
 //! The backend selects the element width through `Backend::kv_elem_bytes`
 //! and converts f32 input rows on write.
-use crate::backend::{Backend, KvView, Pool, Result, RopeSpec};
+//!
+//! A sliding-window layer keeps only its window, as a ring: position `p`
+//! lands in row `p % rows`. One query attends exactly the rows its window
+//! covers, and softmax plus the weighted sum ignore row order (K is stored
+//! rotated), so kernels read the ring as an ordinary `min(len, rows)` prefix.
+use crate::backend::{Backend, Error, KvView, Pool, Result, RopeSpec};
 use crate::memory::{Reservation, product, sum};
 
 pub struct KvCache<B: Backend> {
     k: Vec<B::Buf>,
     v: Vec<B::Buf>,
     row_elems: Vec<usize>,
+    /// Rows each layer stores; fewer than `n_ctx` makes the layer a ring.
+    rows: Vec<usize>,
     n_ctx: usize,
     elem_bytes: usize,
     len: usize,
+    /// One past the highest position written since the last reset.
+    written: usize,
     _memory: Option<Reservation>,
+}
+
+/// Rows a layer stores for `n_ctx` positions: its sliding window, or every
+/// position when `window` is 0.
+pub(crate) fn layer_rows(window: usize, n_ctx: usize) -> usize {
+    if window == 0 {
+        n_ctx
+    } else {
+        window.min(n_ctx)
+    }
 }
 
 impl<B: Backend> KvCache<B> {
@@ -27,22 +46,38 @@ impl<B: Backend> KvCache<B> {
     }
 
     /// Only producer layers need storage; callers map shared layers to them.
+    /// Every layer keeps all `n_ctx` positions.
     pub fn with_geometry(backend: &B, widths: &[usize], n_ctx: usize) -> Result<Self> {
-        Self::with_geometry_reserved(backend, widths, n_ctx, None)
+        Self::with_geometry_reserved(backend, widths, &vec![0; widths.len()], n_ctx, None)
     }
 
-    pub(crate) fn allocation_bytes(backend: &B, widths: &[usize], n_ctx: usize) -> Result<usize> {
-        product(&[
-            sum(widths.iter().copied())?,
-            backend.kv_elem_bytes(),
-            n_ctx,
-            2,
-        ])
+    /// Bytes for rows of `widths` elements, each layer keeping `layer_rows`.
+    pub(crate) fn allocation_bytes(
+        backend: &B,
+        widths: &[usize],
+        windows: &[usize],
+        n_ctx: usize,
+    ) -> Result<usize> {
+        if widths.len() != windows.len() {
+            return Err(Error::ShapeMismatch(
+                "KV widths and windows must cover the same layers".into(),
+            ));
+        }
+        widths
+            .iter()
+            .zip(windows)
+            .try_fold(0, |bytes, (&width, &window)| {
+                sum([
+                    bytes,
+                    product(&[width, backend.kv_elem_bytes(), layer_rows(window, n_ctx), 2])?,
+                ])
+            })
     }
 
     pub(crate) fn with_geometry_reserved(
         backend: &B,
         widths: &[usize],
+        windows: &[usize],
         n_ctx: usize,
         memory: Option<Reservation>,
     ) -> Result<Self> {
@@ -50,13 +85,14 @@ impl<B: Backend> KvCache<B> {
         let mut k = Vec::with_capacity(widths.len());
         let mut v = Vec::with_capacity(widths.len());
         if widths.is_empty() || widths.contains(&0) {
-            return Err(crate::backend::Error::ShapeMismatch(
+            return Err(Error::ShapeMismatch(
                 "KV layer geometry must be nonempty".into(),
             ));
         }
-        Self::allocation_bytes(backend, widths, n_ctx)?;
-        for &width in widths {
-            let layer_bytes = product(&[width, elem_bytes, n_ctx])?;
+        Self::allocation_bytes(backend, widths, windows, n_ctx)?;
+        let rows: Vec<usize> = windows.iter().map(|&w| layer_rows(w, n_ctx)).collect();
+        for (&width, &rows) in widths.iter().zip(&rows) {
+            let layer_bytes = product(&[width, elem_bytes, rows])?;
             k.push(backend.alloc(layer_bytes, Pool::Kv)?);
             v.push(backend.alloc(layer_bytes, Pool::Kv)?);
         }
@@ -64,9 +100,11 @@ impl<B: Backend> KvCache<B> {
             k,
             v,
             row_elems: widths.to_vec(),
+            rows,
             n_ctx,
             elem_bytes,
             len: 0,
+            written: 0,
             _memory: memory,
         })
     }
@@ -93,12 +131,36 @@ impl<B: Backend> KvCache<B> {
         self.row_elems[layer] * self.elem_bytes
     }
 
+    fn is_ring(&self, layer: usize) -> bool {
+        self.rows[layer] < self.n_ctx
+    }
+
+    /// Storage row of `pos` in `layer`, for `n_rows` rows within capacity.
+    fn row(&self, layer: usize, pos: usize, n_rows: usize) -> Result<usize> {
+        if pos.checked_add(n_rows).is_none_or(|end| end > self.n_ctx) {
+            return Err(Error::ShapeMismatch(format!(
+                "KV write of {n_rows} rows at {pos} exceeds capacity {}",
+                self.n_ctx
+            )));
+        }
+        if !self.is_ring(layer) {
+            return Ok(pos);
+        }
+        if n_rows != 1 {
+            return Err(Error::ShapeMismatch(
+                "a sliding-window KV ring takes one row per write".into(),
+            ));
+        }
+        Ok(pos % self.rows[layer])
+    }
+
     /// Write `n_rows` consecutive K/V rows starting at `pos`, straight
     /// from device buffers `k`/`v` holding f32 rows (at least
     /// `n_rows * n_kv_heads * head_dim` floats from their own offset 0),
     /// without a host round trip. Caller drives layer order and calls
     /// `set_len` once after every layer has been written for this
-    /// position range. `n_rows == 1` is decode; prefill passes more.
+    /// position range. `n_rows == 1` is decode; prefill passes more, except
+    /// into a ring.
     pub fn write(
         &mut self,
         backend: &B,
@@ -108,20 +170,23 @@ impl<B: Backend> KvCache<B> {
         v: &B::Buf,
         n_rows: usize,
     ) -> Result<()> {
+        let row = self.row(layer, pos, n_rows)?;
         let row_elems = self.row_elems[layer];
         backend.kv_write(
             k,
             v,
             &mut self.k[layer],
             &mut self.v[layer],
-            pos * row_elems,
+            row * row_elems,
             n_rows * row_elems,
-        )
+        )?;
+        self.written = self.written.max(pos + n_rows);
+        Ok(())
     }
 
     /// `write` with the RoPE rotation of `q`/`k` folded in: rotates `q` in
     /// place and stores the rotated `k` and `v` rows at `pos`. `k` may not
-    /// hold the rotated rows afterwards.
+    /// hold the rotated rows afterwards. Rings are not supported.
     #[allow(clippy::too_many_arguments)]
     pub fn rope_write(
         &mut self,
@@ -134,6 +199,12 @@ impl<B: Backend> KvCache<B> {
         n_rows: usize,
         spec: &RopeSpec,
     ) -> Result<()> {
+        if self.is_ring(layer) {
+            return Err(Error::ShapeMismatch(
+                "RoPE-fused KV writes need a full-context layer".into(),
+            ));
+        }
+        let row = self.row(layer, pos, n_rows)?;
         let row_elems = self.row_elems[layer];
         backend.rope_kv_write(
             q,
@@ -141,23 +212,50 @@ impl<B: Backend> KvCache<B> {
             v,
             &mut self.k[layer],
             &mut self.v[layer],
-            pos * row_elems,
+            row * row_elems,
             pos as u32,
             n_rows,
             spec,
             n_rows * row_elems,
-        )
+        )?;
+        self.written = self.written.max(pos + n_rows);
+        Ok(())
     }
 
+    /// Set the initialized prefix; 0 starts a new sequence. Going back to a
+    /// nonzero length must pass `can_resume` first (or use `rewind`).
     pub fn set_len(&mut self, len: usize) {
         self.len = len;
+        if len == 0 {
+            self.written = 0;
+        }
     }
 
+    /// Whether a query at `pos` sees only the current sequence: its prefix is
+    /// initialized and no ring overwrote a row it attends. A ring holds the
+    /// last `rows` positions written, so going back is only safe before any
+    /// ring wrapped, or onto the last position written.
+    pub fn can_resume(&self, pos: usize) -> bool {
+        pos <= self.len
+            && (pos == 0
+                || pos + 1 >= self.written
+                || self.rows.iter().all(|&rows| self.written <= rows))
+    }
+
+    /// Truncate to `len` positions if decoding can resume there, otherwise
+    /// start over. Returns the positions kept.
+    pub fn rewind(&mut self, len: usize) -> usize {
+        let len = if self.can_resume(len) { len } else { 0 };
+        self.set_len(len);
+        len
+    }
+
+    /// A full ring exposes all its rows, in storage order.
     pub fn view(&self, layer: usize) -> KvView<'_, B::Buf> {
         KvView {
             k: &self.k[layer],
             v: &self.v[layer],
-            len: self.len,
+            len: self.len.min(self.rows[layer]),
         }
     }
 }

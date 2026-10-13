@@ -199,7 +199,13 @@ impl<B: Backend> Model<B> {
             (None, None) => None,
             _ => return Err(Error::ShapeMismatch("invalid KV reservation".into())),
         };
-        KvCache::with_geometry_reserved(backend, &self.kv_widths()?, n_ctx, memory)
+        KvCache::with_geometry_reserved(
+            backend,
+            &self.kv_widths()?,
+            &self.kv_windows(),
+            n_ctx,
+            memory,
+        )
     }
 
     /// Allocate reusable scratch for exactly `n_tokens` positions.
@@ -279,9 +285,9 @@ impl<B: Backend> Model<B> {
         if ws.n_tokens != 1
             || token as usize >= self.token_embd.shape[0]
             || pos as usize >= kv.capacity()
-            || pos as usize > kv.len()
+            || !kv.can_resume(pos as usize)
         {
-            return Err(Error::ShapeMismatch("decode requires a T=1 workspace, valid token and initialized KV prefix within capacity".into()));
+            return Err(Error::ShapeMismatch("decode requires a T=1 workspace, valid token and resumable KV prefix within capacity".into()));
         }
         Ok(())
     }
@@ -340,11 +346,11 @@ impl<B: Backend> Model<B> {
             ));
         }
         if ws.n_tokens != n_tokens
-            || pos as usize > kv.len()
+            || !kv.can_resume(pos as usize)
             || n_tokens > kv.capacity().saturating_sub(pos as usize)
         {
             return Err(Error::ShapeMismatch(
-                "prefill requires a matching workspace and initialized KV prefix within capacity"
+                "prefill requires a matching workspace and resumable KV prefix within capacity"
                     .into(),
             ));
         }

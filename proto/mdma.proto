@@ -106,7 +106,8 @@ message ModelGeometry {
   uint32 n_heads = 4;
   uint32 n_kv_heads = 5;
   uint32 head_dim = 6;
-  // KV bytes per position, all layers.
+  // KV bytes of one position, all layers. Sliding-window layers stop growing
+  // at their window, so longer contexts cost less per position.
   uint64 kv_bytes_per_token = 7;
   // KV width of each layer.
   repeated uint32 layer_kv_widths = 8;

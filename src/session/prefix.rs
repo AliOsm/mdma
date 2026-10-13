@@ -33,7 +33,7 @@ impl<B: Backend> PromptState<B> {
                 "prompt must be non-empty and fit the session context".into(),
             ));
         }
-        if self.tokens == tokens && !self.logits.is_empty() {
+        if self.tokens == tokens && !self.logits.is_empty() && self.kv.can_resume(tokens.len()) {
             self.kv.set_len(tokens.len());
             return Ok((self.logits.clone(), tokens.len()));
         }
@@ -43,11 +43,11 @@ impl<B: Backend> PromptState<B> {
             .zip(tokens)
             .take_while(|(a, b)| a == b)
             .count();
-        // A shortened prompt needs its final row evaluated to obtain logits.
-        let reused = common.min(tokens.len() - 1);
         self.tokens.clear();
         self.logits.clear();
-        self.kv.set_len(reused);
+        // A shortened prompt needs its final row evaluated to obtain logits.
+        // Rows a sliding window already overwrote mean starting over.
+        let reused = self.kv.rewind(common.min(tokens.len() - 1));
         let mut ws = model.alloc_workspace_reserved(backend, tokens.len() - reused, memory)?;
         let logits = model.prefill(
             backend,

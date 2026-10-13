@@ -130,6 +130,16 @@ impl Config {
             .collect()
     }
 
+    /// Producer windows, 0 for global layers. Every reader of a local producer
+    /// (itself and the shared local layers) attends only its window, so it
+    /// keeps just that many rows.
+    pub fn kv_windows(&self) -> Vec<usize> {
+        self.local[..self.producers]
+            .iter()
+            .map(|&local| if local { self.window } else { 0 })
+            .collect()
+    }
+
     pub fn generated_weight_bytes(&self, c: &ModelConfig) -> Result<usize> {
         let widths = sum((0..c.n_layers).map(|i| self.dim(i)))?;
         product(&[sum([self.local_dim / 2, widths])?, 4])

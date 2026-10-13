@@ -6,6 +6,7 @@ use super::{
 };
 use crate::backend::{Backend, Error, Result, cpu::CpuBackend};
 use crate::gguf::GgufModel;
+use crate::kv_cache::KvCache;
 use crate::memory::{product, sum};
 use serde::Serialize;
 
@@ -64,11 +65,13 @@ pub fn estimate<B: Backend>(
         .expect("validated architecture");
     let weights_bytes = memory::weight_bytes(g)?;
     let mut widths = vec![product(&[c.n_kv_heads, c.head_dim])?; c.n_layers];
+    let mut windows = vec![0; c.n_layers];
     let mut extra_workspace = 0;
     let mut gemma = false;
     if arch == "gemma4" {
         let (_, config) = gemma4::Config::read(g)?;
         widths = config.kv_widths(&c)?;
+        windows = config.kv_windows();
         extra_workspace = config.workspace_bytes(&c)?;
         gemma = true;
     } else if qwen::is_arch(arch) {
@@ -91,7 +94,7 @@ pub fn estimate<B: Backend>(
     };
     let prefill_workspace_bytes = workspace(batch)?;
     let decode_workspace_bytes = workspace(1)?;
-    let kv_bytes = product(&[sum(widths)?, b.kv_elem_bytes(), context, 2])?;
+    let kv_bytes = KvCache::allocation_bytes(b, &widths, &windows, context)?;
     let load_staging_bytes = staging(g);
     let peak_bytes = sum([
         weights_bytes,

@@ -5,21 +5,36 @@ use std::assert_matches;
 #[test]
 fn estimates_match_loaded_tensor_geometry_without_loading_weights() {
     let file = Fixture::new(3, 8).write();
-    let mut gguf = GgufModel::open(file.path()).unwrap();
-    let estimate = estimate(&CpuBackend, &gguf, 32, 5).unwrap();
-    let budget = crate::memory::NativeMemoryBudget::new(usize::MAX);
-    let model = Model::load_with_budget(&CpuBackend, &mut gguf, &budget).unwrap();
-    assert_eq!(estimate.weights_bytes, budget.used());
-    assert_eq!(estimate.kv_bytes, model.kv_bytes(&CpuBackend, 32).unwrap());
-    assert_eq!(
-        estimate.prefill_workspace_bytes,
-        model.workspace_bytes(5).unwrap()
-    );
-    assert_eq!(
-        estimate.decode_workspace_bytes,
-        model.workspace_bytes(1).unwrap()
-    );
-    assert!(estimate.peak_bytes >= estimate.weights_bytes + estimate.load_staging_bytes);
+    let gemma = crate::model::compat_tests::decoder_fixture(true);
+    // Gemma's local producer keeps its 2-row window, the global one all 16.
+    let gemma_kv = (4 * 2 + 8 * 16) * 4 * 2;
+    for (path, context, kv) in [
+        (file.path(), 32, None),
+        (gemma.0.as_path(), 16, Some(gemma_kv)),
+    ] {
+        let mut gguf = GgufModel::open(path).unwrap();
+        let estimate = estimate(&CpuBackend, &gguf, context, 5).unwrap();
+        let budget = crate::memory::NativeMemoryBudget::new(usize::MAX);
+        let model = Model::load_with_budget(&CpuBackend, &mut gguf, &budget).unwrap();
+        assert_eq!(estimate.weights_bytes, budget.used());
+        assert_eq!(
+            estimate.kv_bytes,
+            model.kv_bytes(&CpuBackend, context).unwrap()
+        );
+        assert_eq!(
+            estimate.prefill_workspace_bytes,
+            model.workspace_bytes(5).unwrap()
+        );
+        assert_eq!(
+            estimate.decode_workspace_bytes,
+            model.workspace_bytes(1).unwrap()
+        );
+        assert!(estimate.peak_bytes >= estimate.weights_bytes + estimate.load_staging_bytes);
+        if let Some(kv) = kv {
+            assert_eq!(estimate.kv_bytes, kv);
+        }
+    }
+    let gguf = GgufModel::open(file.path()).unwrap();
     for (context, prompt) in [(0, 1), (65, 1), (32, 0), (32, 33)] {
         assert_matches!(
             super::estimate(&CpuBackend, &gguf, context, prompt),

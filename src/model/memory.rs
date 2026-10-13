@@ -76,7 +76,20 @@ impl<B: Backend> Model<B> {
     }
 
     pub fn kv_bytes(&self, backend: &B, capacity: usize) -> Result<usize> {
-        KvCache::<B>::allocation_bytes(backend, &self.kv_widths()?, capacity.min(self.config.n_ctx))
+        KvCache::<B>::allocation_bytes(
+            backend,
+            &self.kv_widths()?,
+            &self.kv_windows(),
+            capacity.min(self.config.n_ctx),
+        )
+    }
+
+    /// Sliding window of each KV layer, 0 where it keeps every position.
+    pub(crate) fn kv_windows(&self) -> Vec<usize> {
+        if let Decoder::Gemma4(gemma) = &self.architecture {
+            return gemma.config.kv_windows();
+        }
+        vec![0; self.config.n_layers]
     }
 
     /// K (and V) elements per position, per layer.

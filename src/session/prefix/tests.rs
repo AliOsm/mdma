@@ -1,5 +1,7 @@
 use super::*;
 use crate::backend::cpu::CpuBackend;
+use crate::gguf::GgufModel;
+use crate::model::compat_tests::decoder_fixture;
 use crate::model::tests::tiny_model;
 
 fn acquire(
@@ -16,43 +18,48 @@ fn acquire(
 #[test]
 fn exact_extended_branched_shortened_and_unrelated_prompts_match_fresh() {
     let backend = CpuBackend;
-    let model = tiny_model(&backend);
-    let mut cached = PromptState::new(model.new_kv_cache(&backend, 64).unwrap());
-    let cases: &[(&[u32], usize)] = &[
-        (&[3, 5, 7, 11, 13, 17, 19], 0),
-        (&[3, 5, 7, 11, 13, 17, 19], 7),
-        (&[3, 5, 7, 11, 13, 17, 19, 23], 7),
-        (&[3, 5, 7, 11, 13, 29, 31], 5),
-        (&[3, 5], 1),
-        (&[47, 31, 17], 0),
+    let gemma = decoder_fixture(true);
+    let gemma = Model::load(&backend, &mut GgufModel::open(&gemma.0).unwrap()).unwrap();
+    let prompts: [&[u32]; 6] = [
+        &[3, 5, 7, 11, 13, 17, 19],
+        &[3, 5, 7, 11, 13, 17, 19],
+        &[3, 5, 7, 11, 13, 17, 19, 23],
+        &[3, 5, 7, 11, 13, 29, 31],
+        &[3, 5],
+        &[27, 31, 17],
     ];
-    for &(tokens, expected_reuse) in cases {
-        let (got, reused) = cached.prefill(&backend, &model, tokens).unwrap();
-        let mut kv = model.new_kv_cache(&backend, 64).unwrap();
-        let mut ws = model.alloc_workspace(&backend, tokens.len()).unwrap();
-        let want = model
-            .prefill(&backend, &mut kv, &mut ws, tokens, 0)
-            .unwrap();
-        assert_eq!(reused, expected_reuse);
-        assert_eq!(got, want);
-        // Appended generation must not contaminate later prompt hits.
-        let mut decode_ws = model.alloc_workspace(&backend, 1).unwrap();
-        model
-            .forward(
-                &backend,
-                &mut cached.kv,
-                &mut decode_ws,
-                97,
-                tokens.len() as u32,
-            )
-            .unwrap();
-        let (hit, reused) = cached.prefill(&backend, &model, tokens).unwrap();
-        assert_eq!(hit, want);
-        assert_eq!(reused, tokens.len());
-        assert_eq!(cached.kv.len(), tokens.len());
+    // (reuse, reuse on the following exact hit). Odd cases generate two
+    // tokens: Gemma's 2-row window then no longer holds the prompt's last
+    // rows, and any rewind short of the last position written starts over.
+    for (model, reuse, hits) in [
+        (tiny_model(&backend), [0, 7, 7, 5, 1, 0], [7, 7, 8, 7, 2, 3]),
+        (gemma, [0, 7, 7, 0, 0, 0], [7, 0, 8, 0, 2, 0]),
+    ] {
+        let mut cached = PromptState::new(model.new_kv_cache(&backend, 64).unwrap());
+        for (i, tokens) in prompts.into_iter().enumerate() {
+            let (got, reused) = cached.prefill(&backend, &model, tokens).unwrap();
+            let mut kv = model.new_kv_cache(&backend, 64).unwrap();
+            let mut ws = model.alloc_workspace(&backend, tokens.len()).unwrap();
+            let want = model
+                .prefill(&backend, &mut kv, &mut ws, tokens, 0)
+                .unwrap();
+            assert_eq!(reused, reuse[i], "{tokens:?}");
+            assert_eq!(got, want);
+            // Appended generation must not contaminate later prompt hits.
+            let mut decode_ws = model.alloc_workspace(&backend, 1).unwrap();
+            for pos in tokens.len()..=tokens.len() + i % 2 {
+                model
+                    .forward(&backend, &mut cached.kv, &mut decode_ws, 9, pos as u32)
+                    .unwrap();
+            }
+            let (hit, reused) = cached.prefill(&backend, &model, tokens).unwrap();
+            assert_eq!(hit, want);
+            assert_eq!(reused, hits[i], "{tokens:?} again");
+            assert_eq!(cached.kv.len(), tokens.len());
+        }
+        assert!(cached.prefill(&backend, &model, &[]).is_err());
+        assert!(cached.prefill(&backend, &model, &[1; 65]).is_err());
     }
-    assert!(cached.prefill(&backend, &model, &[]).is_err());
-    assert!(cached.prefill(&backend, &model, &[1; 65]).is_err());
 }
 
 #[test]
@@ -170,7 +177,6 @@ fn clearing_a_reserved_lease_prevents_repopulation_before_allocation() {
 #[ignore = "requires MDMA_TEST_GGUF and ROCm hardware"]
 fn gpu_reuse_matches_explicit_chunked_prefill_after_graph_decode() {
     use crate::backend::rocm::HipBackend;
-    use crate::gguf::GgufModel;
     let _guard = crate::backend::rocm::tests::GPU_MODEL_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -225,7 +231,6 @@ fn gpu_reuse_matches_explicit_chunked_prefill_after_graph_decode() {
 #[ignore = "requires MDMA_TEST_GGUF and an idle ROCm GPU"]
 fn bench_prefix_reuse() {
     use crate::backend::rocm::HipBackend;
-    use crate::gguf::GgufModel;
     use std::time::Instant;
     let _guard = crate::backend::rocm::tests::GPU_MODEL_LOCK
         .lock()

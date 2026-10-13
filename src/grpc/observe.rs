@@ -47,6 +47,8 @@ pub(super) fn geometry<B: Backend>(backend: &B, model: &Model<B>) -> Option<Mode
         n_heads: saturating(config.n_heads),
         n_kv_heads: saturating(config.n_kv_heads),
         head_dim: saturating(config.head_dim),
+        // What one position costs while every layer still grows. Sliding-window
+        // layers stop at their window, so this bounds longer contexts from above.
         kv_bytes_per_token: model.kv_bytes(backend, 1).ok()? as u64,
         layer_kv_widths: model
             .kv_widths()
