@@ -2,7 +2,7 @@ use super::*;
 use mdma::grpc::ModelStatus;
 use rama::http::sse::datastar::EventData;
 
-fn status() -> Status {
+pub(in super::super) fn status() -> Status {
     Status {
         connected: true,
         state: "serving".into(),
@@ -22,7 +22,7 @@ fn status() -> Status {
 }
 
 /// (event type, selector-less element html or signals json)
-fn decode(events: Vec<Event>) -> Vec<(String, String)> {
+pub(in super::super) fn decode(events: Vec<Event>) -> Vec<(String, String)> {
     events
         .into_iter()
         .map(|event| {

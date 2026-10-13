@@ -64,7 +64,17 @@ fn pages_wire_datastar_and_the_unmorphed_scene() {
             scene < datastar,
             "{view:?}: the scene bridge must load before Datastar"
         );
+        assert!(
+            html.contains("chat: false"),
+            "the default has no chat template: {view:?}"
+        );
     }
+    let playground = decode_entities(&page(View::Playground, &status(), PIN)).into_owned();
+    assert!(
+        playground.contains(r#"data-on:change="@post('/playground/model')""#)
+            && playground.contains(r#"<label id="chat-toggle" class="check"><input type="checkbox" data-bind:chat="" disabled="">"#),
+        "choosing a model resets the playground: {playground}"
+    );
 }
 
 #[test]

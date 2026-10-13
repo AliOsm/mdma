@@ -100,6 +100,7 @@ async fn serve(config: Config, guard: ShutdownGuard) -> Result<(), BoxError> {
         .with_get("/sse/status", sse::status)
         .with_post("/playground/run", playground::run)
         .with_post("/playground/stop", playground::stop)
+        .with_post("/playground/model", playground::select)
         .with_post("/models/hold", leases::hold)
         .with_post("/models/release", leases::release)
         .with_get("/assets/datastar.js", DatastarScript::default())

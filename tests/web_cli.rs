@@ -280,6 +280,24 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
         status.contains(r#"\"n_layers\":2"#),
         "a loaded model's geometry reaches the scene JSON: {status}"
     );
+    // Choosing a model sizes the scene to it and, without a template, turns chat off.
+    let body = r#"{"model":"tiny"}"#;
+    let chosen = http(
+        port,
+        &format!(
+            "POST /playground/model HTTP/1.1\r\nHost: {host}\r\nCookie: {cookie}\r\nOrigin: http://{host}\r\n\
+             Datastar-Request: true\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
+        |_| false,
+    );
+    assert!(
+        chosen.contains(r#""chat":false"#)
+            && chosen.contains(r#""n_ctx":64"#)
+            && chosen.contains("no chat template")
+            && chosen.contains(r#"<pre id="output"></pre>"#),
+        "{chosen}"
+    );
     // The fixture has no chat template.
     let refused = run(
         &format!("http://{host}"),

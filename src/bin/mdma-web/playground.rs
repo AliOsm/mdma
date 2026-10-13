@@ -282,6 +282,42 @@ pub(super) async fn run(
     }))
 }
 
+/// What a page shows after choosing `name`: an idle generation sized to that
+/// model, an empty output, and chat on only when the model has a template.
+pub(super) fn selection(status: &super::upstream::Status, name: &str) -> Vec<Event> {
+    let model = status.model(name);
+    let chat = pages::chat_template(model).is_ok();
+    vec![
+        signals(&json!({
+            "chat": chat,
+            "_gen": {
+                "id": 0, "phase": "idle", "error": "",
+                "model": model.map_or(name, |m| m.name.as_str()),
+                "n_ctx": model.map_or(0, |m| m.n_ctx),
+                "kv_bytes_per_token": model.and_then(|m| m.geometry.as_ref()).map_or(0, |g| g.kv_bytes_per_token),
+                "max_tokens": 0, "emitted": 0, "tok_s": 0, "ttft_ms": 0, "dt_ms": 0,
+                "prompt_tokens": 0, "finish_reason": "", "prefill_ms": 0, "decode_ms": 0,
+            },
+        })),
+        element(pages::chat_toggle(model)),
+        element(pages::output()),
+        element(pages::run_error("")),
+    ]
+}
+
+pub(super) async fn select(
+    State(upstream): State<Arc<Upstream>>,
+    ReadSignals(signals): ReadSignals<Value>,
+) -> impl IntoResponse {
+    let name = signals["model"].as_str().unwrap_or_default().to_owned();
+    let events = selection(&upstream.snapshot(), &name);
+    Sse::new(stream_fn(move |mut yielder| async move {
+        for event in events {
+            yielder.yield_item(event).await;
+        }
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct StopQuery {
     id: u64,

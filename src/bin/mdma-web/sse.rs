@@ -97,4 +97,4 @@ pub(super) async fn status(
 
 #[cfg(test)]
 #[path = "sse/tests.rs"]
-mod tests;
+pub(super) mod tests;

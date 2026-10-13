@@ -39,10 +39,30 @@ impl View {
     }
 }
 
-const SIGNALS: &str = "{prompt: '', model: '', chat: true, system: 'You are a helpful assistant.', max_tokens: 128, temperature: '', top_p: '', min_p: '', \
-    repetition_penalty: '', _scene: '', _gen: {id: 0, phase: 'idle', model: '', n_ctx: 0, max_tokens: 0, \
-    emitted: 0, tok_s: 0, ttft_ms: 0, dt_ms: 0, prompt_tokens: 0, finish_reason: '', prefill_ms: 0, kv_bytes_per_token: 0, \
-    decode_ms: 0, error: ''}}";
+/// The page's signals; chat starts on when the default model has a chat template.
+fn signals(status: &Status) -> String {
+    format!(
+        "{{prompt: '', model: '', chat: {}, system: 'You are a helpful assistant.', max_tokens: 128, temperature: '', \
+         top_p: '', min_p: '', repetition_penalty: '', _scene: '', _gen: {{id: 0, phase: 'idle', model: '', n_ctx: 0, \
+         max_tokens: 0, emitted: 0, tok_s: 0, ttft_ms: 0, dt_ms: 0, prompt_tokens: 0, finish_reason: '', prefill_ms: 0, \
+         kv_bytes_per_token: 0, decode_ms: 0, error: ''}}}}",
+        chat_template(status.model("")).is_ok()
+    )
+}
+
+/// Generation is running; the model cannot change meanwhile.
+const BUSY: &str =
+    "$_gen.phase == 'loading' || $_gen.phase == 'prefill' || $_gen.phase == 'decode'";
+
+/// Whether `model` can take a chat turn, else why not.
+pub(super) fn chat_template(model: Option<&ModelStatus>) -> Result<(), &'static str> {
+    match model {
+        Some(m) if m.backend.starts_with("federated/") => Err("not on federated routes"),
+        Some(m) if m.chat_format.is_empty() => Err("no chat template"),
+        Some(_) => Ok(()),
+        None => Err("no such model"),
+    }
+}
 
 pub(super) fn page(view: View, status: &Status, pin: &str) -> String {
     html!(
@@ -59,7 +79,7 @@ pub(super) fn page(view: View, status: &Status, pin: &str) -> String {
             script!(r#type = "module", src = "/assets/datastar.js"),
         ),
         body!(
-            "data-signals" = SIGNALS,
+            "data-signals" = signals(status),
             "data-init" = format!(
                 "@get('/sse/status?view={}', {{filterSignals: {{include: /^$/}}}})",
                 view.key()
@@ -505,14 +525,31 @@ pub(super) fn model_select(status: &Status) -> impl IntoHtml + use<> {
     select!(
         id = "model-select",
         "data-bind:model" = "",
+        "data-on:change" = "@post('/playground/model')",
+        "data-attr:disabled" = BUSY,
         option!(value = "", format!("default ({})", status.default_model)),
         options,
     )
 }
 
+/// The chat toggle, off and disabled for a model that cannot chat.
+pub(super) fn chat_toggle(model: Option<&ModelStatus>) -> impl IntoHtml + use<> {
+    let unavailable = chat_template(model).err();
+    let input = if unavailable.is_some() {
+        input!(r#type = "checkbox", "data-bind:chat" = "", disabled = "").into_string()
+    } else {
+        input!(r#type = "checkbox", "data-bind:chat" = "").into_string()
+    };
+    label!(
+        id = "chat-toggle",
+        class = "check",
+        PreEscaped(input),
+        span!("chat template"),
+        unavailable.map(|why| small!(class = "hint", format!(" ({why})"))),
+    )
+}
+
 fn playground(status: &Status) -> impl IntoHtml + use<> {
-    const BUSY: &str =
-        "$_gen.phase == 'loading' || $_gen.phase == 'prefill' || $_gen.phase == 'decode'";
     (
         label!(span!("model"), model_select(status)),
         label!(
@@ -523,11 +560,7 @@ fn playground(status: &Status) -> impl IntoHtml + use<> {
                 placeholder = "Write a prompt…"
             )
         ),
-        label!(
-            class = "check",
-            input!(r#type = "checkbox", "data-bind:chat" = ""),
-            span!("chat template"),
-        ),
+        chat_toggle(status.model("")),
         label!(
             "data-show" = "$chat",
             span!("system"),

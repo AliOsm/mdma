@@ -96,3 +96,58 @@ fn rejects_bad_input_at_the_boundary() {
         assert!(error.contains(expected), "{signals}: {error}");
     }
 }
+
+#[test]
+fn choosing_a_model_resets_the_generation_and_follows_its_chat_template() {
+    use super::super::sse::tests::{decode, status};
+    use mdma::grpc::ModelStatus;
+    let mut status = status();
+    status.models[0].chat_format = "chatml".into();
+    status.models.push(ModelStatus {
+        name: "far".into(),
+        kind: "gguf".into(),
+        backend: "federated/cuda".into(),
+        n_ctx: 131_072,
+        ready: true,
+        ..ModelStatus::default()
+    });
+    let chosen = |status: &super::super::upstream::Status, name: &str| {
+        let events = decode(selection(status, name));
+        let signals: Value = serde_json::from_str(&events[0].1).unwrap();
+        let ids: Vec<_> = events[1..]
+            .iter()
+            .map(|(_, html)| html.split('"').nth(1).unwrap_or_default().to_owned())
+            .collect();
+        assert_eq!(ids, ["chat-toggle", "output", "run-error"], "{events:?}");
+        (signals, events[1].1.clone())
+    };
+
+    let (signals, toggle) = chosen(&status, "");
+    assert_eq!(signals["chat"], true, "the default has a chat template");
+    assert_eq!(
+        (
+            &signals["_gen"]["n_ctx"],
+            &signals["_gen"]["phase"],
+            &signals["_gen"]["model"]
+        ),
+        (&json!(512), &json!("idle"), &json!("tiny"))
+    );
+    assert!(!toggle.contains("disabled"), "{toggle}");
+
+    for (name, n_ctx, why) in [
+        ("far", 131_072, "not on federated routes"),
+        ("nope", 0, "no such model"),
+    ] {
+        let (signals, toggle) = chosen(&status, name);
+        assert_eq!(
+            (&signals["chat"], &signals["_gen"]["n_ctx"]),
+            (&json!(false), &json!(n_ctx))
+        );
+        assert!(
+            toggle.contains("disabled") && toggle.contains(why),
+            "{toggle}"
+        );
+    }
+    status.models[0].chat_format = String::new();
+    assert!(chosen(&status, "tiny").1.contains("no chat template"));
+}
