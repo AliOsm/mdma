@@ -6,7 +6,7 @@
 //! instruction chunks and waits for the completion interrupt; the program's own DMA
 //! descriptors then move inputs, parameters and outputs. `executable` is the program
 //! model, `link` patches the addresses in, `address_space` hands out device
-//! addresses, `regs` names the registers, `pcie` is the FreeBSD transport and `tpu`
+//! addresses, `regs` names the registers, `pcie` is the transport over the FreeBSD or Linux driver and `tpu`
 //! runs a program end to end. `isa` encodes the instructions and `codegen` builds
 //! programs from them, checked word for word against the compiler-exact corpus.
 
@@ -15,10 +15,10 @@ pub mod codegen;
 pub mod executable;
 pub mod isa;
 pub mod link;
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 pub mod pcie;
 pub mod regs;
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 pub mod tpu;
 
 pub type Result<T> = std::result::Result<T, Error>;

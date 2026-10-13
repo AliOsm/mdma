@@ -2,7 +2,8 @@
 //! FULLY_CONNECTED programs from the offline oracle (byte-identical to
 //! edgetpu_compiler's), their parameters, an input and the
 //! output the chip must produce. Every fixture is validated and linked on any host;
-//! with `MDMA_CORAL_DEVICE` set (FreeBSD, `/dev/apexN`) they also run on the card.
+//! with `MDMA_CORAL_DEVICE` set (`/dev/apexN` on FreeBSD, `/dev/apex_N` on Linux)
+//! they also run on the card.
 #![cfg(feature = "coral")]
 
 use mdma::backend::coral::executable::{
@@ -11,16 +12,16 @@ use mdma::backend::coral::executable::{
 use mdma::backend::coral::link::{Addresses, link, read_u32};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 use std::sync::Mutex;
 
 /// One test at a time may hold the device open.
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 static DEVICE: Mutex<()> = Mutex::new(());
 
 /// The card named by `MDMA_CORAL_DEVICE`, opened for one test at a time; `None`
 /// (not on hardware) when the variable is unset.
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 fn open_device() -> Option<(
     std::sync::MutexGuard<'static, ()>,
     mdma::backend::coral::tpu::Tpu,
@@ -248,7 +249,7 @@ fn fixtures_validate_and_link() {
     }
 }
 
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 #[test]
 fn programs_run_bit_exact_on_the_card() {
     let Some((_guard, mut tpu)) = open_device() else {
@@ -290,10 +291,10 @@ fn programs_run_bit_exact_on_the_card() {
 }
 
 /// A small deterministic generator for weights and inputs (xorshift64*).
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 struct Xorshift(u64);
 
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 impl Xorshift {
     fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
@@ -314,7 +315,7 @@ impl Xorshift {
 }
 
 /// Generated FULLY_CONNECTED programs, run against the bit-exact reference.
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
 #[test]
 fn generated_programs_run_bit_exact_on_the_card() {
     use mdma::backend::coral::codegen::Quant;

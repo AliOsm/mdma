@@ -1,16 +1,32 @@
 //! The system calls behind the transport: mmap of device pages, gasket and apex
-//! ioctls, volatile register access and the non-blocking event read. Every unsafe
-//! block states the invariant it relies on; nothing else in the backend is unsafe.
+//! ioctls, volatile register access and non-blocking reads of the device (FreeBSD
+//! events) or of eventfds (Linux). Every unsafe block states the invariant it
+//! relies on; nothing else in the backend is unsafe.
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
+#[cfg(target_os = "linux")]
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::ptr;
 
-// FreeBSD ioctl encoding (<sys/ioccom.h>): the parameter length is part of the number.
-const IOCPARM_MASK: u64 = 0x1fff;
-const IOC_VOID: u64 = 0x2000_0000;
-const IOC_OUT: u64 = 0x4000_0000;
-const IOC_IN: u64 = 0x8000_0000;
+// The ioctl number carries the parameter length on both systems; the direction
+// bits sit in the same place but mean the opposite, and Linux keeps one more size bit.
+cfg_select! {
+    target_os = "freebsd" => {
+        // <sys/ioccom.h>
+        const IOCPARM_MASK: u64 = 0x1fff;
+        const IOC_VOID: u64 = 0x2000_0000;
+        const IOC_OUT: u64 = 0x4000_0000;
+        const IOC_IN: u64 = 0x8000_0000;
+    }
+    _ => {
+        // <asm-generic/ioctl.h>: _IOC_NONE, _IOC_WRITE and _IOC_READ in the top two bits.
+        const IOCPARM_MASK: u64 = 0x3fff;
+        const IOC_VOID: u64 = 0;
+        const IOC_IN: u64 = 1 << 30;
+        const IOC_OUT: u64 = 2 << 30;
+    }
+}
 
 const fn ioc(inout: u64, group: u8, num: u8, len: usize) -> libc::c_ulong {
     (inout | ((len as u64 & IOCPARM_MASK) << 16) | ((group as u64) << 8) | num as u64)
@@ -52,6 +68,14 @@ pub(super) struct PerformanceExpectationIoctl {
     pub performance: u32,
 }
 
+/// `struct gasket_interrupt_eventfd`: which eventfd an interrupt signals.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub(super) struct InterruptEventfdIoctl {
+    pub interrupt: u64,
+    pub event_fd: u64,
+}
+
 const _: () = assert!(size_of::<PageTableIoctl>() == 32);
 const _: () = assert!(size_of::<PageTableIoctlFlags>() == 40);
 const _: () = assert!(size_of::<CoherentAllocConfigIoctl>() == 32);
@@ -83,6 +107,17 @@ pub(super) const APEX_IOCTL_PERFORMANCE_EXPECTATION: libc::c_ulong = ioc(
     reason = "the void-argument encoding is kept next to the ones in use"
 )]
 pub(super) const GASKET_IOCTL_RESET: libc::c_ulong = ioc(IOC_VOID, GASKET_IOC_GROUP, 0, 0);
+#[cfg(target_os = "linux")]
+pub(super) const GASKET_IOCTL_SET_EVENTFD: libc::c_ulong = ioc(
+    IOC_IN,
+    GASKET_IOC_GROUP,
+    1,
+    size_of::<InterruptEventfdIoctl>(),
+);
+/// Takes the interrupt index as an `unsigned long`.
+#[cfg(target_os = "linux")]
+pub(super) const GASKET_IOCTL_CLEAR_EVENTFD: libc::c_ulong =
+    ioc(IOC_IN, GASKET_IOC_GROUP, 2, size_of::<libc::c_ulong>());
 
 /// DMA direction flags of `GASKET_IOCTL_MAP_BUFFER_FLAGS`, already shifted into place.
 pub(super) const GASKET_DMA_BIDIRECTIONAL: u32 = 0 << 1;
@@ -185,6 +220,31 @@ pub(super) fn ioctl<T>(fd: BorrowedFd<'_>, request: libc::c_ulong, arg: &mut T) 
         Err(io::Error::last_os_error())
     } else {
         Ok(())
+    }
+}
+
+/// A non-blocking, close-on-exec eventfd for the driver to signal.
+#[cfg(target_os = "linux")]
+pub(super) fn eventfd() -> io::Result<OwnedFd> {
+    // SAFETY: eventfd takes no pointers; the descriptor is checked before use.
+    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a descriptor the kernel just returned, owned by nothing else.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// How many times the eventfd was signalled since the last read; zero when it was not.
+#[cfg(target_os = "linux")]
+pub(super) fn read_eventfd(fd: BorrowedFd<'_>) -> io::Result<u64> {
+    let mut buf = [0u8; 8];
+    match read_nonblocking(fd, &mut buf)? {
+        0 => Ok(0),
+        8 => Ok(u64::from_ne_bytes(buf)),
+        n => Err(io::Error::other(format!(
+            "eventfd read returned {n} bytes, not 8"
+        ))),
     }
 }
 

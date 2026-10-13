@@ -1,8 +1,10 @@
-//! The `apex` character device on FreeBSD: register pages, page-table mappings
-//! through the `gasket` ioctls, the coherent block the instruction queue lives in,
-//! and interrupt events. The ioctl layouts are Google's gasket ABI, which the
-//! FreeBSD driver keeps on purpose.
+//! The `apex` character device: register pages, page-table mappings through the
+//! `gasket` ioctls, the coherent block the instruction queue lives in, and
+//! interrupt events. The ioctl layouts are Google's gasket ABI, which the FreeBSD
+//! driver keeps on purpose, so Linux and FreeBSD differ only in the ioctl number
+//! encoding, the device name and how interrupts reach user space (`events`).
 
+mod events;
 pub mod host_queue;
 #[allow(unsafe_code)]
 mod os;
@@ -47,11 +49,12 @@ pub mod interrupt {
     ];
 }
 
-/// One interrupt the kernel driver delivered (`struct gasket_interrupt_event`).
+/// One interrupt the kernel driver delivered: FreeBSD's `struct
+/// gasket_interrupt_event`, or an eventfd that fired on Linux.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {
     pub interrupt: u32,
-    /// Events lost before this one because the kernel ring was full.
+    /// Events lost before this one because the kernel ring was full (FreeBSD only).
     pub dropped: u32,
     /// Cumulative count of this interrupt.
     pub count: u64,
@@ -142,12 +145,13 @@ impl Coherent {
     }
 }
 
-/// An open `/dev/apexN`.
+/// An open `/dev/apexN` (FreeBSD) or `/dev/apex_N` (Linux).
 pub struct Device {
     path: String,
     file: File,
     regions: Vec<os::Mapping>,
     coherent: Option<Coherent>,
+    events: events::Source,
 }
 
 impl Device {
@@ -159,8 +163,8 @@ impl Device {
                 source,
             }
         };
-        // Non-blocking at open: event reads must not block, and the driver answers
-        // FIONBIO (what fcntl would send) with ENOTTY.
+        // Non-blocking at open: FreeBSD event reads must not block, and that driver
+        // answers FIONBIO (what fcntl would send) with ENOTTY. Linux ignores the flag.
         let file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -174,11 +178,14 @@ impl Device {
                     .map_err(at("map registers"))?,
             );
         }
+        let events =
+            events::Source::attach(file.as_fd()).map_err(at("register interrupt events"))?;
         Ok(Self {
             path: path.into(),
             file,
             regions,
             coherent: None,
+            events,
         })
     }
 
@@ -405,31 +412,18 @@ impl Device {
         .map_err(|e| self.io("set performance", e))
     }
 
-    /// Every interrupt event the kernel has queued, without blocking.
-    pub fn events(&self) -> Result<Vec<Event>> {
+    /// Every interrupt event the kernel has delivered since the last call, without blocking.
+    pub fn events(&mut self) -> Result<Vec<Event>> {
         let mut events = Vec::new();
-        let mut buf = [0u8; Event::BYTES * 32];
-        loop {
-            let n = os::read_nonblocking(self.file.as_fd(), &mut buf)
-                .map_err(|e| self.io("read events", e))?;
-            if n == 0 {
-                return Ok(events);
-            }
-            if n % Event::BYTES != 0 {
-                return Err(Error::Protocol(format!(
-                    "event read returned {n} bytes, not a multiple of {}",
-                    Event::BYTES
-                )));
-            }
-            for raw in buf[..n].as_chunks::<{ Event::BYTES }>().0 {
-                events.push(Event {
-                    interrupt: u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
-                    dropped: u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
-                    count: u64::from_le_bytes([
-                        raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
-                    ]),
-                });
-            }
-        }
+        self.events
+            .drain(self.file.as_fd(), &mut events)
+            .map_err(|e| self.io("read events", e))?;
+        Ok(events)
+    }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        self.events.detach(self.file.as_fd());
     }
 }

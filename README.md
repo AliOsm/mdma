@@ -89,7 +89,7 @@ The compute and memory planes are hand-rolled on purpose; everything else
 | Vulkan | `vulkan` | Vulkan 1.2 GPU with buffer-device-address + int64, including AMD APUs and pre-RDNA3 parts via RADV | f32 math, device-local buffers, wave-cooperative matvec and attention, LDS-tiled prefill GEMM; optional f16 staging selected by load-time speed and logit-drift checks (`MDMA_VK_F16_WEIGHTS=auto\|1\|0`) |
 | CUDA | `cuda` | NVIDIA through the driver API (Ampere `sm_86` by default) | vectorized K-quant matvec (4 rows per warp), key-split attention; kernels compiled to PTX by clang, no CUDA toolkit |
 | Metal | `metal` | Apple silicon (unified memory), macOS 12+ | request-owned decode batching, f32 tiled prefill, fused FFN/residual-norm, online causal attention; F32/F16/BF16 and Q4_K/Q5_K/Q6_K weights, f32 KV |
-| Coral Edge TPU | in progress | PCIe/M.2 and USB Coral | detected by `mdma info` and `mdma doctor` on Linux and FreeBSD; compute backend in progress |
+| Coral Edge TPU | in progress | PCIe/M.2 and USB Coral | detected by `mdma info` and `mdma doctor` on Linux and FreeBSD; the `coral` feature runs its own FULLY_CONNECTED programs on PCIe cards through the `apex`/`gasket` drivers on both; model backend in progress |
 
 ### Models
 

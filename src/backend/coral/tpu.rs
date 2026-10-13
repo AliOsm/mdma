@@ -16,6 +16,12 @@ use super::regs::{self, RunControl};
 use super::{Error, Result};
 use std::time::{Duration, Instant};
 
+/// The first card's node, as each driver names it.
+pub const DEFAULT_DEVICE: &str = cfg_select! {
+    target_os = "linux" => { "/dev/apex_0" }
+    _ => { "/dev/apex0" }
+};
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub device: String,
@@ -27,7 +33,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            device: "/dev/apex0".into(),
+            device: DEFAULT_DEVICE.into(),
             performance: Performance::High,
             timeout: Duration::from_secs(5),
         }
