@@ -6,7 +6,7 @@ mod fixture;
 #[path = "runtime_cli/process.rs"]
 mod process;
 
-use process::{Process, command};
+use process::{Process, command, free_port};
 use rustls_pki_types::pem::PemObject;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -29,14 +29,6 @@ fn ok(output: &Output) -> String {
     text
 }
 
-fn port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 fn path(path: &Path) -> &str {
     path.to_str().unwrap()
 }
@@ -57,7 +49,7 @@ impl Node {
             "--id",
             &id,
             "--endpoint",
-            &format!("https://127.0.0.1:{}", port()),
+            &format!("https://127.0.0.1:{}", free_port()),
             "--days",
             "1",
         ]));
@@ -69,7 +61,7 @@ impl Node {
         Self {
             dir,
             models,
-            client: port(),
+            client: free_port(),
         }
     }
 

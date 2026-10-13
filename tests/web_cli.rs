@@ -5,7 +5,7 @@ mod fixture;
 #[path = "runtime_cli/process.rs"]
 mod process;
 
-use process::{Process, command};
+use process::{Process, command, free_port};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::process::{Command, Stdio};
@@ -94,16 +94,14 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
     let pin = String::from_utf8(pin.stdout).unwrap().trim().to_owned();
     assert!(pin.starts_with("sha256:") && pin.len() == 71, "{pin}");
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let serve_addr = listener.local_addr().unwrap();
-    drop(listener);
+    let serve_port = free_port();
     let serve_log = dir.path().join("serve.log");
     let server = Process(
         command(env!("CARGO_BIN_EXE_mdma-serve"))
             .env("MDMA_MODELS_DIR", &models)
             .env("MDMA_MAX_OUTPUT_TOKENS", "4")
             .env("MDMA_BACKEND", "cpu")
-            .env("MDMA_LISTEN", serve_addr.to_string())
+            .env("MDMA_LISTEN", format!("127.0.0.1:{serve_port}"))
             .env("MDMA_POWER", "off")
             .env("MDMA_OPERATOR_SPKI", &pin)
             .env("MDMA_NODE_NAME", "e2e-node")
@@ -120,7 +118,7 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
         command(env!("CARGO_BIN_EXE_mdma-web"))
             .env("MDMA_WEB_LISTEN", "127.0.0.1:0")
             .env("MDMA_WEB_WATCH_MS", "250")
-            .env("MDMA_ADDR", format!("localhost:{}", serve_addr.port()))
+            .env("MDMA_ADDR", format!("localhost:{serve_port}"))
             .env("MDMA_TLS_CERT", certs.join("client.pem"))
             .env("MDMA_TLS_KEY", certs.join("client-key.pem"))
             .env("MDMA_TLS_CA", certs.join("ca.pem"))

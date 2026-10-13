@@ -11,6 +11,15 @@ impl Drop for Process {
     }
 }
 
+/// A loopback port nothing listens on now, for a child to bind.
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 /// `binary` without the caller's MDMA_* environment.
 pub fn command(binary: &str) -> Command {
     let mut command = Command::new(binary);

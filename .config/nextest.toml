@@ -3,5 +3,5 @@
 mdma-serve = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(web_cli) | binary(fed_cli) | binary(checkpoint_cli)'
+filter = 'binary(web_cli) | binary(fed_cli) | binary(checkpoint_cli) | binary(lazy_cli)'
 test-group = 'mdma-serve'
