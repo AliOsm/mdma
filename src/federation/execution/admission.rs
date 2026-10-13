@@ -279,18 +279,25 @@ where
         let Some(decoder) = loaded.decoder() else {
             return Err(Status::failed_precondition("selection_changed"));
         };
+        // The catalog advertises the configured maxima; power caps apply here
+        // and `Accepted` reports them.
+        let (mut n_ctx, mut max_tokens) = (
+            n_ctx as usize,
+            request.max_tokens.min(max_output_tokens) as usize,
+        );
+        if let Some(limits) = self.inventory.degraded_limits() {
+            n_ctx = n_ctx.min(limits.n_ctx);
+            max_tokens = max_tokens.min(limits.max_tokens);
+        }
         let session = Session::new(
             self.backend.clone(),
             decoder.model.clone(),
             decoder.tokenizer.clone(),
             sampler(request.sampler.as_ref()),
-            n_ctx as usize,
+            n_ctx,
         );
         let prepared = session
-            .prepare_federated(
-                &request.prompt,
-                request.max_tokens.min(max_output_tokens) as usize,
-            )
+            .prepare_federated(&request.prompt, max_tokens)
             .map_err(|error| native_error(&error))?;
         let admission = prepared.admission().clone();
         let guard = self

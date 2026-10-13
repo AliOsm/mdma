@@ -204,7 +204,10 @@ Each descriptor contains:
 `synthesize` limits contain positive `n_ctx` and `max_output_tokens`, with
 `max_output_tokens <= n_ctx`. A native executor advertises its model's context
 (the trained one, or its `MDMA_N_CTX` when lower) and the lower of that and its
-output cap (`MDMA_MAX_OUTPUT_TOKENS`); both shrink while it is degraded. `decide` limits contain positive
+output cap (`MDMA_MAX_OUTPUT_TOKENS`). These are the configured maxima in every
+power state: a degraded executor applies its battery caps when it admits a
+request and reports them in `Accepted`, so a power flip changes
+`server_state`, never the selection. `decide` limits contain positive
 `max_questions` and `max_result_bytes`, capped at 128 and 524288 respectively.
 Only the matching operation's limit fields are permitted.
 
@@ -213,8 +216,9 @@ names in a snapshot are invalid. Multiple aliases may identify the same
 artifact with different limits.
 
 `critical` and `draining` catalogs MUST mark every model unready. A degraded
-node may advertise ready models with reduced effective limits. Origins MUST
-exclude unready models and nonaccepting nodes from new route selection.
+node keeps its models ready and their limits unchanged; it admits requests
+with lower effective caps. Origins MUST exclude unready models and
+nonaccepting nodes from new route selection.
 
 For GGUF, `artifact_id` is SHA-256 of the complete GGUF bytes, including its
 embedded tokenizer and metadata, not its pathname, size or model label.

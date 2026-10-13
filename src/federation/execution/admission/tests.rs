@@ -420,24 +420,73 @@ async fn policy_changes_during_validation_cannot_emit_accepted() {
 }
 
 #[tokio::test]
-async fn power_recheck_between_admission_and_accepted_rejects_critical() {
-    let (f, _, binding, message) = setup();
+async fn power_caps_apply_at_admission_and_only_critical_stops_a_flipped_request() {
+    use crate::power::{DegradedLimits, PowerStatus, ServerState as PowerState};
+    let (f, _, binding, mut message) = setup();
     grant(&f, Some("native"));
-    let (tx, rx) = tokio::sync::watch::channel(crate::power::PowerStatus::default());
-    let native = crate::federation::inventory::tests::native_service()
-        .with_power(rx, crate::power::DegradedLimits::default());
-    let service = Service::new(f.store.clone(), native.federation_executor());
-    let mut stream = service.synthesize(request(message, &binding)).unwrap();
-    tx.send(crate::power::PowerStatus {
-        state: crate::power::ServerState::Critical,
+    let status = |state| PowerStatus {
+        state,
         reading: None,
-    })
-    .unwrap();
-    assert_eq!(
-        stream.next().await.unwrap().unwrap_err().code(),
-        Code::Unavailable
+    };
+    let (tx, rx) = tokio::sync::watch::channel(PowerStatus::default());
+    let native = crate::federation::inventory::tests::native_service().with_power(
+        rx,
+        DegradedLimits {
+            n_ctx: 12,
+            max_tokens: 2,
+        },
     );
-    assert!(stream.next().await.is_none());
+    let service = Service::new(f.store.clone(), native.federation_executor());
+    let descriptor = service.executor.descriptor("native").unwrap();
+    // Power at admission, a flip before Accepted, and the (n_ctx, max_tokens)
+    // Accepted then reports; the flip neither re-caps nor aborts the request.
+    for (id, admitted, flipped, caps) in [
+        (1, PowerState::Degraded, PowerState::Serving, Some((12, 2))),
+        (2, PowerState::Serving, PowerState::Degraded, Some((32, 3))),
+        (3, PowerState::Serving, PowerState::Critical, None),
+    ] {
+        message.envelope.as_mut().unwrap().request_id = vec![id; 16];
+        tx.send(status(admitted)).unwrap();
+        let mut stream = service
+            .synthesize(request(message.clone(), &binding))
+            .unwrap();
+        tx.send(status(flipped)).unwrap();
+        let Some((n_ctx, max_tokens)) = caps else {
+            assert_eq!(
+                stream.next().await.unwrap().unwrap_err().code(),
+                Code::Unavailable
+            );
+            assert!(stream.next().await.is_none());
+            continue;
+        };
+        assert_eq!(service.executor.descriptor("native").unwrap(), descriptor);
+        let Some(Event::Accepted(accepted)) = stream.next().await.unwrap().unwrap().event else {
+            panic!("Accepted first");
+        };
+        assert_eq!(
+            (accepted.prompt_tokens, accepted.n_ctx, accepted.max_tokens),
+            (3, n_ctx, max_tokens)
+        );
+        let mut emitted = 0;
+        let completed = loop {
+            match stream.next().await.unwrap().unwrap().event.unwrap() {
+                Event::Token(_) => emitted += 1,
+                Event::Completed(completed) => break completed,
+                Event::Accepted(_) => panic!("duplicate admission"),
+            }
+        };
+        assert_eq!(completed.emitted_tokens, emitted);
+        assert!(emitted <= max_tokens);
+        assert!(stream.next().await.is_none());
+    }
+    // The degraded context refuses a prompt the configured one would take.
+    message.envelope.as_mut().unwrap().request_id = vec![4; 16];
+    message.prompt = "x".repeat(13);
+    tx.send(status(PowerState::Degraded)).unwrap();
+    assert_eq!(
+        failure(&service, message, &binding),
+        Code::ResourceExhausted
+    );
 }
 
 #[tokio::test]

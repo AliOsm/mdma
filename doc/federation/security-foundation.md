@@ -234,10 +234,12 @@ Aliases share the file's context as well as its artifact/profile IDs.
 
 Catalog state follows serving/degraded/critical/draining; native load failures
 also degrade serving state. Critical/draining models are unready. A closed power
-watcher fails closed as critical unless already draining. During power
-degradation, decoder context and output caps use the same native admission
-limits. These request-dependent caps are not part of the numerical profile;
-power transitions do not change its digest. Readiness is **not** a promise of
+watcher fails closed as critical unless already draining. Decoder limits are
+the configured maxima in every power state. During power degradation the
+executor applies the same context and output caps as native admission when it
+admits a federated request and reports them in `Accepted`; they are not part
+of the catalog or the numerical profile, so power transitions change neither
+the selection nor the profile digest. Readiness is **not** a promise of
 memory admission, execution permission, routing permission or shared capacity.
 
 Input/decision limits are bounded by the v1 protocol ceilings (65,536 input

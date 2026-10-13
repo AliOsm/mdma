@@ -69,6 +69,7 @@ The advertised input bound is a byte bound, not a token count. The executor
 tokenizes and applies its actual trained/model/power context limits.
 For `Synthesize`, the accepted output cap may be reduced by these limits
 as in local serving, but the resolved cap MUST be reported in admission.
+Power caps apply here, not in the catalog, which keeps the configured maxima.
 An overlong prompt or a request with no permissible output space is rejected.
 
 ## 3. Admission and duplicate IDs
@@ -137,8 +138,10 @@ The origin preserves event order and content without resampling.
 
 `Completed` includes the request ID, emitted token count and a finish reason:
 `eos`, `max_tokens` or `context_limit`. Counts refer to emitted token events,
-not hidden EOS handling. Completion is emitted only once the worker has
-finished and its execution resources can safely be released.
+not hidden EOS handling. It also carries the executor's `prefill_ms` (worker
+launch to first token) and `decode_ms` (first to last token); together they
+cannot exceed the request's `timeout_ms`. Completion is emitted only once the
+worker has finished and its execution resources can safely be released.
 
 Success requires both a valid `Completed` event and gRPC `OK` termination.
 An empty stream, missing/duplicate completion, out-of-order token index,

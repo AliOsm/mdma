@@ -3,8 +3,8 @@
 use crate::federation::{
     catalog::{Limits, ModelDescriptor},
     control::{
-        Accepted, DecideRequest, DecideResponse, ExecutionEnvelope, SamplerConfig, SynthesizeEvent,
-        SynthesizeRequest, synthesize_event::Event,
+        Accepted, Completed, DecideRequest, DecideResponse, ExecutionEnvelope, SamplerConfig,
+        SynthesizeEvent, SynthesizeRequest, synthesize_event::Event,
     },
 };
 use rama::http::grpc::Status;
@@ -89,7 +89,7 @@ pub(super) struct Synthesis {
     catalog_ctx: u32,
     accepted: Option<Accepted>,
     emitted: u32,
-    completed: bool,
+    completed: Option<Completed>,
     failed: bool,
 }
 
@@ -121,7 +121,7 @@ impl Synthesis {
             catalog_ctx: n_ctx,
             accepted: None,
             emitted: 0,
-            completed: false,
+            completed: None,
             failed: false,
         })
     }
@@ -139,7 +139,7 @@ impl Synthesis {
 
     fn check_event(&mut self, wire: &SynthesizeEvent) -> Result<(), Status> {
         use rama::http::grpc::protobuf::prost::Message;
-        if self.completed || wire.encoded_len() > 64 * 1024 {
+        if self.completed.is_some() || wire.encoded_len() > 64 * 1024 {
             return Err(failure());
         }
         match wire.event.as_ref().ok_or_else(failure)? {
@@ -174,8 +174,11 @@ impl Synthesis {
             }
             Event::Completed(completed) => {
                 let accepted = self.accepted.as_ref().ok_or_else(failure)?;
+                // The executor's timings fit within the request's budget.
                 if completed.request_id != self.envelope.request_id
                     || completed.emitted_tokens != self.emitted
+                    || completed.prefill_ms.saturating_add(completed.decode_ms)
+                        > self.envelope.timeout_ms
                 {
                     return Err(failure());
                 }
@@ -191,7 +194,7 @@ impl Synthesis {
                 if !valid_reason {
                     return Err(failure());
                 }
-                self.completed = true;
+                self.completed = Some(completed.clone());
             }
         }
         Ok(())
@@ -199,12 +202,13 @@ impl Synthesis {
 
     /// `None` is only obtained from the actual gRPC stream's validated OK EOF,
     /// never from the HTTP connection future or a locally closed channel.
-    pub(super) fn finish(self, terminal: Result<(), Status>) -> Result<(), Status> {
+    /// Returns the completion only once the whole stream has validated.
+    pub(super) fn finish(self, terminal: Result<(), Status>) -> Result<Completed, Status> {
         terminal?;
-        if self.failed || !self.completed {
+        if self.failed {
             return Err(failure());
         }
-        Ok(())
+        self.completed.ok_or_else(failure)
     }
 }
 

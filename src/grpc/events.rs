@@ -1,16 +1,12 @@
 //! `emit_events` Synthesize: accepted, tokens, completed.
 use super::proto::{SynthesizeAccepted, SynthesizeCompleted, SynthesizeResponse};
 use super::{TokenStream, native_status};
-use crate::session::tracked::Running;
+use crate::session::tracked::{Running, Timing};
 use crate::session::worker::{Admission, WorkerEnd};
 use rama::futures::async_stream::stream_fn;
 use rama::http::grpc::Status;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio_stream::StreamExt;
-
-fn millis(duration: Duration) -> u32 {
-    u32::try_from(duration.as_millis()).unwrap_or(u32::MAX)
-}
 
 fn saturating(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
@@ -31,11 +27,9 @@ pub(super) fn stream(admission: &Admission, running: Running, started: Instant) 
             }))
             .await;
         let Running { mut tokens, worker } = running;
-        let (mut first, mut last, mut emitted) = (None::<Instant>, started, 0_u32);
+        let (mut timing, mut emitted) = (Timing::new(started), 0_u32);
         while let Some(token) = tokens.next().await {
-            let now = Instant::now();
-            first.get_or_insert(now);
-            last = now;
+            timing.token();
             emitted += 1;
             let token = token.token();
             yielder
@@ -70,14 +64,14 @@ pub(super) fn stream(admission: &Admission, running: Running, started: Instant) 
                 )))
                 .await;
         }
-        let first = first.unwrap_or_else(Instant::now);
+        let (prefill_ms, decode_ms) = timing.millis();
         yielder
             .yield_item(Ok(SynthesizeResponse {
                 completed: Some(SynthesizeCompleted {
                     emitted_tokens: emitted,
                     finish_reason: completion.reason.as_str().into(),
-                    prefill_ms: millis(first.duration_since(started)),
-                    decode_ms: millis(last.saturating_duration_since(first)),
+                    prefill_ms,
+                    decode_ms,
                 }),
                 ..SynthesizeResponse::default()
             }))

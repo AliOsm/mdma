@@ -160,7 +160,9 @@ FreeBSD `hw.acpi.acline`, macOS IOKit internal battery). On battery it goes
 at `MDMA_DEGRADED_N_CTX` (2048). Output is further capped to the context space
 left after the prompt, respecting the server and model context limits.
 Overlong prompts, or full-context prompts requesting output, get
-`RESOURCE_EXHAUSTED` before streaming.
+`RESOURCE_EXHAUSTED` before streaming. A federation executor applies the same
+caps to routed requests; its catalog reports `degraded` but keeps advertising
+the configured limits, so going on or off battery does not break routes.
 At or below `MDMA_POWER_CRITICAL_PCT` (10) it refuses new generations with
 `UNAVAILABLE` and lets running streams finish. The supply is polled every
 `MDMA_POWER_POLL_SECS` (5), and a change must hold for `MDMA_POWER_DEBOUNCE`
@@ -194,7 +196,8 @@ window). Responses stream one token at a time with its decoded text.
 
 - `emit_events`: an `accepted` message before the tokens (prompt tokens, output
   cap, `n_ctx`) and a `completed` one after them (emitted tokens, finish
-  reason, prefill and decode milliseconds).
+  reason, prefill and decode milliseconds). Routed models report the
+  executor's numbers and timings.
 - `chat`: the prompt is sent as a user turn in the model's chat format
   (`ModelStatus.chat_format`: `chatml`, `llama3`, `zephyr`, `gemma`, `gemma4`
   or `inst`). `system` adds a system message. `mdma-client` sets them with

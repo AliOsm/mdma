@@ -9,5 +9,5 @@ pub(crate) fn validate_probe(
     for event in events {
         validation.event(event)?;
     }
-    validation.finish(Ok(()))
+    validation.finish(Ok(())).map(drop)
 }

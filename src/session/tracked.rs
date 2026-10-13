@@ -1,5 +1,6 @@
 //! Isolated token handoff with an explicit job join. EOF alone is not success.
 use super::*;
+use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use worker::{Prepared, WorkerEnd};
@@ -52,6 +53,41 @@ pub(crate) type Boundary = Arc<dyn Fn() -> bool + Send + Sync>;
 pub(crate) struct Running {
     pub tokens: Tokens,
     pub worker: JoinHandle<BResult<WorkerEnd>>,
+}
+
+/// Prefill and decode time of one run, as `completed` events report them.
+pub(crate) struct Timing {
+    started: Instant,
+    first: Option<Instant>,
+    last: Instant,
+}
+
+impl Timing {
+    /// `started` is when the worker was launched.
+    pub(crate) const fn new(started: Instant) -> Self {
+        Self {
+            started,
+            first: None,
+            last: started,
+        }
+    }
+
+    /// Records a token handed to the response now.
+    pub(crate) fn token(&mut self) {
+        let now = Instant::now();
+        self.first.get_or_insert(now);
+        self.last = now;
+    }
+
+    /// Milliseconds to the first token, and from it to the last one.
+    pub(crate) fn millis(&self) -> (u32, u32) {
+        let millis = |d: Duration| u32::try_from(d.as_millis()).unwrap_or(u32::MAX);
+        let first = self.first.unwrap_or_else(Instant::now);
+        (
+            millis(first.duration_since(self.started)),
+            millis(self.last.saturating_duration_since(first)),
+        )
+    }
 }
 
 impl<B> Session<B>

@@ -69,12 +69,15 @@ fn token(index: u32) -> SynthesizeEvent {
         })),
     }
 }
+/// Timings use up the fixture's whole 1000 ms budget.
 fn completed(count: u32, reason: &str) -> SynthesizeEvent {
     SynthesizeEvent {
         event: Some(Event::Completed(Completed {
             request_id: vec![1; 16],
             emitted_tokens: count,
             finish_reason: reason.into(),
+            prefill_ms: 600,
+            decode_ms: 400,
         })),
     }
 }
@@ -82,26 +85,32 @@ fn completed(count: u32, reason: &str) -> SynthesizeEvent {
 #[test]
 fn valid_order_caps_eos_context_and_ok_are_all_required() {
     let (request, descriptor, accepted) = fixture();
-    for (count, reason) in [(0, "eos"), (2, "eos"), (4, "max_tokens")] {
+    // (n_ctx, max_tokens) admitted, tokens emitted and the finish reason. The
+    // catalog offers (32, 8) and the request asks for 4; a degraded executor
+    // admits below both, with a smaller context or output cap.
+    for (n_ctx, max_tokens, count, reason) in [
+        (32, 4, 0, "eos"),
+        (32, 4, 2, "eos"),
+        (32, 4, 4, "max_tokens"),
+        (7, 4, 4, "context_limit"),
+        (12, 2, 2, "max_tokens"),
+    ] {
+        let mut admitted = accepted.clone();
+        if let Some(Event::Accepted(a)) = admitted.event.as_mut() {
+            (a.n_ctx, a.max_tokens) = (n_ctx, max_tokens);
+        }
         let mut validator = Synthesis::new(&request, &descriptor).unwrap();
-        validator.event(&accepted).unwrap();
+        validator.event(&admitted).unwrap();
         for i in 0..count {
             validator.event(&token(i)).unwrap();
         }
         validator.event(&completed(count, reason)).unwrap();
-        validator.finish(Ok(())).unwrap();
+        let done = validator.finish(Ok(())).unwrap();
+        assert_eq!(
+            (done.emitted_tokens, done.finish_reason.as_str()),
+            (count, reason)
+        );
     }
-    let mut context = accepted;
-    if let Some(Event::Accepted(a)) = context.event.as_mut() {
-        a.n_ctx = 7;
-    }
-    let mut validator = Synthesis::new(&request, &descriptor).unwrap();
-    validator.event(&context).unwrap();
-    for i in 0..4 {
-        validator.event(&token(i)).unwrap();
-    }
-    validator.event(&completed(4, "context_limit")).unwrap();
-    validator.finish(Ok(())).unwrap();
 }
 
 #[test]
@@ -192,7 +201,7 @@ fn malformed_streams_never_become_success_or_authorize_a_retry() {
 }
 
 #[test]
-fn oversized_events_token_overrun_and_wrong_completion_identity_are_rejected() {
+fn oversized_events_token_overrun_and_wrong_completion_identity_or_timing_are_rejected() {
     let (request, descriptor, accepted) = fixture();
     let mut validator = Synthesis::new(&request, &descriptor).unwrap();
     validator.event(&accepted).unwrap();
@@ -210,13 +219,21 @@ fn oversized_events_token_overrun_and_wrong_completion_identity_are_rejected() {
         validator.event(&token(i)).unwrap();
     }
     assert!(validator.event(&token(4)).is_err());
-    let mut validator = Synthesis::new(&request, &descriptor).unwrap();
-    validator.event(&accepted).unwrap();
-    let mut wrong = completed(0, "eos");
-    if let Some(Event::Completed(c)) = wrong.event.as_mut() {
-        c.request_id[0] ^= 1;
+    for mutate in [
+        (|c: &mut Completed| c.request_id[0] ^= 1) as fn(&mut Completed),
+        // Longer than the 1000 ms the request was dispatched with.
+        |c| c.decode_ms += 1,
+        |c| c.prefill_ms = u32::MAX,
+    ] {
+        let mut validator = Synthesis::new(&request, &descriptor).unwrap();
+        validator.event(&accepted).unwrap();
+        let mut wrong = completed(0, "eos");
+        if let Some(Event::Completed(c)) = wrong.event.as_mut() {
+            mutate(c);
+        }
+        assert!(validator.event(&wrong).is_err());
+        assert!(validator.finish(Ok(())).is_err());
     }
-    assert!(validator.event(&wrong).is_err());
 }
 
 fn decide_fixture() -> (DecideRequest, ModelDescriptor, DecideResponse) {

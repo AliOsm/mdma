@@ -96,9 +96,16 @@ zero values, so another executor build cannot silently supply different defaults
 
 Synthesis success requires validated `Accepted → Token* → Completed → gRPC OK`.
 The origin checks the selected identity/request ID, resolved sampler/caps,
-contiguous token indexes, output limits, completion count/reason and final
-status. Missing/extra/corrupt events fail; partial output remains a failure and
-is never supplemented from another executor. Unary decisions validate identity,
+contiguous token indexes, output limits, completion count/reason/timings and
+final status. Missing/extra/corrupt events fail; partial output remains a
+failure and is never supplemented from another executor.
+
+With `emit_events`, a routed call reports the executor's admission and
+completion like a local one: `accepted` (prompt tokens, output cap, `n_ctx`)
+once the executor's `Accepted` validates, and `completed` (emitted tokens,
+finish reason, the executor's prefill and decode milliseconds) only after the
+whole stream, gRPC `OK` included, has validated. A failed run never ends with
+`completed`. A degraded executor's lower caps show up in `accepted`. Unary decisions validate identity,
 result size and typed question/result schema, including duplicate keys.
 
 ## Operations and acceptance

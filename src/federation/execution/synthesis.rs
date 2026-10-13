@@ -15,7 +15,10 @@ use crate::{
         },
         tls::Binding,
     },
-    session::{tracked::Tokens, worker::WorkerEnd},
+    session::{
+        tracked::{Timing, Tokens},
+        worker::WorkerEnd,
+    },
 };
 use rama::http::grpc::Status;
 use std::{
@@ -149,8 +152,12 @@ enum State {
     Running {
         tokens: Tokens,
         completion: CompletionTask,
+        timing: Timing,
     },
-    Joining(Finish),
+    Joining {
+        finish: Finish,
+        timing: Timing,
+    },
     VerifyEnd,
     Invalidated,
     End,
@@ -223,24 +230,35 @@ impl Stream for Synthesis {
                         deadline.remaining(Instant::now()).is_ok()
                             && service.authorize(&binding, &envelope).is_ok()
                     });
+                    let timing = Timing::new(Instant::now());
                     let (tokens, completion) = (prepared.launch)(
                         claim,
                         this.supervisor.cancel.clone(),
                         this.response_permit.clone(),
                         boundary,
                     );
-                    this.state = State::Running { tokens, completion };
+                    this.state = State::Running {
+                        tokens,
+                        completion,
+                        timing,
+                    };
                     continue;
                 }
                 State::Running {
                     mut tokens,
                     completion,
+                    mut timing,
                 } => match Pin::new(&mut tokens).poll_next(cx) {
                     Poll::Pending => {
-                        this.state = State::Running { tokens, completion };
+                        this.state = State::Running {
+                            tokens,
+                            completion,
+                            timing,
+                        };
                         return Poll::Pending;
                     }
                     Poll::Ready(Some(token)) => {
+                        timing.token();
                         let index = this.emitted;
                         this.emitted += 1;
                         let token = Token {
@@ -248,17 +266,24 @@ impl Stream for Synthesis {
                             token_id: token.token().token_id,
                             text: token.token().text.clone(),
                         };
-                        this.state = State::Running { tokens, completion };
+                        this.state = State::Running {
+                            tokens,
+                            completion,
+                            timing,
+                        };
                         Event::Token(token)
                     }
                     Poll::Ready(None) => {
-                        this.state = State::Joining(Box::pin(completion.finish()));
+                        this.state = State::Joining {
+                            finish: Box::pin(completion.finish()),
+                            timing,
+                        };
                         continue;
                     }
                 },
-                State::Joining(mut finish) => match finish.as_mut().poll(cx) {
+                State::Joining { mut finish, timing } => match finish.as_mut().poll(cx) {
                     Poll::Pending => {
-                        this.state = State::Joining(finish);
+                        this.state = State::Joining { finish, timing };
                         return Poll::Pending;
                     }
                     Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(native_error(&error)))),
@@ -273,10 +298,13 @@ impl Stream for Synthesis {
                             return Poll::Ready(Some(Err(error)));
                         }
                         this.state = State::VerifyEnd;
+                        let (prefill_ms, decode_ms) = timing.millis();
                         Event::Completed(Completed {
                             request_id: this.supervisor.envelope.request_id.clone(),
                             emitted_tokens: this.emitted,
                             finish_reason: completion.reason.as_str().into(),
+                            prefill_ms,
+                            decode_ms,
                         })
                     }
                 },

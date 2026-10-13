@@ -120,6 +120,10 @@ message Completed {
   uint32 emitted_tokens = 2;
   // Exactly "eos", "max_tokens" or "context_limit".
   string finish_reason = 3;
+  // Launch to first token, measured by the executor.
+  uint32 prefill_ms = 4;
+  // First token to last token, measured by the executor.
+  uint32 decode_ms = 5;
 }
 
 message SynthesizeEvent {

@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     backend::cpu::CpuBackend,
     federation::{
+        catalog::ModelDescriptor,
         config::{ExecuteExport, RouteImport, SigningKey, Window},
         control::{
             ControlService, Federation, FederationServer, IdentifyRequest, IdentifyResponse,
@@ -27,6 +28,7 @@ use rama::{
         server::TlsServerConfig,
     },
 };
+use std::assert_matches;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use tokio::sync::oneshot;
 
@@ -169,6 +171,8 @@ struct Live {
     fixture: Fixture,
     router: Router,
     remote: Remote,
+    /// The executor's power state.
+    power: tokio::sync::watch::Sender<crate::power::PowerStatus>,
     caller: tls::Caller,
     digest: String,
     expected: serde_json::Value,
@@ -205,7 +209,14 @@ impl Live {
         // Nothing is loaded: the first federated request loads each model.
         registry.hash_artifacts(|| false);
         assert_eq!(registry.capture_execution_profiles().unwrap(), 2);
-        let native = grpc::MdmaService::new(registry, name);
+        let (power, status) = tokio::sync::watch::channel(crate::power::PowerStatus::default());
+        let native = grpc::MdmaService::new(registry, name).with_power(
+            status,
+            crate::power::DegradedLimits {
+                n_ctx: 12,
+                max_tokens: 2,
+            },
+        );
         let registry = native.registry().clone();
         let on_executor = Box::new(move |model: &str| {
             let entry = registry
@@ -365,6 +376,7 @@ impl Live {
             fixture,
             router,
             remote,
+            power,
             caller,
             digest,
             expected,
@@ -389,22 +401,32 @@ impl Live {
     }
     async fn synthesize(&self, timeout: &str) -> Result<Response<TokenStream>, Status> {
         self.router
-            .synthesize(self.request(
-                grpc::SynthesizeRequest {
-                    model: "remote-native".into(),
-                    prompt: "abc".into(),
-                    max_tokens: 3,
-                    sampler: Some(grpc::SynthesizeSamplerConfig {
-                        temperature: Some(0.),
-                        ..Default::default()
-                    }),
-                    emit_events: false,
-                    chat: false,
-                    system: String::new(),
-                },
-                timeout,
-            ))
+            .synthesize(self.request(synth(false), timeout))
             .await
+    }
+    /// A fresh signed catalog from the executor.
+    async fn poll_catalog(&self) {
+        self.router
+            .credentials
+            .poll(&self.router.cache, "local.mdma.test", Executor::default())
+            .await
+            .unwrap();
+    }
+    /// The executor's `remote-native` descriptor in the origin's cached catalog.
+    fn catalog(&self) -> (crate::federation::catalog::ServerState, ModelDescriptor) {
+        let catalog = self
+            .router
+            .cache
+            .snapshot(
+                &self.router.credentials.store,
+                "local.mdma.test",
+                tls::utc_ms().unwrap(),
+                std::time::Instant::now(),
+            )
+            .unwrap()
+            .unwrap();
+        let native = catalog.models.into_iter().find(|d| d.model == "native");
+        (catalog.server_state, native.unwrap())
     }
     async fn decide(&self, timeout: &str) -> Result<Response<grpc::DecideResponse>, Status> {
         self.router
@@ -476,16 +498,67 @@ fn questions() -> String {
     r#"{"q":{"type":"choice","instructions":"hello","criteria":["world","hello"]}}"#.into()
 }
 
+fn synth(emit_events: bool) -> grpc::SynthesizeRequest {
+    grpc::SynthesizeRequest {
+        model: "remote-native".into(),
+        prompt: "abc".into(),
+        max_tokens: 3,
+        sampler: Some(grpc::SynthesizeSamplerConfig {
+            temperature: Some(0.),
+            ..Default::default()
+        }),
+        emit_events,
+        chat: false,
+        system: String::new(),
+    }
+}
+
+/// Every message of a routed run that must succeed.
+async fn replies(
+    stream: impl Stream<Item = Result<grpc::SynthesizeResponse, Status>>,
+) -> Vec<grpc::SynthesizeResponse> {
+    stream.map(Result::unwrap).collect().await
+}
+
+/// Without `emit_events` a routed run sends tokens only.
+fn tokens_only(replies: &[grpc::SynthesizeResponse]) {
+    assert!(
+        replies
+            .iter()
+            .all(|r| r.accepted.is_none() && r.completed.is_none()),
+        "{replies:?}"
+    );
+}
+
+/// With `emit_events`: the executor's accepted first, its completed last.
+fn events(
+    replies: &[grpc::SynthesizeResponse],
+) -> (grpc::SynthesizeAccepted, grpc::SynthesizeCompleted) {
+    let [first, tokens @ .., last] = replies else {
+        panic!("accepted and completed: {replies:?}");
+    };
+    let accepted = first.accepted.expect("accepted comes first");
+    let completed = last.completed.clone().expect("completed comes last");
+    tokens_only(tokens);
+    assert_eq!(completed.emitted_tokens as usize, tokens.len());
+    if completed.emitted_tokens < accepted.max_tokens {
+        assert_eq!(completed.finish_reason, "eos");
+    } else {
+        assert_matches!(
+            completed.finish_reason.as_str(),
+            "max_tokens" | "context_limit"
+        );
+    }
+    (accepted, completed)
+}
+
 #[tokio::test]
 async fn actual_single_hop_native_synthesis_decision_and_response_quota() {
     let live = Live::new().await;
     let mut stream = live.synthesize("3000m").await.unwrap().into_inner();
-    let mut tokens = 0;
-    while let Some(token) = stream.next().await {
-        token.unwrap();
-        tokens += 1;
-    }
-    assert!(tokens <= 3);
+    let tokens = replies(&mut stream).await;
+    tokens_only(&tokens);
+    assert!(tokens.len() <= 3);
     assert_eq!(
         live.decide("3000m").await.err().unwrap().code(),
         Code::ResourceExhausted
@@ -508,6 +581,40 @@ async fn actual_single_hop_native_synthesis_decision_and_response_quota() {
     assert_eq!(ids.len(), 2);
     assert_eq!(ids[0].len(), 16);
     assert_ne!(ids[0], ids[1]);
+    live.close().await;
+}
+
+#[tokio::test]
+async fn power_flips_keep_the_route_selected_and_events_report_the_executors_caps() {
+    use crate::federation::catalog::ServerState;
+    use crate::power::{PowerStatus, ServerState as PowerState};
+    let live = Live::new().await;
+    let (_, selected) = live.catalog();
+    for (power, state, caps) in [
+        (PowerState::Degraded, ServerState::Degraded, (12, 2)),
+        (PowerState::Serving, ServerState::Serving, (32, 3)),
+    ] {
+        live.power
+            .send(PowerStatus {
+                state: power,
+                reading: None,
+            })
+            .unwrap();
+        live.poll_catalog().await;
+        // A fresh signed catalog: new state, same selection.
+        let (advertised, descriptor) = live.catalog();
+        assert_eq!(advertised, state);
+        assert!(descriptor.same_selection(&selected));
+        let request = live.request(synth(true), "3000m");
+        let stream = live.router.synthesize(request).await.unwrap().into_inner();
+        let (accepted, completed) = events(&replies(stream).await);
+        assert_eq!(
+            (accepted.prompt_tokens, accepted.n_ctx, accepted.max_tokens),
+            (3, caps.0, caps.1)
+        );
+        assert!(completed.prefill_ms + completed.decode_ms <= 3000);
+        live.idle().await;
+    }
     live.close().await;
 }
 
@@ -613,22 +720,36 @@ async fn executor_protocol_mismatch_and_non_ok_never_redispatch() {
         (4, Code::DataLoss),
         (5, Code::Internal),
     ] {
-        live.remote.mode.store(mode, Ordering::SeqCst);
-        let before = live.remote.calls.load(Ordering::SeqCst);
-        let mut stream = live.synthesize("3000m").await.unwrap().into_inner();
-        let mut error = None;
-        while let Some(item) = stream.next().await {
-            if let Err(status) = item {
-                error = Some(status);
-                break;
-            }
+        for emit_events in [false, true] {
+            live.remote.mode.store(mode, Ordering::SeqCst);
+            let before = live.remote.calls.load(Ordering::SeqCst);
+            let request = live.request(synth(emit_events), "3000m");
+            let mut stream = live.router.synthesize(request).await.unwrap().into_inner();
+            let mut forwarded = Vec::new();
+            let error = loop {
+                match stream
+                    .next()
+                    .await
+                    .expect("protocol/transport error was hidden")
+                {
+                    Ok(reply) => forwarded.push(reply),
+                    Err(status) => break status,
+                }
+            };
+            assert_eq!(error.code(), code);
+            assert!(!error.message().contains("private"));
+            // Only validated events go out, and a failed run never completes.
+            // Modes 2 and 3 fail before a valid Accepted.
+            assert!(forwarded.iter().all(|r| r.completed.is_none()));
+            assert_eq!(
+                forwarded.iter().any(|r| r.accepted.is_some()),
+                emit_events && mode >= 4,
+                "mode {mode}"
+            );
+            drop(stream);
+            live.idle().await;
+            assert_eq!(live.remote.calls.load(Ordering::SeqCst), before + 1);
         }
-        let error = error.expect("protocol/transport error was hidden");
-        assert_eq!(error.code(), code);
-        assert!(!error.message().contains("private"));
-        drop(stream);
-        live.idle().await;
-        assert_eq!(live.remote.calls.load(Ordering::SeqCst), before + 1);
     }
     for mode in [2, 3, 4] {
         live.remote.mode.store(mode, Ordering::SeqCst);
@@ -873,11 +994,7 @@ async fn check_normal_client(live: Live) {
     }
     // Reviewed consent edits invalidate old cache generations; obtain a fresh
     // signed catalog, not a test-injected snapshot.
-    live.router
-        .credentials
-        .poll(&live.router.cache, "local.mdma.test", Executor::default())
-        .await
-        .unwrap();
+    live.poll_catalog().await;
     let mut normal = crate::federation::inventory::tests::native_service();
     normal.set_federation_router(live.router.clone());
     let policy = ClientPolicy::test_routing(
@@ -918,18 +1035,6 @@ async fn check_normal_client(live: Live) {
         Wire(rama::service::BoxService::new(connector)),
         format!("https://{address}").parse().unwrap(),
     );
-    let synth = || grpc::SynthesizeRequest {
-        model: "remote-native".into(),
-        prompt: "abc".into(),
-        max_tokens: 3,
-        sampler: Some(grpc::SynthesizeSamplerConfig {
-            temperature: Some(0.),
-            ..Default::default()
-        }),
-        emit_events: false,
-        chat: false,
-        system: String::new(),
-    };
     let health = client
         .introspect(grpc::IntrospectRequest {})
         .await
@@ -949,11 +1054,7 @@ async fn check_normal_client(live: Live) {
             Operation::Synthesize,
         )
         .unwrap();
-    live.router
-        .credentials
-        .poll(&live.router.cache, "local.mdma.test", Executor::default())
-        .await
-        .unwrap();
+    live.poll_catalog().await;
     let health = client
         .introspect(grpc::IntrospectRequest {})
         .await
@@ -974,24 +1075,28 @@ async fn check_normal_client(live: Live) {
             },
         })
         .unwrap();
-    live.router
-        .credentials
-        .poll(&live.router.cache, "local.mdma.test", Executor::default())
-        .await
-        .unwrap();
+    live.poll_catalog().await;
     assert_eq!(
-        client.synthesize(synth()).await.err().unwrap().code(),
+        client.synthesize(synth(false)).await.err().unwrap().code(),
         Code::InvalidArgument
     );
     assert_eq!(live.remote.calls.load(Ordering::SeqCst), 0);
-    let mut request = Request::new(synth());
-    request.try_set_timeout(Duration::from_secs(3)).unwrap();
-    let mut stream = client.synthesize(request).await.unwrap().into_inner();
-    while let Some(token) = stream.next().await {
-        token.unwrap();
+    for emit_events in [false, true] {
+        let mut request = Request::new(synth(emit_events));
+        request.try_set_timeout(Duration::from_secs(3)).unwrap();
+        let replies = replies(client.synthesize(request).await.unwrap().into_inner()).await;
+        if emit_events {
+            // The executor's admission: "abc" in its 32-token context.
+            let (accepted, _) = events(&replies);
+            assert_eq!(
+                (accepted.prompt_tokens, accepted.n_ctx, accepted.max_tokens),
+                (3, 32, 3)
+            );
+        } else {
+            tokens_only(&replies);
+        }
+        live.idle().await;
     }
-    drop(stream);
-    live.idle().await;
     let mut request = Request::new(grpc::DecideRequest {
         model: "remote-laya".into(),
         state_json: "{}".into(),
@@ -1008,13 +1113,13 @@ async fn check_normal_client(live: Live) {
     client.introspect(grpc::IntrospectRequest {}).await.unwrap();
     let local = grpc::SynthesizeRequest {
         model: String::new(),
-        ..synth()
+        ..synth(false)
     };
     let mut stream = client.synthesize(local).await.unwrap().into_inner();
     while let Some(token) = stream.next().await {
         token.unwrap();
     }
-    assert_eq!(live.remote.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(live.remote.calls.load(Ordering::SeqCst), 3);
     // Leases on a routed alias are held on the executor.
     let lease = client
         .acquire(grpc::AcquireRequest {
@@ -1078,7 +1183,7 @@ async fn check_normal_client(live: Live) {
     call.abort();
     assert!(call.await.unwrap_err().is_cancelled());
     live.idle().await;
-    assert_eq!(live.remote.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(live.remote.calls.load(Ordering::SeqCst), 4);
     server.abort();
     let _ = server.await;
     live.close().await;

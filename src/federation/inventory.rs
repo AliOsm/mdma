@@ -60,6 +60,17 @@ pub(crate) struct Native<B: Backend> {
     pub max_output_tokens: usize,
 }
 
+impl<B: Backend> Native<B> {
+    /// The request caps in force now: `Some` only while the power watcher
+    /// reports `Degraded`. Read once per request, as native admission does.
+    pub(crate) fn degraded_limits(&self) -> Option<DegradedLimits> {
+        self.power
+            .as_ref()
+            .filter(|(rx, _)| rx.borrow().state == crate::power::ServerState::Degraded)
+            .map(|(_, limits)| *limits)
+    }
+}
+
 impl<B> Inventory for Native<B>
 where
     B: Backend + Send + Sync + 'static,
@@ -69,10 +80,10 @@ where
         let power = self
             .power
             .as_ref()
-            .map(|(rx, caps)| (*rx.borrow(), *caps, rx.has_changed().is_err()));
+            .map(|(rx, _)| (*rx.borrow(), rx.has_changed().is_err()));
         let mut state = if draining(self.shutdown.as_ref()) {
             ServerState::Draining
-        } else if let Some((power, _, closed)) = power {
+        } else if let Some((power, closed)) = power {
             // A dead watcher cannot promise readiness from its last observation.
             if closed && power.state != crate::power::ServerState::Draining {
                 ServerState::Critical
@@ -125,21 +136,10 @@ where
             };
             let (kind, limits) = match info.kind {
                 crate::registry::Kind::Gguf => {
+                    // The configured maxima: power caps apply at admission, so
+                    // a battery flip changes the state, never the selection.
                     let n_ctx = info.n_ctx;
-                    // Use the power observation, not registry degradation, for
-                    // request caps, exactly as the native service does.
-                    let (n_ctx, output) = match power {
-                        Some((power, caps, _))
-                            if power.state == crate::power::ServerState::Degraded =>
-                        {
-                            let n_ctx = n_ctx.min(caps.n_ctx);
-                            (
-                                n_ctx,
-                                n_ctx.min(caps.max_tokens).min(self.max_output_tokens),
-                            )
-                        }
-                        _ => (n_ctx, n_ctx.min(self.max_output_tokens)),
-                    };
+                    let output = n_ctx.min(self.max_output_tokens);
                     let (Ok(n_ctx), Ok(max_output_tokens)) =
                         (u32::try_from(n_ctx), u32::try_from(output))
                     else {

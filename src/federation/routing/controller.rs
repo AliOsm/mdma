@@ -2,8 +2,8 @@ use super::leases::{REMOTE_TTL_MS, RENEW_EVERY, RemoteLeases};
 use super::{Route, Selection, validate};
 use crate::{
     federation::{
-        catalog_cache::Cache, config::Operation, control, execution::ResponseLease,
-        runtime::outbound::Credentials, tls::Binding,
+        catalog_cache::Cache, config::Operation, control, control::synthesize_event::Event,
+        execution::ResponseLease, runtime::outbound::Credentials, tls::Binding,
     },
     grpc::{self, TokenStream},
     registry::{Holder, Lease, LeaseError},
@@ -314,6 +314,7 @@ impl Router {
     ) -> Result<Response<TokenStream>, Status> {
         let operation = self.begin(&request.get_ref().model, Operation::Synthesize, &request)?;
         let input = request.into_inner();
+        let events = input.emit_events;
         let mut message = control::SynthesizeRequest {
             envelope: Some(operation.selection.envelope.clone()),
             prompt: input.prompt,
@@ -342,7 +343,7 @@ impl Router {
             let result = task_operation
                 .supervise(
                     &task_cancel,
-                    task_operation.generate(message, validator, &send),
+                    task_operation.generate(message, validator, events, &send),
                 )
                 .await;
             // Also bound a terminal event waiting behind a retained token.
@@ -476,12 +477,15 @@ impl OperationContext {
             .dispatch(&self.router.credentials.store, &self.router.cache, binding)
     }
 
+    /// With `events`, the executor's validated `Accepted` goes out before the
+    /// tokens and its `Completed` is returned once the whole stream validated.
     async fn generate(
         &self,
         mut message: control::SynthesizeRequest,
         mut validator: validate::Synthesis,
+        events: bool,
         send: &mpsc::Sender<Message>,
-    ) -> Result<(), Status> {
+    ) -> Result<Option<grpc::SynthesizeResponse>, Status> {
         let connected = self.connect().await?;
         let client = connected.client.with_max_decoding_message_size(64 * 1024);
         let exchange = async {
@@ -503,18 +507,37 @@ impl OperationContext {
                 self.authorize()?;
                 let wire = wire.map_err(|status| remote_error(&status))?;
                 validator.event(&wire)?;
-                if let Some(control::synthesize_event::Event::Token(token)) = wire.event {
-                    send.send(Message::Token(grpc::SynthesizeResponse {
+                let response = match wire.event {
+                    Some(Event::Token(token)) => grpc::SynthesizeResponse {
                         token_id: token.token_id,
                         text: token.text,
                         ..grpc::SynthesizeResponse::default()
-                    }))
+                    },
+                    Some(Event::Accepted(accepted)) if events => grpc::SynthesizeResponse {
+                        accepted: Some(grpc::SynthesizeAccepted {
+                            prompt_tokens: accepted.prompt_tokens,
+                            max_tokens: accepted.max_tokens,
+                            n_ctx: accepted.n_ctx,
+                        }),
+                        ..grpc::SynthesizeResponse::default()
+                    },
+                    _ => continue,
+                };
+                send.send(Message::Event(response))
                     .await
                     .map_err(|_| Status::cancelled("cancelled"))?;
-                }
             }
             self.authorize()?;
-            validator.finish(Ok(()))
+            let completed = validator.finish(Ok(()))?;
+            Ok(events.then(|| grpc::SynthesizeResponse {
+                completed: Some(grpc::SynthesizeCompleted {
+                    emitted_tokens: completed.emitted_tokens,
+                    finish_reason: completed.finish_reason,
+                    prefill_ms: completed.prefill_ms,
+                    decode_ms: completed.decode_ms,
+                }),
+                ..grpc::SynthesizeResponse::default()
+            }))
         };
         tokio::select! {
             // If both complete together, validated gRPC EOF wins. Merely
@@ -564,8 +587,9 @@ fn remote_error(status: &Status) -> Status {
 }
 
 enum Message {
-    Token(grpc::SynthesizeResponse),
-    Terminal(Result<(), Status>),
+    Event(grpc::SynthesizeResponse),
+    /// The end; carries `completed` when the caller asked for events.
+    Terminal(Result<Option<grpc::SynthesizeResponse>, Status>),
 }
 struct RoutedStream {
     operation: OperationContext,
@@ -587,11 +611,11 @@ impl Stream for RoutedStream {
         }
         match this.receiver.poll_recv(cx) {
             Poll::Pending => Poll::Pending,
-            Poll::Ready(Some(Message::Token(token))) => Poll::Ready(Some(Ok(token))),
+            Poll::Ready(Some(Message::Event(event))) => Poll::Ready(Some(Ok(event))),
             Poll::Ready(Some(Message::Terminal(result))) => {
                 this.ended = true;
                 this.cancel.cancel();
-                Poll::Ready(result.err().map(Err))
+                Poll::Ready(result.transpose())
             }
             Poll::Ready(None) => {
                 this.ended = true;

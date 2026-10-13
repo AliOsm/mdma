@@ -85,7 +85,7 @@ fn only_explicit_loaded_exact_identities_are_visible_with_alias_caps() {
 }
 
 #[test]
-fn power_changes_restrict_caps_critical_and_dead_watchers_withdraw_readiness() {
+fn power_changes_keep_the_offer_critical_and_dead_watchers_withdraw_readiness() {
     use crate::power::ServerState as PowerState;
     let (tx, rx) = watch::channel(PowerStatus::default());
     let service = native_service().with_power(
@@ -104,18 +104,17 @@ fn power_changes_restrict_caps_critical_and_dead_watchers_withdraw_readiness() {
     .unwrap();
     let degraded = inventory.snapshot(&exports());
     assert_eq!(degraded.state, ServerState::Degraded);
+    // Degraded caps apply at admission; the catalog keeps the configured
+    // maxima so routes selected before the flip stay valid.
     assert_eq!(
         degraded.models[0].limits,
         Limits::Synthesize {
-            n_ctx: 12,
-            max_output_tokens: 3
+            n_ctx: 32,
+            max_output_tokens: 32
         }
     );
-    assert_eq!(degraded.models[1].limits, degraded.models[0].limits);
-    for model in &degraded.models {
-        assert!(model.ready);
-    }
-    assert_eq!(serving.models[0].profile_id, degraded.models[0].profile_id);
+    assert_eq!(degraded.models, serving.models);
+    assert!(degraded.models.iter().all(|m| m.ready));
     tx.send(PowerStatus {
         state: PowerState::Critical,
         reading: None,
