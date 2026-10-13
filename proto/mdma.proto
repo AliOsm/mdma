@@ -28,8 +28,13 @@ message SynthesizeRequest {
   string system = 7;
 }
 
-// Laya typed decisions: a state and a set of questions in, a distribution
-// per question out. Both sides are JSON.
+// A decision model's answers (ModelStatus.decision says what it takes); both
+// sides are JSON.
+// - "laya": state_json is any JSON state, questions_json maps ids to
+//   {"type", "instructions", "criteria"}; a distribution per question out.
+// - "minicheck": state_json is {"document"}, questions_json maps ids to
+//   {"claim"}; out {"model": "minicheck", "answers": {id: {"supported",
+//   "probability"}}, "usage": {"input_tokens", "output_tokens"}}.
 message DecideRequest {
   string model = 1;
   string state_json = 2;
@@ -74,6 +79,9 @@ message ModelStatus {
   string quantization = 18;
   // The model's own context, before MDMA_N_CTX lowers it to n_ctx; 0 when unknown.
   uint32 trained_ctx = 19;
+  // What a decision model takes through Decide: "laya" or "minicheck"; empty
+  // for text generators and for decision models Decide does not serve.
+  string decision = 20;
 }
 
 message Host {
@@ -207,6 +215,8 @@ message CatalogModel {
   string quantization = 9;
   uint32 trained_ctx = 10;
   string chat_format = 11;
+  // As in ModelStatus.
+  string decision = 12;
 }
 
 message FederationPeer {

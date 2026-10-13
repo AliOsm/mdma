@@ -363,3 +363,75 @@ async fn two_model_cuda_checkpoint_lifecycle() {
     .await
     .unwrap();
 }
+
+/// Bespoke-MiniCheck through Decide on MiniCheck's README example, which
+/// its reference implementation scores 0.984 and 0.011.
+async fn minicheck_reference_example<B>(backend: B)
+where
+    B: Backend + Send + Sync + 'static,
+    B::Buf: Send + Sync,
+{
+    use proto::mdma_server::Mdma;
+    use rama::http::grpc::Request;
+    let registry = Registry::new(
+        Arc::new(backend),
+        vec![(
+            "minicheck".into(),
+            Source::Gguf(crate::backend::test_support::fixture().into()),
+        )],
+        None,
+        Options::new(4096),
+    )
+    .unwrap();
+    let service = MdmaService::new(registry, "native");
+    let status = service
+        .introspect(Request::new(proto::IntrospectRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(status.models[0].decision, "minicheck");
+    let reply = service
+        .decide(Request::new(proto::DecideRequest {
+            model: "minicheck".into(),
+            state_json: r#"{"document": "A group of students gather in the school library to study for their upcoming final exams."}"#.into(),
+            questions_json: r#"{"exam": {"claim": "The students are preparing for an examination."}, "vacation": {"claim": "The students are on vacation."}}"#.into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    let result: serde_json::Value = serde_json::from_str(&reply.result_json).unwrap();
+    eprintln!("{result}");
+    let answer = |id: &str| {
+        let answer = &result["answers"][id];
+        (
+            answer["supported"].as_bool().unwrap(),
+            answer["probability"].as_f64().unwrap(),
+        )
+    };
+    let (exam, vacation) = (answer("exam"), answer("vacation"));
+    assert!(
+        exam.0 && exam.1 > 0.9 && !vacation.0 && vacation.1 < 0.1,
+        "{result}"
+    );
+    assert_eq!(result["usage"]["output_tokens"], 0, "{result}");
+}
+
+#[tokio::test]
+#[ignore = "requires MDMA_TEST_GGUF (Bespoke-MiniCheck-7B-Q4_K_M.gguf)"]
+async fn minicheck_decides_its_reference_example_on_cpu() {
+    minicheck_reference_example(CpuBackend).await;
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[tokio::test]
+#[ignore = "requires MDMA_TEST_GGUF (Bespoke-MiniCheck-7B-Q4_K_M.gguf)"]
+async fn minicheck_decides_its_reference_example_on_metal() {
+    minicheck_reference_example(crate::backend::metal::MetalBackend::new().unwrap()).await;
+}
+
+#[cfg(feature = "cuda")]
+#[tokio::test]
+#[ignore = "requires MDMA_TEST_GGUF (Bespoke-MiniCheck-7B-Q4_K_M.gguf) and an NVIDIA GPU"]
+async fn minicheck_decides_its_reference_example_on_cuda() {
+    minicheck_reference_example(crate::backend::cuda::CudaBackend::new().unwrap()).await;
+}

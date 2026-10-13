@@ -76,7 +76,7 @@ host allocations still need headroom.
 
 ```text
 /models/
-  minicheck.gguf          -> served as "minicheck" (Synthesize)
+  minicheck.gguf          -> served as "minicheck" (Decide; Synthesize for raw prompts)
   qwen3-8b.gguf           -> "qwen3-8b"
   tiny.gguf -> minicheck.gguf   a symlink: an alias sharing one upload
   laya/                   -> "laya": a Laya checkpoint folder (Decide)
@@ -195,7 +195,7 @@ listen and mTLS environment variables.
 ```proto
 service Mdma {
   rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeResponse);  // token stream; `model` names a registry entry
-  rpc Decide(DecideRequest)         returns (DecideResponse);             // Laya typed decisions, JSON in and out
+  rpc Decide(DecideRequest)         returns (DecideResponse);             // decision models (Laya, MiniCheck), JSON in and out
   rpc Introspect(IntrospectRequest) returns (IntrospectResponse);         // server state, power, and one ModelStatus per model
   rpc Watch(WatchRequest)           returns (stream ServerSnapshot);      // status, memory and (operators) federation, on change
 }
@@ -224,6 +224,27 @@ classified by its `general.tags` (`text-classification` makes MiniCheck a
 `decision` model).
 `ModelStatus.capabilities` lists `reasoning` for models whose chat template
 thinks before answering (`<think>`).
+
+`ModelStatus.decision` says what a decision model takes through `Decide`:
+
+- `laya`: a state and typed questions (see [Laya](laya.md)).
+- `minicheck`: Bespoke-MiniCheck (a GGUF whose `general.basename` is
+  `Bespoke-MiniCheck`, tagged `text-classification`, with a ChatML template).
+  `state_json` is `{"document": "..."}` and `questions_json` maps 1 to 128 ids
+  to `{"claim": "..."}`; nothing may be empty and no other fields are allowed.
+  The answer is
+  `{"model": "minicheck", "answers": {"<id>": {"supported": true, "probability": 0.986}}, "usage": {"input_tokens": 210, "output_tokens": 0}}`.
+
+  Each claim is checked the way MiniCheck's reference implementation does:
+  its system prompt and `Document: …\nClaim: …` as one ChatML turn, prefilled
+  without generating, scored by the probability of a first token reading `yes`
+  in any case; `supported` means above 0.5. The system prompt and document are
+  prefilled once and shared by every claim of the request. A prompt beyond
+  `n_ctx` is refused: the document is not chunked and claims are not split
+  into sentences, so send one claim per question.
+
+Other decision-class GGUFs are served through `Synthesize` only, and a text
+generator refuses `Decide`.
 
 `Watch` streams a `ServerSnapshot` on every change: the Introspect answer,
 memory (native budget by weights, KV cache and workspace; buffer quotas;

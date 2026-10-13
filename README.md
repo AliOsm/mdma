@@ -104,6 +104,8 @@ weights. Unsupported architectures are rejected, not approximated.
 | `qwen2`, `qwen3`, `qwen2vl` (text only) | NuMarkdown-8B; Qwen3-8B still open | CPU, ROCm |
 | `glm4` | GLM-4-32B-0414 | CPU, ROCm |
 
+Bespoke-MiniCheck answers `Decide`: a document and claims in, the probability
+each claim is supported out ([serving](doc/serving.md#grpc-api)).
 [Laya](doc/laya.md) typed decisions (a ModernBERT encoder plus decision
 heads) run on the CPU; the published Laya checkpoint currently fails tokenizer
 loading. See [architectures](doc/architectures.md) for per-model boundaries
@@ -201,7 +203,7 @@ it was trained for, capping each request's output (`MDMA_MAX_OUTPUT_TOKENS`). On
 ```proto
 service Mdma {
   rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeResponse);  // token stream; `model` names a registry entry
-  rpc Decide(DecideRequest)         returns (DecideResponse);             // Laya typed decisions, JSON in and out
+  rpc Decide(DecideRequest)         returns (DecideResponse);             // decision models (Laya, MiniCheck), JSON in and out
   rpc Introspect(IntrospectRequest) returns (IntrospectResponse);         // server state, power, and one ModelStatus per model
 }
 ```

@@ -111,6 +111,8 @@ pub struct Info {
     pub class: Class,
     pub capabilities: Vec<Capability>,
     pub chat_format: Option<ChatFormat>,
+    /// What it takes through `Decide`; `None` for text generators.
+    pub decision: Option<crate::decision::Contract>,
 }
 
 /// A parameter count as people write it: "494M", "1.1B", "7.2B"; empty for 0.
@@ -220,6 +222,7 @@ impl<B: Backend> Registry<B> {
             class: Class::Generative,
             capabilities: Vec::new(),
             chat_format: decoder.tokenizer.chat_format(),
+            decision: None,
         };
         let options = Options::new(info.n_ctx);
         Self {
@@ -327,6 +330,7 @@ impl<B: Backend> Registry<B> {
                     class,
                     capabilities,
                     chat_format: tokenizer.chat_format(),
+                    decision: crate::decision::Contract::detect(&gguf, &tokenizer, class),
                 };
                 identities.insert(handle, self.slots.len());
                 self.slots.push(Slot::new(
@@ -356,6 +360,7 @@ impl<B: Backend> Registry<B> {
                     class: Class::Decision,
                     capabilities: Vec::new(),
                     chat_format: None,
+                    decision: Some(crate::decision::Contract::Laya),
                 };
                 identities.insert(handle, self.slots.len());
                 self.slots

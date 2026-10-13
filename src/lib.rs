@@ -3,6 +3,7 @@
 mod artifact;
 pub mod backend;
 pub mod cache;
+pub mod decision;
 pub mod federation;
 pub mod gguf;
 pub mod grpc;

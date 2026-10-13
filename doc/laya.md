@@ -6,7 +6,8 @@ a ModernBERT-large encoder plus decision heads that score one `[MASK]`
 marker per option, so a request is a state and a set of `choice` /
 `score` / `noul` questions and the reply is a distribution per question.
 No tokens are generated. Prompt construction, the [0.5, 5.0] temperature
-clamp, confidence and the output shape follow laya-mlx.
+clamp, confidence and the output shape follow laya-mlx. Laya is one of the
+`Decide` contracts; MiniCheck's is in [serving](serving.md#grpc-api).
 
 **Known issue:** the published `convaiinnovations/laya` checkpoint does not
 currently load. `tokenizers` 1.0.0-rc.2 requires all 256 ByteLevel byte atoms

@@ -5,6 +5,7 @@ mod observe;
 mod proto;
 
 use crate::backend::Backend;
+use crate::decision::{Contract, minicheck};
 use crate::memory::{MemoryDomain, NativeMemoryBudget};
 use crate::power::{DegradedLimits, PowerStatus, ServerState};
 use crate::registry::{
@@ -674,10 +675,16 @@ where
             return router.decide(req).await;
         }
         let (name, info) = self.model(&req.get_ref().model)?;
-        if info.kind == Kind::Gguf {
-            return Err(Status::invalid_argument(format!(
-                "model {name:?} generates text; use Synthesize"
-            )));
+        match (info.kind, info.decision) {
+            (Kind::Gguf, Some(Contract::MiniCheck)) => {
+                return self.minicheck(&name, info, &req.into_inner()).await;
+            }
+            (Kind::Gguf, _) => {
+                return Err(Status::invalid_argument(format!(
+                    "model {name:?} generates text; use Synthesize"
+                )));
+            }
+            (Kind::Laya, _) => {}
         }
         self.admit(|| Ok(0), 0, usize::MAX)?;
         let loaded = self.load_model(&name).await?;
@@ -706,6 +713,73 @@ where
         })?;
         Ok(Response::new(DecideResponse {
             result_json: result.to_string(),
+        }))
+    }
+
+    /// Checks each claim against the document: one prefill per claim, the
+    /// shared prefix once, no tokens generated.
+    async fn minicheck(
+        &self,
+        name: &str,
+        info: &Info,
+        req: &DecideRequest,
+    ) -> Result<Response<DecideResponse>, Status> {
+        let request = minicheck::Request::parse(&req.state_json, &req.questions_json)
+            .map_err(Status::invalid_argument)?;
+        self.accepting()?;
+        let loaded = self.load_model(name).await?;
+        let decoder = loaded.decoder().expect("GGUF models load decoders");
+        let prompts = request.prompts();
+        let longest = prompts
+            .iter()
+            .max_by_key(|prompt| prompt.len())
+            .expect("parse requires a claim");
+        let (_, n_ctx) = self.admit(
+            || {
+                decoder
+                    .tokenizer
+                    .try_encode(longest)
+                    .map(|ids| ids.len())
+                    .map_err(native_status)
+            },
+            0,
+            info.n_ctx,
+        )?;
+        let session = Session::new(
+            self.backend.clone(),
+            decoder.model.clone(),
+            decoder.tokenizer.clone(),
+            SamplerConfig::default(),
+            n_ctx,
+        )
+        .with_prefix_reuse();
+        let yes = minicheck::yes_ids(&decoder.tokenizer);
+        // Dropping the RPC cancels the claims not yet scored.
+        let cancel = CancellationToken::new();
+        let _cancel_on_drop = cancel.clone().drop_guard();
+        let guard = self.shutdown.clone().map(WeakShutdownGuard::upgrade);
+        let (registry, model) = (self.registry.clone(), name.to_owned());
+        let scored = tokio::task::spawn_blocking(move || {
+            let _guard = guard;
+            let _loaded = loaded;
+            minicheck::score(&session, &prompts, &yes, &|| cancel.is_cancelled(), || {
+                registry.evict_for(&model)
+            })
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?;
+        let scored = match scored {
+            Ok(Some(scored)) => scored,
+            Ok(None) => return Err(Status::cancelled("cancelled")),
+            Err(error) if error.is_memory_exhausted() => {
+                return Err(Status::resource_exhausted(
+                    self.registry.held(error.to_string()),
+                ));
+            }
+            Err(error) => return Err(native_status(error)),
+        };
+        Ok(Response::new(DecideResponse {
+            result_json: minicheck::answer(&request, &scored).to_string(),
         }))
     }
 
@@ -746,6 +820,9 @@ where
                 chat_format: info
                     .chat_format
                     .map_or_else(String::new, |f| f.name().to_owned()),
+                decision: info
+                    .decision
+                    .map_or_else(String::new, |c| c.as_str().to_owned()),
                 host: None,
                 class: info.class.as_str().to_owned(),
                 capabilities: crate::registry::Capability::names(&info.capabilities),

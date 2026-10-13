@@ -100,6 +100,12 @@ where
         })
     }
 
+    /// Prefill only, for [`Prepared::score`]: through this Session's prefix
+    /// slot when it has one, so prompts sharing a prefix prefill it once.
+    pub(crate) fn prepare_scoring(&self, prompt: &str) -> BResult<Prepared<B>> {
+        self.prepare(prompt, 0, true, self.prefix.clone())
+    }
+
     /// Native-only primitive, not permission to execute. Ignores any opted-in
     /// local prefix slot: federated requests always reserve isolated KV.
     #[allow(dead_code)] // Workload RPC integration is not enabled yet.
@@ -144,6 +150,35 @@ where
         cancelled: impl Fn() -> bool,
         emit: impl FnMut(u32, &mut dyn FnMut(u32) -> BResult<String>) -> BResult<bool>,
     ) -> BResult<WorkerEnd> {
+        let completed = self.drive(&cancelled, |prepared| {
+            Ok(match prepared.generate(&cancelled, emit)? {
+                WorkerEnd::Completed(completion) => Some(completion),
+                WorkerEnd::Cancelled => None,
+            })
+        });
+        completed.map(|end| end.map_or(WorkerEnd::Cancelled, WorkerEnd::Completed))
+    }
+
+    /// Prefills the prompt and hands the logits for the next position to
+    /// `read`, sampling nothing. `None` when cancelled.
+    pub(crate) fn score<T>(
+        mut self,
+        cancelled: impl Fn() -> bool,
+        read: impl FnOnce(&[f32]) -> T,
+    ) -> BResult<Option<T>> {
+        self.drive(&cancelled, |prepared| {
+            Ok(prepared.prefill(&cancelled)?.map(|logits| read(&logits)))
+        })
+    }
+
+    /// Runs `work` as one request lifecycle: joins the backend's execution
+    /// before returning and drops the KV from the prefix slot on failure.
+    /// `None` is a cancellation.
+    fn drive<T>(
+        &mut self,
+        cancelled: &impl Fn() -> bool,
+        work: impl FnOnce(&mut Self) -> BResult<Option<T>>,
+    ) -> BResult<Option<T>> {
         struct Join<'a, B: Backend>(&'a B, bool);
         impl<B: Backend> Drop for Join<'_, B> {
             fn drop(&mut self) {
@@ -159,12 +194,11 @@ where
         let fsm = SessionFsm::new(())
             .start_generating()
             .map_err(|_| crate::backend::Error::Backend("invalid generation lifecycle".into()))?;
-        let generated = self.generate(&cancelled, emit);
+        let done = work(self);
         let joined = backend.join_execution();
         join.1 = true;
-        let result = joined.and(generated);
-        let result = match result {
-            Ok(_) if cancelled() => Ok(WorkerEnd::Cancelled),
+        let result = match joined.and(done) {
+            Ok(_) if cancelled() => Ok(None),
             result => result,
         };
         // Terminal lifecycle bookkeeping: `result` is already decided and is what the caller sees.
@@ -173,33 +207,25 @@ where
                 self.lease.retain.set(false);
                 let _ = fsm.fail();
             }
-            Ok(WorkerEnd::Cancelled) => {
+            Ok(None) => {
                 let _ = fsm.cancel();
             }
-            Ok(WorkerEnd::Completed(_)) => {
+            Ok(Some(_)) => {
                 let _ = fsm.finish();
             }
         }
         result
     }
 
-    fn generate(
-        &mut self,
-        cancelled: &impl Fn() -> bool,
-        mut emit: impl FnMut(u32, &mut dyn FnMut(u32) -> BResult<String>) -> BResult<bool>,
-    ) -> BResult<WorkerEnd> {
-        enum Step {
-            Token(u32),
-            Eos,
-            Cancelled,
-        }
+    /// Allocates the KV and prefills the prompt; `None` when cancelled.
+    fn prefill(&mut self, cancelled: &impl Fn() -> bool) -> BResult<Option<Vec<f32>>> {
         if cancelled() {
-            return Ok(WorkerEnd::Cancelled);
+            return Ok(None);
         }
         self.lease
             .allocate(&*self.backend, &self.model, self.capacity)?;
         if cancelled() {
-            return Ok(WorkerEnd::Cancelled);
+            return Ok(None);
         }
         let state = self
             .lease
@@ -212,9 +238,22 @@ where
             &self.prompt_ids,
             self.lease.memory.scratch.as_ref(),
         )?;
-        if cancelled() {
-            return Ok(WorkerEnd::Cancelled);
+        Ok((!cancelled()).then_some(logits))
+    }
+
+    fn generate(
+        &mut self,
+        cancelled: &impl Fn() -> bool,
+        mut emit: impl FnMut(u32, &mut dyn FnMut(u32) -> BResult<String>) -> BResult<bool>,
+    ) -> BResult<WorkerEnd> {
+        enum Step {
+            Token(u32),
+            Eos,
+            Cancelled,
         }
+        let Some(logits) = self.prefill(cancelled)? else {
+            return Ok(WorkerEnd::Cancelled);
+        };
         let reason = if self.context_limited {
             FinishReason::ContextLimit
         } else {
@@ -262,6 +301,11 @@ where
             1,
             self.lease.memory.scratch.as_ref(),
         )?;
+        let state = self
+            .lease
+            .state
+            .as_mut()
+            .expect("prefill populated the prompt state");
         let mut decoder = self.backend.decoder(&self.model, &mut state.kv, &mut ws)?;
         let mut emitted = 1;
         for step in 1..self.admission.max_tokens {

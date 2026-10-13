@@ -262,6 +262,7 @@ impl Router {
                     chat_format: descriptor
                         .chat_format
                         .map_or_else(String::new, |f| f.name().into()),
+                    decision: String::new(),
                     host: Some(grpc::Host {
                         name: route.peer_id.clone(),
                         ..host

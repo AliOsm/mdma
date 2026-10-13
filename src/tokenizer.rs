@@ -192,6 +192,15 @@ impl Tokenizer {
         self.eos_id
     }
 
+    /// The ids of every vocabulary piece `matches` accepts, in id order.
+    pub fn ids_where(&self, matches: impl Fn(&str) -> bool) -> Vec<u32> {
+        (0..)
+            .zip(&self.pieces)
+            .filter(|(_, piece)| matches(piece))
+            .map(|(id, _)| id)
+            .collect()
+    }
+
     pub fn is_eos(&self, id: u32) -> bool {
         Some(id) == self.eos_id || self.stop_ids.contains(&id)
     }

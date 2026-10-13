@@ -18,6 +18,7 @@ fn info() -> Info {
         class: Class::Generative,
         capabilities: Vec::new(),
         chat_format: None,
+        decision: None,
     }
 }
 
