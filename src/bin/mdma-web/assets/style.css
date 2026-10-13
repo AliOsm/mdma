@@ -207,6 +207,11 @@ button:disabled { opacity: 0.5; cursor: progress; }
   background: var(--surface);
   font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+#output.verdicts { white-space: normal; font: inherit; }
+.verdicts td.num { position: relative; width: 7rem; }
+.verdicts .bar { position: absolute; inset: 20% auto 20% 0; border-radius: 3px; background: color-mix(in srgb, var(--series-1) 22%, transparent); }
+.verdict.supported { color: var(--good-ink); }
+.verdict.unsupported { color: var(--critical-ink); }
 
 /* three.js HTML labels */
 .labels { pointer-events: auto; }

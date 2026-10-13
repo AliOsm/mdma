@@ -120,7 +120,7 @@ fn choosing_a_model_resets_the_generation_and_follows_its_chat_template() {
             .collect();
         assert_eq!(
             ids,
-            ["chat-toggle", "markers", "output", "run-error"],
+            ["inputs", "stats", "output", "run-error"],
             "{events:?}"
         );
         (signals, events[1].1.clone())

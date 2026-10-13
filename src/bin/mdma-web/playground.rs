@@ -3,7 +3,9 @@ use super::deadline;
 use super::pages;
 use super::sse::{Event, append, element, signals};
 use super::upstream::Upstream;
-use mdma::grpc::{SynthesizeRequest, SynthesizeResponse, SynthesizeSamplerConfig};
+use mdma::grpc::{
+    DecideRequest, ModelStatus, SynthesizeRequest, SynthesizeResponse, SynthesizeSamplerConfig,
+};
 use rama::futures::StreamExt;
 use rama::futures::async_stream::stream_fn;
 use rama::http::StatusCode;
@@ -19,6 +21,17 @@ use std::time::Instant;
 const MAX_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_SYSTEM_BYTES: usize = 8 * 1024;
 const MAX_TOKENS: u32 = 8192;
+/// As many claims as one `Decide` takes.
+const MAX_CLAIMS: usize = 128;
+
+/// A text signal; absent means empty.
+fn text(signals: &Value, name: &str) -> Result<String, String> {
+    match &signals[name] {
+        Value::Null => Ok(String::new()),
+        Value::String(s) => Ok(s.clone()),
+        other => Err(format!("{name} must be text, got {other}")),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct RunRequest {
@@ -33,11 +46,7 @@ pub(super) struct RunRequest {
 impl RunRequest {
     /// Empty inputs mean the server default.
     pub fn parse(signals: &Value) -> Result<Self, String> {
-        let text = |name: &str| match &signals[name] {
-            Value::Null => Ok(String::new()),
-            Value::String(s) => Ok(s.clone()),
-            other => Err(format!("{name} must be text, got {other}")),
-        };
+        let text = |name: &str| text(signals, name);
         let number = |name: &str| -> Result<Option<f64>, String> {
             match &signals[name] {
                 Value::Null => Ok(None),
@@ -129,8 +138,106 @@ impl RunRequest {
     }
 }
 
+/// A document and the claims to check against it, one per non-empty line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct CheckRequest {
+    pub model: String,
+    pub document: String,
+    pub claims: Vec<String>,
+}
+
+impl CheckRequest {
+    pub fn parse(signals: &Value) -> Result<Self, String> {
+        let document = text(signals, "document")?;
+        if document.trim().is_empty() {
+            return Err("document is empty".into());
+        }
+        let claims: Vec<String> = text(signals, "claims")?
+            .lines()
+            .map(str::trim)
+            .filter(|claim| !claim.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if claims.is_empty() || claims.len() > MAX_CLAIMS {
+            return Err(format!(
+                "write 1 to {MAX_CLAIMS} claims, one per line; got {}",
+                claims.len()
+            ));
+        }
+        let bytes = document.len() + claims.iter().map(String::len).sum::<usize>();
+        if bytes > MAX_PROMPT_BYTES {
+            return Err(format!(
+                "document and claims are {bytes} bytes; the playground accepts up to {MAX_PROMPT_BYTES}"
+            ));
+        }
+        Ok(Self {
+            model: text(signals, "model")?,
+            document,
+            claims,
+        })
+    }
+
+    /// Claim ids are line numbers among the claims, from 1.
+    fn to_proto(&self) -> DecideRequest {
+        let questions: serde_json::Map<String, Value> = (1..)
+            .zip(&self.claims)
+            .map(|(id, claim): (usize, _)| (id.to_string(), json!({ "claim": claim })))
+            .collect();
+        DecideRequest {
+            model: self.model.clone(),
+            state_json: json!({ "document": self.document }).to_string(),
+            questions_json: Value::Object(questions).to_string(),
+        }
+    }
+
+    /// Each claim's verdict from a MiniCheck result, and the input tokens.
+    fn verdicts(&self, result_json: &str) -> Result<(Vec<pages::Verdict>, u64), String> {
+        let result: Value =
+            serde_json::from_str(result_json).map_err(|e| format!("unreadable result: {e}"))?;
+        let verdicts = (1..)
+            .zip(&self.claims)
+            .map(|(id, claim): (usize, _)| {
+                let answer = &result["answers"][id.to_string()];
+                match (
+                    answer["supported"].as_bool(),
+                    answer["probability"].as_f64(),
+                ) {
+                    (Some(supported), Some(probability)) => Ok(pages::Verdict {
+                        claim: claim.clone(),
+                        supported,
+                        probability,
+                    }),
+                    _ => Err(format!("no verdict for claim {id} in {result_json}")),
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        Ok((
+            verdicts,
+            result["usage"]["input_tokens"].as_u64().unwrap_or(0),
+        ))
+    }
+}
+
 fn progress(fields: &Value) -> Event {
     signals(&json!({ "_gen": fields }))
+}
+
+/// A run starting on `model` (`name` when it is not listed). The server
+/// loads a model on first use, so it starts `loading` unless resident.
+fn starting(id: u64, name: &str, model: Option<&ModelStatus>, max_tokens: u32) -> Event {
+    let phase = if model.is_some_and(|m| m.residency != "resident") {
+        "loading"
+    } else {
+        "prefill"
+    };
+    progress(&json!({
+        "id": id, "phase": phase, "error": "",
+        "model": model.map_or(name, |m| m.name.as_str()),
+        "n_ctx": model.map_or(0, |m| m.n_ctx), "max_tokens": max_tokens,
+        "kv_bytes_per_token": model.and_then(|m| m.geometry.as_ref()).map_or(0, |g| g.kv_bytes_per_token),
+        "emitted": 0, "tok_s": 0, "ttft_ms": 0, "dt_ms": 0,
+        "prompt_tokens": 0, "finish_reason": "", "prefill_ms": 0, "decode_ms": 0,
+    }))
 }
 
 fn failed(message: impl Into<String>) -> Vec<Event> {
@@ -146,6 +253,62 @@ pub(super) async fn run(
     ReadSignals(signals): ReadSignals<Value>,
 ) -> impl IntoResponse {
     Sse::new(stream_fn(move |mut yielder| async move {
+        let status = upstream.snapshot();
+        let model = status.model(signals["model"].as_str().unwrap_or_default());
+        if pages::checks_claims(model) {
+            let request = match CheckRequest::parse(&signals) {
+                Ok(request) => request,
+                Err(message) => {
+                    for event in failed(message) {
+                        yielder.yield_item(event).await;
+                    }
+                    return;
+                }
+            };
+            let Some(run) = upstream.begin() else {
+                for event in failed("all playground slots are busy (MDMA_WEB_MAX_STREAMS)") {
+                    yielder.yield_item(event).await;
+                }
+                return;
+            };
+            yielder.yield_item(element(pages::run_error(""))).await;
+            yielder.yield_item(element(pages::output(model))).await;
+            yielder
+                .yield_item(starting(run.id, &request.model, model, 0))
+                .await;
+            let started = Instant::now();
+            let reply = match deadline::request(request.to_proto(), upstream.rpc_timeout) {
+                Ok(call) => tokio::select! {
+                    () = run.cancel.cancelled() => {
+                        yielder.yield_item(progress(&json!({ "phase": "stopped" }))).await;
+                        return;
+                    }
+                    reply = upstream.client.decide(call) => reply
+                        .map(|reply| reply.into_inner().result_json)
+                        .map_err(|status| format!("{:?}: {}", status.code(), status.message())),
+                },
+                Err(error) => Err(error.to_string()),
+            };
+            match reply.and_then(|result| request.verdicts(&result)) {
+                Ok((verdicts, input_tokens)) => {
+                    yielder
+                        .yield_item(element(pages::verdicts(&verdicts)))
+                        .await;
+                    yielder
+                        .yield_item(progress(&json!({
+                            "phase": "done", "prompt_tokens": input_tokens,
+                            "dt_ms": started.elapsed().as_millis(),
+                        })))
+                        .await;
+                }
+                Err(message) => {
+                    for event in failed(message) {
+                        yielder.yield_item(event).await;
+                    }
+                }
+            }
+            return;
+        }
         let request = match RunRequest::parse(&signals) {
             Ok(request) => request,
             Err(message) => {
@@ -161,8 +324,6 @@ pub(super) async fn run(
             }
             return;
         };
-        let status = upstream.snapshot();
-        let model = status.model(&request.model);
         if request.chat
             && let Some(m) = model.filter(|m| m.chat_format.is_empty())
         {
@@ -172,21 +333,10 @@ pub(super) async fn run(
             return;
         }
         yielder.yield_item(element(pages::run_error(""))).await;
-        yielder.yield_item(element(pages::output())).await;
-        // The server loads a model on first use; Accepted follows the load.
-        let phase = if model.is_some_and(|m| m.residency != "resident") {
-            "loading"
-        } else {
-            "prefill"
-        };
-        yielder.yield_item(progress(&json!({
-            "id": run.id, "phase": phase, "error": "",
-            "model": model.map_or(request.model.as_str(), |m| m.name.as_str()),
-            "n_ctx": model.map_or(0, |m| m.n_ctx), "max_tokens": request.max_tokens,
-            "kv_bytes_per_token": model.and_then(|m| m.geometry.as_ref()).map_or(0, |g| g.kv_bytes_per_token),
-            "emitted": 0, "tok_s": 0, "ttft_ms": 0, "dt_ms": 0,
-            "prompt_tokens": 0, "finish_reason": "", "prefill_ms": 0, "decode_ms": 0,
-        }))).await;
+        yielder.yield_item(element(pages::output(model))).await;
+        yielder
+            .yield_item(starting(run.id, &request.model, model, request.max_tokens))
+            .await;
 
         let started = Instant::now();
         let call = match deadline::request(request.into_proto(), upstream.rpc_timeout) {
@@ -282,8 +432,9 @@ pub(super) async fn run(
     }))
 }
 
-/// What a page shows after choosing `name`: an idle generation sized to that
-/// model, an empty output, and chat on only when the model has a template.
+/// What a page shows after choosing `name`: the inputs that model takes, an
+/// idle run sized to it, an empty output, and chat on only when it has a
+/// template.
 pub(super) fn selection(status: &super::upstream::Status, name: &str) -> Vec<Event> {
     let model = status.model(name);
     let chat = pages::chat_template(model).is_ok();
@@ -299,9 +450,9 @@ pub(super) fn selection(status: &super::upstream::Status, name: &str) -> Vec<Eve
                 "prompt_tokens": 0, "finish_reason": "", "prefill_ms": 0, "decode_ms": 0,
             },
         })),
-        element(pages::chat_toggle(model)),
-        element(pages::marker_chips(model)),
-        element(pages::output()),
+        element(pages::inputs(model)),
+        element(pages::stats(model)),
+        element(pages::output(model)),
         element(pages::run_error("")),
     ]
 }

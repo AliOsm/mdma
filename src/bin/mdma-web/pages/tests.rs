@@ -454,11 +454,16 @@ fn marker_chips_follow_the_models_chat_format() {
         !inst.contains(">reply<") && inst.contains(r#"data-marker-close="</s>""#),
         "[INST] replies right after the turn: {inst}"
     );
-    for (m, why) in [
-        (model("", "cpu"), "no chat template"),
-        (model("", "federated/cuda"), "not on federated routes"),
-    ] {
+    for m in [model("", "cpu"), model("", "federated/cuda")] {
         let shown = html(&m);
-        assert!(!shown.contains("<button") && shown.contains(why), "{shown}");
+        assert!(
+            !shown.contains("<button") && shown.contains("no chat template"),
+            "{shown}"
+        );
     }
+    let routed = html(&model("chatml", "federated/cuda"));
+    assert!(
+        routed.contains(">user</button>"),
+        "routes carry markers: {routed}"
+    );
 }

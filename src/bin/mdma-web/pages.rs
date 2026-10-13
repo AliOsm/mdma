@@ -42,7 +42,7 @@ impl View {
 /// The page's signals; chat starts on when the default model has a chat template.
 fn signals(status: &Status) -> String {
     format!(
-        "{{prompt: '', model: '', chat: {}, system: 'You are a helpful assistant.', max_tokens: 128, temperature: '', \
+        "{{prompt: '', document: '', claims: '', model: '', chat: {}, system: 'You are a helpful assistant.', max_tokens: 128, temperature: '', \
          top_p: '', min_p: '', repetition_penalty: '', _scene: '', _gen: {{id: 0, phase: 'idle', model: '', n_ctx: 0, \
          max_tokens: 0, emitted: 0, tok_s: 0, ttft_ms: 0, dt_ms: 0, prompt_tokens: 0, finish_reason: '', prefill_ms: 0, \
          kv_bytes_per_token: 0, decode_ms: 0, error: ''}}}}",
@@ -53,6 +53,11 @@ fn signals(status: &Status) -> String {
 /// Generation is running; the model cannot change meanwhile.
 const BUSY: &str =
     "$_gen.phase == 'loading' || $_gen.phase == 'prefill' || $_gen.phase == 'decode'";
+
+/// Whether `model` checks claims against a document (MiniCheck's `Decide`).
+pub(super) fn checks_claims(model: Option<&ModelStatus>) -> bool {
+    model.is_some_and(|m| m.decision == "minicheck")
+}
 
 /// Whether `model` can take a chat turn, else why not.
 pub(super) fn chat_template(model: Option<&ModelStatus>) -> Result<(), &'static str> {
@@ -601,8 +606,72 @@ pub(super) fn chat_toggle(model: Option<&ModelStatus>) -> impl IntoHtml + use<> 
 }
 
 fn playground(status: &Status) -> impl IntoHtml + use<> {
+    let model = status.model("");
     (
         label!(span!("model"), model_select(status)),
+        inputs(model),
+        div!(
+            class = "actions",
+            button!(
+                r#type = "button",
+                "data-on:click" = "@post('/playground/run')",
+                "data-attr:disabled" = BUSY,
+                "Run"
+            ),
+            button!(
+                r#type = "button",
+                class = "ghost",
+                "data-show" = BUSY,
+                "data-on:click" = "@post('/playground/stop?id=' + $_gen.id)",
+                "Stop"
+            ),
+        ),
+        p!(id = "run-error", class = "error"),
+        stats(model),
+        output(model),
+    )
+}
+
+/// What `model` takes: a document and claims for a claim checker, else a
+/// prompt with its markers, chat toggle and sampler settings.
+pub(super) fn inputs(model: Option<&ModelStatus>) -> impl IntoHtml + use<> {
+    let claims = checks_claims(model);
+    div!(
+        id = "inputs",
+        claims.then(claim_inputs),
+        (!claims).then(|| prompt_inputs(model)),
+    )
+}
+
+fn claim_inputs() -> impl IntoHtml {
+    (
+        label!(
+            span!("document"),
+            textarea!(
+                id = "document",
+                rows = "8",
+                "data-bind:document" = "",
+                placeholder = "The text the claims are checked against…"
+            )
+        ),
+        label!(
+            span!("claims"),
+            textarea!(
+                id = "claims",
+                rows = "4",
+                "data-bind:claims" = "",
+                placeholder = "One claim per line"
+            )
+        ),
+        small!(
+            class = "hint",
+            "Each claim is supported when the document substantiates all of it (MiniCheck)."
+        ),
+    )
+}
+
+fn prompt_inputs(model: Option<&ModelStatus>) -> impl IntoHtml + use<> {
+    (
         label!(
             span!("prompt"),
             textarea!(
@@ -612,8 +681,8 @@ fn playground(status: &Status) -> impl IntoHtml + use<> {
                 placeholder = "Write a prompt…"
             )
         ),
-        marker_chips(status.model("")),
-        chat_toggle(status.model("")),
+        marker_chips(model),
+        chat_toggle(model),
         label!(
             "data-show" = "$chat",
             span!("system"),
@@ -677,40 +746,82 @@ fn playground(status: &Status) -> impl IntoHtml + use<> {
                 )
             ),
         ),
-        div!(
-            class = "actions",
-            button!(
-                r#type = "button",
-                "data-on:click" = "@post('/playground/run')",
-                "data-attr:disabled" = BUSY,
-                "Run"
-            ),
-            button!(
-                r#type = "button",
-                class = "ghost",
-                "data-show" = BUSY,
-                "data-on:click" = "@post('/playground/stop?id=' + $_gen.id)",
-                "Stop"
-            ),
+    )
+}
+
+/// The run's numbers: tokens and timings for a generation, input and time
+/// for a claim check.
+pub(super) fn stats(model: Option<&ModelStatus>) -> impl IntoHtml + use<> {
+    let claims = checks_claims(model);
+    dl!(
+        id = "stats",
+        class = "stats",
+        dt!("phase"),
+        dd!("data-text" =
+            "$_gen.phase + ($_gen.finish_reason ? ' · ' + $_gen.finish_reason : '')"),
+        claims.then(|| {
+            (
+                dt!("input"),
+                dd!("data-text" = "$_gen.prompt_tokens + ' tokens'"),
+                dt!("time"),
+                dd!("data-text" = "$_gen.dt_ms + ' ms'"),
+            )
+        }),
+        (!claims).then(|| {
+            (
+                dt!("prompt"),
+                dd!("data-text" = "$_gen.prompt_tokens + ' tokens of ' + $_gen.n_ctx"),
+                dt!("generated"),
+                dd!("data-text" = "$_gen.emitted + ' / ' + $_gen.max_tokens"),
+                dt!("decode"),
+                dd!("data-text" = "$_gen.tok_s.toFixed(1) + ' tok/s'"),
+                dt!("first token"),
+                dd!(
+                    "data-text" = "$_gen.ttft_ms + ' ms' + ($_gen.prefill_ms ? ' (server ' + $_gen.prefill_ms + ' ms)' : '')"
+                ),
+            )
+        }),
+    )
+}
+
+/// One verdict per claim, in claim order.
+pub(super) struct Verdict {
+    pub claim: String,
+    pub supported: bool,
+    pub probability: f64,
+}
+
+/// The claims' verdicts, with the probability that each is supported.
+pub(super) fn verdicts(verdicts: &[Verdict]) -> impl IntoHtml + use<> {
+    let rows: Vec<_> = verdicts
+        .iter()
+        .map(|v| {
+            let (class, label) = if v.supported {
+                ("verdict supported", "supported")
+            } else {
+                ("verdict unsupported", "unsupported")
+            };
+            tr!(
+                td!(v.claim.clone()),
+                td!(class = class, label),
+                td!(
+                    class = "num",
+                    span!(
+                        class = "bar",
+                        style = format!("width: {:.1}%", v.probability * 100.0)
+                    ),
+                    format!("{:.3}", v.probability),
+                ),
+            )
+        })
+        .collect();
+    div!(
+        id = "output",
+        class = "verdicts",
+        table!(
+            thead!(tr!(th!("claim"), th!("verdict"), th!("P(yes)"))),
+            tbody!(rows),
         ),
-        p!(id = "run-error", class = "error"),
-        dl!(
-            class = "stats",
-            dt!("phase"),
-            dd!("data-text" =
-                "$_gen.phase + ($_gen.finish_reason ? ' · ' + $_gen.finish_reason : '')"),
-            dt!("prompt"),
-            dd!("data-text" = "$_gen.prompt_tokens + ' tokens of ' + $_gen.n_ctx"),
-            dt!("generated"),
-            dd!("data-text" = "$_gen.emitted + ' / ' + $_gen.max_tokens"),
-            dt!("decode"),
-            dd!("data-text" = "$_gen.tok_s.toFixed(1) + ' tok/s'"),
-            dt!("first token"),
-            dd!(
-                "data-text" = "$_gen.ttft_ms + ' ms' + ($_gen.prefill_ms ? ' (server ' + $_gen.prefill_ms + ' ms)' : '')"
-            ),
-        ),
-        pre!(id = "output"),
     )
 }
 
@@ -718,8 +829,13 @@ pub(super) fn run_error(message: &str) -> impl IntoHtml + use<> {
     p!(id = "run-error", class = "error", message.to_owned())
 }
 
-pub(super) fn output() -> impl IntoHtml {
-    pre!(id = "output")
+/// An empty output: streamed text for a generation, verdicts for a claim check.
+pub(super) fn output(model: Option<&ModelStatus>) -> impl IntoHtml + use<> {
+    let claims = checks_claims(model);
+    (
+        claims.then(|| div!(id = "output", class = "verdicts")),
+        (!claims).then(|| pre!(id = "output")),
+    )
 }
 
 const fn active(current: bool) -> &'static str {

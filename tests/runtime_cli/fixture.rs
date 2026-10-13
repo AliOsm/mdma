@@ -8,6 +8,55 @@ use candle_core::{
 use std::collections::BTreeMap;
 
 pub fn model(width: usize) -> tempfile::NamedTempFile {
+    build(width, |_| {})
+}
+
+/// The same weights, shaped like Bespoke-MiniCheck: named and tagged as it,
+/// with a ChatML template whose markers and `Yes`/`yes` take the byte
+/// slots 1 to 4 (control bytes no test text uses).
+#[allow(dead_code)] // Not every test binary checks claims.
+pub fn minicheck(width: usize) -> tempfile::NamedTempFile {
+    build(width, |metadata| {
+        let Some(Value::Array(tokens)) = metadata.get_mut("tokenizer.ggml.tokens") else {
+            unreachable!("build lists the tokens")
+        };
+        for (id, piece) in [
+            (1, "<|im_start|>"),
+            (2, "<|im_end|>"),
+            (3, "Yes"),
+            (4, "yes"),
+        ] {
+            tokens[id] = Value::String(piece.into());
+        }
+        let types = (0..128)
+            .map(|id| match id {
+                1 | 2 => Value::I32(3),
+                3 | 4 => Value::I32(1),
+                _ => Value::I32(6),
+            })
+            .collect();
+        for (key, value) in [
+            ("tokenizer.ggml.token_type", Value::Array(types)),
+            (
+                "tokenizer.chat_template",
+                Value::String(
+                    "{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}".into(),
+                ),
+            ),
+            ("general.basename", Value::String("Bespoke-MiniCheck".into())),
+            // Byte tokens: the system prompt alone is ~400 of them.
+            ("internlm2.context_length", Value::U32(1024)),
+            (
+                "general.tags",
+                Value::Array(vec![Value::String("text-classification".into())]),
+            ),
+        ] {
+            metadata.insert(key.into(), value);
+        }
+    })
+}
+
+fn build(width: usize, edit: impl FnOnce(&mut BTreeMap<String, Value>)) -> tempfile::NamedTempFile {
     let mut metadata = BTreeMap::from([
         (
             "general.architecture".to_owned(),
@@ -43,6 +92,7 @@ pub fn model(width: usize) -> tempfile::NamedTempFile {
     ] {
         metadata.insert(format!("internlm2.{key}"), Value::U32(value as u32));
     }
+    edit(&mut metadata);
     let weight = |shape: &[usize], seed: usize| {
         let values: Vec<f32> = (0..shape.iter().product())
             .map(|i| {

@@ -83,6 +83,8 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
     let models = dir.path().join("models");
     std::fs::create_dir(&models).unwrap();
     std::fs::copy(model.path(), models.join("tiny.gguf")).unwrap();
+    // Listed after tiny, so tiny stays the default.
+    std::fs::copy(fixture::minicheck(8).path(), models.join("verify.gguf")).unwrap();
 
     // The gateway's certificate is an operator.
     let pin = Command::new(env!("CARGO_BIN_EXE_mdma-certs"))
@@ -281,16 +283,18 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
         "a loaded model's geometry reaches the scene JSON: {status}"
     );
     // Choosing a model sizes the scene to it and, without a template, turns chat off.
-    let body = r#"{"model":"tiny"}"#;
-    let chosen = http(
-        port,
-        &format!(
-            "POST /playground/model HTTP/1.1\r\nHost: {host}\r\nCookie: {cookie}\r\nOrigin: http://{host}\r\n\
-             Datastar-Request: true\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        ),
-        |_| false,
-    );
+    let choose = |body: &str| {
+        http(
+            port,
+            &format!(
+                "POST /playground/model HTTP/1.1\r\nHost: {host}\r\nCookie: {cookie}\r\nOrigin: http://{host}\r\n\
+                 Datastar-Request: true\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+            |_| false,
+        )
+    };
+    let chosen = choose(r#"{"model":"tiny"}"#);
     assert!(
         chosen.contains(r#""chat":false"#)
             && chosen.contains(r#""n_ctx":64"#)
@@ -312,6 +316,76 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
     assert!(
         invalid.contains("prompt is empty") && invalid.contains(r#""phase":"error""#),
         "{invalid}"
+    );
+
+    // A claim checker opens what it takes, a document and claims, and its
+    // run answers through Decide: one verdict per claim.
+    let chosen = choose(r#"{"model":"verify"}"#);
+    assert!(
+        chosen.contains(r#"<textarea id="document""#)
+            && chosen.contains(r#"<textarea id="claims""#)
+            && !chosen.contains(r#"id="markers""#)
+            && chosen.contains(r#"<div id="output" class="verdicts"></div>"#),
+        "{chosen}"
+    );
+    let checked = run(
+        &format!("http://{host}"),
+        r#"{"model":"verify","document":"The sky is blue.","claims":"The sky is blue.\n\nThe sky is green."}"#,
+    );
+    let shares: Vec<f64> = checked
+        .split("width: ")
+        .skip(1)
+        .map(|rest| rest.split('%').next().unwrap().parse().unwrap())
+        .collect();
+    assert!(
+        checked.contains(r#"class="verdicts""#)
+            && checked.matches(r#"<td class="verdict "#).count() == 2
+            && shares.len() == 2
+            && shares.iter().all(|share| (0.0..=100.0).contains(share))
+            && checked.contains(r#""phase":"done","prompt_tokens":"#)
+            && !checked.contains(r#""phase":"done","prompt_tokens":0,"#),
+        "{checked}"
+    );
+    let missing = run(
+        &format!("http://{host}"),
+        r#"{"model":"verify","document":"The sky is blue.","claims":" \n"}"#,
+    );
+    assert!(missing.contains("write 1 to 128 claims"), "{missing}");
+    // The same contract straight over gRPC; a text generator refuses it.
+    let request = dir.path().join("decide.json");
+    std::fs::write(
+        &request,
+        r#"{"state": {"document": "The sky is blue."}, "questions": {"a": {"claim": "The sky is blue."}}}"#,
+    )
+    .unwrap();
+    let decide = |model: &str| {
+        command(env!("CARGO_BIN_EXE_mdma-client"))
+            .env("MDMA_ADDR", format!("localhost:{serve_port}"))
+            .env("MDMA_MODEL", model)
+            .env("MDMA_TLS_CERT", certs.join("client.pem"))
+            .env("MDMA_TLS_KEY", certs.join("client-key.pem"))
+            .env("MDMA_TLS_CA", certs.join("ca.pem"))
+            .arg("--decide")
+            .arg(&request)
+            .output()
+            .unwrap()
+    };
+    let answered = decide("verify");
+    let result: serde_json::Value =
+        serde_json::from_slice(&answered.stdout).unwrap_or_else(|e| panic!("{e}: {answered:?}"));
+    let answer = &result["answers"]["a"];
+    assert!(
+        result["model"] == "minicheck"
+            && answer["supported"].is_boolean()
+            && (0.0..=1.0).contains(&answer["probability"].as_f64().unwrap())
+            && result["usage"]["output_tokens"] == 0,
+        "{result}"
+    );
+    let refused = decide("tiny");
+    assert!(
+        !refused.status.success()
+            && String::from_utf8_lossy(&refused.stderr).contains("generates text; use Synthesize"),
+        "{refused:?}"
     );
 
     // Load keeps a model loaded under the gateway's lease until Release.
