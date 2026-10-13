@@ -1,6 +1,9 @@
 // Datastar signal patches (`_scene`, `_gen`) drive the stage.
+import { wireMarkers } from './markers.js'
 import { Stage } from './stage.js'
 import { FederationView, MemoryView, PlaygroundView } from './views.js'
+
+wireMarkers()
 
 const VIEWS = { memory: MemoryView, federation: FederationView, playground: PlaygroundView }
 

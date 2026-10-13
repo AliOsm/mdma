@@ -7,7 +7,7 @@ const SPM_SPACE: char = '\u{2581}';
 
 mod byte_bpe;
 mod chat;
-pub use chat::ChatFormat;
+pub use chat::{ChatFormat, Markers};
 
 pub struct Tokenizer {
     pieces: Vec<String>,

@@ -118,7 +118,11 @@ fn choosing_a_model_resets_the_generation_and_follows_its_chat_template() {
             .iter()
             .map(|(_, html)| html.split('"').nth(1).unwrap_or_default().to_owned())
             .collect();
-        assert_eq!(ids, ["chat-toggle", "output", "run-error"], "{events:?}");
+        assert_eq!(
+            ids,
+            ["chat-toggle", "markers", "output", "run-error"],
+            "{events:?}"
+        );
         (signals, events[1].1.clone())
     };
 

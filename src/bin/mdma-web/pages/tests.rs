@@ -421,3 +421,44 @@ fn host(name: &str, os: &str, line: &str) -> Host {
         ..Host::default()
     }
 }
+
+#[test]
+fn marker_chips_follow_the_models_chat_format() {
+    let model = |chat_format: &str, backend: &str| ModelStatus {
+        name: "m".into(),
+        backend: backend.into(),
+        chat_format: chat_format.into(),
+        ..ModelStatus::default()
+    };
+    let html = |m: &ModelStatus| decode_entities(&marker_chips(Some(m)).into_string()).into_owned();
+    let chatml = html(&model("chatml", "cpu"));
+    for expected in [
+        r#"data-show="!$chat""#,
+        "chatml markers",
+        "data-marker-open=\"<|im_start|>system\n\"",
+        "data-marker-close=\"<|im_end|>\n\"",
+        ">system</button>",
+        ">user</button>",
+        ">assistant</button>",
+        ">reply</button>",
+    ] {
+        assert!(chatml.contains(expected), "missing {expected}: {chatml}");
+    }
+    let gemma = html(&model("gemma", "cpu"));
+    assert!(
+        !gemma.contains(">system<") && gemma.contains(">reply<"),
+        "no system role: {gemma}"
+    );
+    let inst = html(&model("inst", "cpu"));
+    assert!(
+        !inst.contains(">reply<") && inst.contains(r#"data-marker-close="</s>""#),
+        "[INST] replies right after the turn: {inst}"
+    );
+    for (m, why) in [
+        (model("", "cpu"), "no chat template"),
+        (model("", "federated/cuda"), "not on federated routes"),
+    ] {
+        let shown = html(&m);
+        assert!(!shown.contains("<button") && shown.contains(why), "{shown}");
+    }
+}

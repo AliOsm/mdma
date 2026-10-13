@@ -49,41 +49,58 @@ impl ChatFormat {
         zephyr.then_some(Self::Zephyr)
     }
 
-    /// (system turn open/close if the format has a system role, user turn
-    /// open/close, start of the assistant's reply).
-    const fn turns(
-        self,
-    ) -> (
-        Option<(&'static str, &'static str)>,
-        (&'static str, &'static str),
-        &'static str,
-    ) {
+    pub const ALL: [Self; 6] = [
+        Self::ChatMl,
+        Self::Llama3,
+        Self::Zephyr,
+        Self::Gemma,
+        Self::Gemma4,
+        Self::Inst,
+    ];
+
+    /// The format reported as `name()`.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|format| format.name() == name)
+    }
+
+    pub const fn markers(self) -> Markers {
         match self {
-            Self::ChatMl => (
-                Some(("<|im_start|>system\n", "<|im_end|>\n")),
-                ("<|im_start|>user\n", "<|im_end|>\n"),
-                "<|im_start|>assistant\n",
-            ),
-            Self::Llama3 => (
-                Some((
+            Self::ChatMl => Markers {
+                system: Some(("<|im_start|>system\n", "<|im_end|>\n")),
+                user: ("<|im_start|>user\n", "<|im_end|>\n"),
+                assistant: ("<|im_start|>assistant\n", "<|im_end|>\n"),
+            },
+            Self::Llama3 => Markers {
+                system: Some((
                     "<|start_header_id|>system<|end_header_id|>\n\n",
                     "<|eot_id|>",
                 )),
-                ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
-                "<|start_header_id|>assistant<|end_header_id|>\n\n",
-            ),
-            Self::Zephyr => (
-                Some(("<|system|>\n", "</s>\n")),
-                ("<|user|>\n", "</s>\n"),
-                "<|assistant|>\n",
-            ),
-            Self::Gemma => (
-                None,
-                ("<start_of_turn>user\n", "<end_of_turn>\n"),
-                "<start_of_turn>model\n",
-            ),
-            Self::Gemma4 => (None, ("<|turn>user\n", "<turn|>\n"), "<|turn>model\n"),
-            Self::Inst => (None, ("[INST] ", " [/INST]"), ""),
+                user: ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
+                assistant: (
+                    "<|start_header_id|>assistant<|end_header_id|>\n\n",
+                    "<|eot_id|>",
+                ),
+            },
+            Self::Zephyr => Markers {
+                system: Some(("<|system|>\n", "</s>\n")),
+                user: ("<|user|>\n", "</s>\n"),
+                assistant: ("<|assistant|>\n", "</s>\n"),
+            },
+            Self::Gemma => Markers {
+                system: None,
+                user: ("<start_of_turn>user\n", "<end_of_turn>\n"),
+                assistant: ("<start_of_turn>model\n", "<end_of_turn>\n"),
+            },
+            Self::Gemma4 => Markers {
+                system: None,
+                user: ("<|turn>user\n", "<turn|>\n"),
+                assistant: ("<|turn>model\n", "<turn|>\n"),
+            },
+            Self::Inst => Markers {
+                system: None,
+                user: ("[INST] ", " [/INST]"),
+                assistant: ("", "</s>"),
+            },
         }
     }
 
@@ -94,7 +111,11 @@ impl ChatFormat {
 
     /// An optional system message, then one user turn.
     pub fn conversation(self, system: Option<&str>, text: &str) -> String {
-        let (system_turn, (open, close), reply) = self.turns();
+        let Markers {
+            system: system_turn,
+            user: (open, close),
+            assistant: (reply, _),
+        } = self.markers();
         match (system, system_turn) {
             (Some(system), Some((s_open, s_close))) => {
                 format!("{s_open}{system}{s_close}{open}{text}{close}{reply}")
@@ -103,6 +124,16 @@ impl ChatFormat {
             (None, _) => format!("{open}{text}{close}{reply}"),
         }
     }
+}
+
+/// A format's turns: each is `open`, the text, then `close`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Markers {
+    /// `None` when the format has no system role.
+    pub system: Option<(&'static str, &'static str)>,
+    pub user: (&'static str, &'static str),
+    /// Its `open` is where the model's reply starts.
+    pub assistant: (&'static str, &'static str),
 }
 
 #[cfg(test)]

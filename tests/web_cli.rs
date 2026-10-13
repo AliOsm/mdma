@@ -295,7 +295,8 @@ fn browser_gateway_serves_live_views_and_streams_generation() {
         chosen.contains(r#""chat":false"#)
             && chosen.contains(r#""n_ctx":64"#)
             && chosen.contains("no chat template")
-            && chosen.contains(r#"<pre id="output"></pre>"#),
+            && chosen.contains(r#"<pre id="output"></pre>"#)
+            && chosen.contains(r#"<div id="markers""#),
         "{chosen}"
     );
     // The fixture has no chat template.

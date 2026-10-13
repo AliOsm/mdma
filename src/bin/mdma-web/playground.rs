@@ -300,6 +300,7 @@ pub(super) fn selection(status: &super::upstream::Status, name: &str) -> Vec<Eve
             },
         })),
         element(pages::chat_toggle(model)),
+        element(pages::marker_chips(model)),
         element(pages::output()),
         element(pages::run_error("")),
     ]

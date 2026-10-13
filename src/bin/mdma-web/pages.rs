@@ -532,6 +532,55 @@ pub(super) fn model_select(status: &Status) -> impl IntoHtml + use<> {
     )
 }
 
+/// The model's turn markers as chips that wrap the prompt's selection, for
+/// writing raw prompts in its own format; shown while chat is off.
+pub(super) fn marker_chips(model: Option<&ModelStatus>) -> impl IntoHtml + use<> {
+    let format = model.and_then(|m| mdma::tokenizer::ChatFormat::from_name(&m.chat_format));
+    let chips: Vec<_> = format
+        .map(|format| {
+            let markers = format.markers();
+            let (reply, _) = markers.assistant;
+            [
+                markers.system.map(|turn| ("system", turn)),
+                Some(("user", markers.user)),
+                Some(("assistant", markers.assistant)),
+                (!reply.is_empty()).then_some(("reply", (reply, ""))),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|(label, (open, close))| {
+                button!(
+                    r#type = "button",
+                    class = "small ghost marker",
+                    title = format!("{open}…{close}"),
+                    "data-marker-open" = open,
+                    "data-marker-close" = close,
+                    label,
+                )
+            })
+            .collect()
+        })
+        .unwrap_or_default();
+    let hint = if chips.is_empty() {
+        format!(
+            "no chat markers: {}",
+            chat_template(model).err().unwrap_or("unknown format")
+        )
+    } else {
+        format!(
+            "{} markers",
+            format.map_or("", mdma::tokenizer::ChatFormat::name)
+        )
+    };
+    div!(
+        id = "markers",
+        class = "markers",
+        "data-show" = "!$chat",
+        small!(class = "hint", hint),
+        chips,
+    )
+}
+
 /// The chat toggle, off and disabled for a model that cannot chat.
 pub(super) fn chat_toggle(model: Option<&ModelStatus>) -> impl IntoHtml + use<> {
     let unavailable = chat_template(model).err();
@@ -555,11 +604,13 @@ fn playground(status: &Status) -> impl IntoHtml + use<> {
         label!(
             span!("prompt"),
             textarea!(
+                id = "prompt",
                 rows = "6",
                 "data-bind:prompt" = "",
                 placeholder = "Write a prompt…"
             )
         ),
+        marker_chips(status.model("")),
         chat_toggle(status.model("")),
         label!(
             "data-show" = "$chat",

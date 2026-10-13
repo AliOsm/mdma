@@ -117,3 +117,22 @@ fn user_turns_end_where_the_reply_starts() {
         ["chatml", "llama3", "zephyr", "gemma", "gemma4", "inst"]
     );
 }
+
+#[test]
+fn every_format_round_trips_its_name_and_builds_turns_from_its_markers() {
+    for format in ChatFormat::ALL {
+        assert_eq!(ChatFormat::from_name(format.name()), Some(format));
+        let markers = format.markers();
+        assert_eq!(
+            format.user_turn("hi"),
+            format!(
+                "{}hi{}{}",
+                markers.user.0, markers.user.1, markers.assistant.0
+            ),
+            "{format:?}"
+        );
+    }
+    assert_eq!(ChatFormat::from_name("jinja"), None);
+    assert_eq!(ChatFormat::ChatMl.markers().assistant.1, "<|im_end|>\n");
+    assert_eq!(ChatFormat::Inst.markers().assistant, ("", "</s>"));
+}
