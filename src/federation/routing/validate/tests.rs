@@ -22,6 +22,9 @@ fn fixture() -> (SynthesizeRequest, ModelDescriptor, SynthesizeEvent) {
             n_ctx: 32,
             max_output_tokens: 8,
         },
+        parameters: 2648,
+        quantization: "F32".into(),
+        trained_ctx: 64,
     };
     let envelope = ExecutionEnvelope {
         origin: "origin.mdma.test".into(),

@@ -80,6 +80,9 @@ impl Topology {
                             class: m.class.as_str().into(),
                             capabilities: crate::registry::Capability::names(&m.capabilities),
                             resident: m.resident,
+                            parameters: m.parameters,
+                            quantization: m.quantization,
+                            trained_ctx: m.trained_ctx,
                         })
                         .collect(),
                 });

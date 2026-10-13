@@ -100,11 +100,36 @@ pub struct Info {
     pub kind: Kind,
     pub architecture: String,
     pub n_ctx: usize,
+    /// The model's own context, before `Options::n_ctx` caps it.
+    pub trained_ctx: usize,
     /// On disk; aliases repeat it.
     pub disk_bytes: u64,
+    /// Elements across the weights' tensors, from the file header; 0 when unknown.
+    pub parameters: u64,
+    /// "Q4_K_M", "F16"; for Laya the safetensors dtype. Empty when unknown.
+    pub quantization: String,
     pub class: Class,
     pub capabilities: Vec<Capability>,
     pub chat_format: Option<ChatFormat>,
+}
+
+/// A parameter count as people write it: "494M", "1.1B", "7.2B"; empty for 0.
+pub fn parameters_label(n: u64) -> String {
+    const UNITS: [&str; 5] = ["", "K", "M", "B", "T"];
+    if n == 0 {
+        return String::new();
+    }
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 999.5 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    match unit {
+        0 => n.to_string(),
+        _ if value < 9.95 => format!("{value:.1}{}", UNITS[unit]),
+        _ => format!("{value:.0}{}", UNITS[unit]),
+    }
 }
 
 /// One name and its state, for status reports.
@@ -183,11 +208,15 @@ impl<B: Backend> Registry<B> {
         n_ctx: usize,
         decoder: Decoder<B>,
     ) -> Self {
+        let trained_ctx = decoder.model.config().n_ctx;
         let info = Info {
             kind: Kind::Gguf,
             architecture: architecture.to_owned(),
-            n_ctx: n_ctx.min(decoder.model.config().n_ctx),
+            n_ctx: n_ctx.min(trained_ctx),
+            trained_ctx,
             disk_bytes: 0,
+            parameters: 0,
+            quantization: String::new(),
             class: Class::Generative,
             capabilities: Vec::new(),
             chat_format: decoder.tokenizer.chat_format(),
@@ -291,7 +320,10 @@ impl<B: Backend> Registry<B> {
                     kind: Kind::Gguf,
                     architecture: architecture(&gguf),
                     n_ctx: self.options.n_ctx.min(config.n_ctx),
+                    trained_ctx: config.n_ctx,
                     disk_bytes: pinned.len(),
+                    parameters: gguf.parameters(),
+                    quantization: gguf.quantization(),
                     class,
                     capabilities,
                     chat_format: tokenizer.chat_format(),
@@ -311,11 +343,16 @@ impl<B: Backend> Registry<B> {
                     return Ok(index);
                 }
                 let checkpoint = crate::laya::config::Checkpoint::open(dir)?;
+                let weights = dir.join("model.safetensors");
+                let header = crate::model::weights::Header::read(&weights)?;
                 let info = Info {
                     kind: Kind::Laya,
                     architecture: checkpoint.encoder.model_type,
                     n_ctx: checkpoint.agent.max_len,
-                    disk_bytes: std::fs::metadata(dir.join("model.safetensors"))?.len(),
+                    trained_ctx: checkpoint.agent.max_len,
+                    disk_bytes: std::fs::metadata(weights)?.len(),
+                    parameters: header.parameters,
+                    quantization: header.dtype,
                     class: Class::Decision,
                     capabilities: Vec::new(),
                     chat_format: None,

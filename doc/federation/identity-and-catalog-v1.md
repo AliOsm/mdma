@@ -200,6 +200,13 @@ Each descriptor contains:
 | `class` | `generative`, `decision`, `embedding` or `reranker` |
 | `capabilities` | Unique subset of `reasoning`, `tools`, `vision`, `audio`, in that order |
 | `resident` | Weights are loaded now; otherwise the first request loads them. Not part of the selection: routes and admission ignore it |
+| `parameters` | Elements across the artifact's tensors, at most 2^53 - 1; `0` when unknown |
+| `quantization` | llama.cpp's file type (`Q4_K_M`, `F16`), else the tensor type holding the most bytes (`Q4_K`); Laya's safetensors dtype (`F32`). At most 32 bytes of `[A-Za-z0-9._-]`; empty when unknown |
+| `trained_ctx` | The model's own context; for `synthesize`, at least `n_ctx`. `0` when unknown |
+
+`parameters`, `quantization` and `trained_ctx` are read from the artifact's
+header when the server lists the model, without loading weights. They are
+fixed per artifact and part of the selection.
 
 `synthesize` limits contain positive `n_ctx` and `max_output_tokens`, with
 `max_output_tokens <= n_ctx`. A native executor advertises its model's context

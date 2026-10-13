@@ -7,16 +7,18 @@ const SYSTEMS = [
 ]
 const BACKEND = { CPU: 'cpu', 'Apple M4 Max': 'metal', 'Apple M2 Pro': 'metal', 'Apple M3': 'metal', 'NVIDIA RTX 4090': 'cuda' }
 const MODELS = [
-  { name: 'qwen3-8b', architecture: 'qwen3', class: 'generative', capabilities: ['reasoning'] },
-  { name: 'llama-3.1-8b', architecture: 'llama', class: 'generative', capabilities: ['tools'] },
-  { name: 'tinyllama', architecture: 'llama', class: 'generative', capabilities: [] },
-  { name: 'gemma-3-4b', architecture: 'gemma3', class: 'generative', capabilities: ['vision'] },
-  { name: 'minicheck', architecture: 'internlm2', class: 'decision', capabilities: [] },
-  { name: 'laya', architecture: 'modernbert', class: 'decision', capabilities: [] },
-  { name: 'bge-m3', architecture: 'bert', class: 'embedding', capabilities: [] },
-  { name: 'qwen3-reranker', architecture: 'qwen3', class: 'reranker', capabilities: [] },
-  { name: 'whisper-large', architecture: 'whisper', class: 'generative', capabilities: ['audio'] },
+  { name: 'qwen3-8b', architecture: 'qwen3', class: 'generative', capabilities: ['reasoning'], parameters: 8190735360, quantization: 'Q4_K_M', trained_ctx: 40960 },
+  { name: 'llama-3.1-8b', architecture: 'llama', class: 'generative', capabilities: ['tools'], parameters: 8030261248, quantization: 'Q4_K_M', trained_ctx: 131072 },
+  { name: 'tinyllama', architecture: 'llama', class: 'generative', capabilities: [], parameters: 1100048384, quantization: 'Q4_K_M', trained_ctx: 2048 },
+  { name: 'gemma-3-4b', architecture: 'gemma3', class: 'generative', capabilities: ['vision'], parameters: 3880263040, quantization: 'Q4_K_M', trained_ctx: 131072 },
+  { name: 'minicheck', architecture: 'internlm2', class: 'decision', capabilities: [], parameters: 7737708544, quantization: 'Q4_K_M', trained_ctx: 32768 },
+  { name: 'laya', architecture: 'modernbert', class: 'decision', capabilities: [], parameters: 149655232, quantization: 'F32', trained_ctx: 512 },
+  { name: 'bge-m3', architecture: 'bert', class: 'embedding', capabilities: [], parameters: 567754752, quantization: 'F16', trained_ctx: 8192 },
+  { name: 'qwen3-reranker', architecture: 'qwen3', class: 'reranker', capabilities: [], parameters: 595776512, quantization: 'Q8_0', trained_ctx: 40960 },
+  { name: 'whisper-large', architecture: 'whisper', class: 'generative', capabilities: ['audio'], parameters: 1543490560, quantization: 'F16', trained_ctx: 448 },
 ]
+/** The served context: the trained one, capped like MDMA_N_CTX=4096. */
+const nCtx = (m) => Math.min(4096, m.trained_ctx)
 
 /** mulberry32 */
 function random(seed) {
@@ -64,7 +66,7 @@ export function stubStatus({ peers = 100, seed = 1, federated = false } = {}) {
   }
   const self = { name: 'periscope', os: 'macos', os_name: 'macOS 15.6', arch: 'arm64', cpu: 'Apple M4 Max', memory_bytes: 128 * 1024 ** 3, device: 'Apple M4 Max' }
   const local = [[MODELS[2], 'resident', 1], [MODELS[4], 'available', 0], [MODELS[0], 'loading', 1]]
-    .map(([m, residency, leases]) => ({ ...m, kind: 'gguf', backend: 'metal', n_ctx: 4096, ready: true, host: null, residency, leases, weight_bytes: 2 ** 30 }))
+    .map(([m, residency, leases]) => ({ ...m, kind: 'gguf', backend: 'metal', n_ctx: nCtx(m), ready: true, host: null, residency, leases, weight_bytes: 2 ** 30 }))
   const status = { connected: true, ready: true, state: 'serving', backend: 'metal', default_model: 'tinyllama', host: self, models: local, memory: null, federation: null }
 
   if (federated) {
@@ -73,7 +75,7 @@ export function stubStatus({ peers = 100, seed = 1, federated = false } = {}) {
       endpoint: `https://${host.name}.mdma.test:7443`,
       state: rand() < 0.05 ? 'suspended' : 'active',
       host,
-      catalog: rand() < 0.03 ? null : { server_state: 'serving', models: modelsOf().map((m) => ({ model: m.name, architecture: m.architecture, backend: BACKEND[host.device] ?? 'rocm', ready: true, resident: rand() < 0.5, class: m.class, capabilities: m.capabilities })) },
+      catalog: rand() < 0.03 ? null : { server_state: 'serving', models: modelsOf().map((m) => ({ model: m.name, architecture: m.architecture, backend: BACKEND[host.device] ?? 'rocm', ready: true, resident: rand() < 0.5, class: m.class, capabilities: m.capabilities, parameters: m.parameters, quantization: m.quantization, trained_ctx: m.trained_ctx })) },
     }))
     status.federation = { authorized: true, enabled: true, server_id: 'periscope.mdma.test', trust_generation: 42, peers: fleet, routes: [] }
     return { status }
@@ -82,7 +84,7 @@ export function stubStatus({ peers = 100, seed = 1, federated = false } = {}) {
     const ready = rand() >= 0.05
     for (const m of modelsOf()) {
       const state = residency()
-      status.models.push({ ...m, name: `${host.name}-${m.name}`, kind: 'gguf', backend: `federated/${BACKEND[host.device] ?? 'rocm'}`, n_ctx: 4096, ready, host, residency: state, leases: leases(state) })
+      status.models.push({ ...m, name: `${host.name}-${m.name}`, kind: 'gguf', backend: `federated/${BACKEND[host.device] ?? 'rocm'}`, n_ctx: nCtx(m), ready, host, residency: state, leases: leases(state) })
     }
   }
   return { status }

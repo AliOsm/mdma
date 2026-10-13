@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { COLUMN_HEIGHT, PEER_SPACING, RING_LIMIT, bytes, reservedKv, residency, residencyNote, cellPosition, cellState, contextRing, federationLayout, hostLine, isUp, layerBands, memoryLayout, osRole, peerShell, resources, share, stateRole } from './layout.js'
+import { COLUMN_HEIGHT, PEER_SPACING, RING_LIMIT, bytes, reservedKv, residency, residencyNote, cellPosition, cellState, contextRing, federationLayout, hostLine, isUp, layerBands, memoryLayout, modelFacts, osRole, parameters, peerShell, resources, share, stateRole } from './layout.js'
 import { stubStatus } from './stub.js'
 
 const MiB = 1024 ** 2
@@ -28,7 +28,8 @@ describe('memoryLayout', () => {
     const { columns } = memoryLayout({ status: { models: [model('a'), model('a2')], memory } })
     expect(columns[0].device).toBe('gfx1103')
     expect(columns[0].segments.map((s) => [s.kind, s.label])).toEqual([['weights', 'a = a2'], ['kv', 'KV cache'], ['workspace', 'workspace']])
-    expect(memoryLayout({ status: { models: [model('g', { geometry: { n_layers: 22 } })] } }).columns[0].segments[0].layers).toBe(22)
+    const tiny = model('g', { geometry: { n_layers: 22 }, parameters: 1100048384, quantization: 'Q4_K_M' })
+    expect(memoryLayout({ status: { models: [tiny] } }).columns[0].segments[0]).toMatchObject({ layers: 22, facts: '1.1B · Q4_K_M' })
     expect(columns[0].used).toBe(160 * MiB)
     expect(columns[0].capacity).toBe(1024 * MiB)
   })
@@ -61,11 +62,11 @@ describe('federationLayout', () => {
   })
 
   test('this server carries its local models', () => {
-    const models = [model('tinyllama'), model('minicheck', { class: 'decision' }), model('far', { backend: 'federated/cpu', host: { name: 'w' } })]
+    const models = [model('tinyllama', { parameters: 1100048384, quantization: 'Q4_K_M' }), model('minicheck', { class: 'decision' }), model('far', { backend: 'federated/cpu', host: { name: 'w' } })]
     const { self } = federationLayout({ status: { host: host('periscope', 'macos', 'macOS 15.6', 'arm64', 'Apple M4 Max'), models } })
     expect(self.label).toBe('periscope')
     expect(hostLine(self.host)).toBe('macOS 15.6 · arm64 · Apple M4 Max')
-    expect(self.chips.map((c) => [c.name, c.class])).toEqual([['tinyllama', 'generative'], ['minicheck', 'decision']])
+    expect(self.chips.map((c) => [c.name, c.class, c.facts])).toEqual([['tinyllama', 'generative', '1.1B · Q4_K_M'], ['minicheck', 'decision', '']])
     expect(self.chips.every((c) => c.y > 0)).toBe(true)
   })
 
@@ -93,7 +94,7 @@ describe('federationLayout', () => {
     const topology = {
       authorized: true, enabled: true, server_id: 'home', trust_generation: 7,
       peers: [
-        { peer_id: 'lab', endpoint: 'https://lab:7443', state: 'active', host: host('lab', 'freebsd', 'FreeBSD 16.0-CURRENT', 'amd64', 'CPU'), catalog: { models: [{ model: 'm', class: 'decision', capabilities: [] }] } },
+        { peer_id: 'lab', endpoint: 'https://lab:7443', state: 'active', host: host('lab', 'freebsd', 'FreeBSD 16.0-CURRENT', 'amd64', 'CPU'), catalog: { models: [{ model: 'm', class: 'decision', capabilities: [], parameters: 7737708544, quantization: 'Q4_K_M' }] } },
         { peer_id: 'old', endpoint: 'https://old:7443', state: 'active', catalog: null },
       ],
       routes: [{ alias: 'big', peer_id: 'lab', model: 'm', operation: 'synthesize' }],
@@ -102,7 +103,7 @@ describe('federationLayout', () => {
     expect(layout.self).toMatchObject({ label: 'home', detail: 'serving · trust generation 7' })
     expect(layout.peers[0]).toMatchObject({ id: 'old', stale: true, models: [] })
     expect(layout.peers[1]).toMatchObject({ id: 'lab', state: 'active', stale: false, routes: ['big'] })
-    expect(layout.peers[1].chips[0]).toMatchObject({ name: 'm', class: 'decision' })
+    expect(layout.peers[1].chips[0]).toMatchObject({ name: 'm', class: 'decision', facts: '7.7B · Q4_K_M' })
   })
 })
 
@@ -150,6 +151,9 @@ describe('fullerene federation', () => {
     expect(federated.peers.every((p) => p.host?.os_name)).toBe(true)
     const classes = new Set(federated.peers.flatMap((p) => p.chips.map((c) => c.class)))
     expect([...classes].sort()).toEqual(['decision', 'embedding', 'generative', 'reranker'])
+    expect(federated.peers.flatMap((p) => p.chips).every((c) => c.facts.includes(' · '))).toBe(true)
+    const routed = stubStatus({ peers: 20 }).status.models
+    expect(routed.every((m) => m.n_ctx === Math.min(4096, m.trained_ctx))).toBe(true)
   })
 })
 
@@ -174,6 +178,13 @@ test('layer bands follow whole layers and thin out when crowded', () => {
   expect(layerBands(32, 5)).toBe(32)
   expect(layerBands(32, 0.4)).toBe(8)
   expect(layerBands(80, 1)).toBe(20)
+})
+
+test('parameter counts read like model names', () => {
+  const counts = [0, 999, 2648, 149655232, 494032768, 999600000, 1100048384, 7241732096, 9960000000, 70553706496, 1.5e12]
+  expect(counts.map(parameters)).toEqual(['', '999', '2.6K', '150M', '494M', '1.0B', '1.1B', '7.2B', '10B', '71B', '1.5T'])
+  expect(modelFacts({ parameters: 1100048384, quantization: 'Q4_K_M' })).toBe('1.1B · Q4_K_M')
+  expect([{ quantization: 'F32' }, {}].map(modelFacts)).toEqual(['F32', ''])
 })
 
 test('state roles and byte labels', () => {

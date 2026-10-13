@@ -146,6 +146,27 @@ impl GgufModel {
         self.tensors.get(name)
     }
 
+    /// Elements across every tensor in the header.
+    pub fn parameters(&self) -> u64 {
+        elements(self.tensors.values().map(|desc| desc.shape.as_slice()))
+    }
+
+    /// llama.cpp's name for `general.file_type` ("Q4_K_M"), else the tensor
+    /// type holding the most bytes ("Q4_K").
+    pub fn quantization(&self) -> String {
+        self.metadata_u32("general.file_type")
+            .and_then(file_type_name)
+            .or_else(|| {
+                heaviest(
+                    self.tensors
+                        .values()
+                        .map(|desc| (dtype_name(desc.dtype), desc.n_bytes as u64)),
+                )
+            })
+            .unwrap_or_default()
+            .to_owned()
+    }
+
     /// Resident weight bytes, including a prepared layout's padding/headers.
     pub(crate) fn weight_bytes(&self, name: &str) -> usize {
         self.cached
@@ -207,6 +228,91 @@ impl GgufModel {
         self.file.read_exact(&mut buf)?;
         Ok((buf, crate::cache::WeightLayout::Gguf))
     }
+}
+
+/// llama.cpp's `llama_ftype`, as `llama-quantize` names it.
+fn file_type_name(file_type: u32) -> Option<&'static str> {
+    Some(match file_type {
+        0 => "F32",
+        1 => "F16",
+        2 => "Q4_0",
+        3 => "Q4_1",
+        7 => "Q8_0",
+        8 => "Q5_0",
+        9 => "Q5_1",
+        10 => "Q2_K",
+        11 => "Q3_K_S",
+        12 => "Q3_K_M",
+        13 => "Q3_K_L",
+        14 => "Q4_K_S",
+        15 => "Q4_K_M",
+        16 => "Q5_K_S",
+        17 => "Q5_K_M",
+        18 => "Q6_K",
+        19 => "IQ2_XXS",
+        20 => "IQ2_XS",
+        21 => "Q2_K_S",
+        22 => "IQ3_XS",
+        23 => "IQ3_XXS",
+        24 => "IQ1_S",
+        25 => "IQ4_NL",
+        26 => "IQ3_S",
+        27 => "IQ3_M",
+        28 => "IQ2_S",
+        29 => "IQ2_M",
+        30 => "IQ4_XS",
+        31 => "IQ1_M",
+        32 => "BF16",
+        36 => "TQ1_0",
+        37 => "TQ2_0",
+        38 => "MXFP4_MOE",
+        39 => "NVFP4",
+        40 => "Q1_0",
+        41 => "Q2_0",
+        _ => return None,
+    })
+}
+
+/// ggml's type name.
+const fn dtype_name(dtype: GgmlDType) -> &'static str {
+    match dtype {
+        GgmlDType::F32 => "F32",
+        GgmlDType::F16 => "F16",
+        GgmlDType::BF16 => "BF16",
+        GgmlDType::Q4_0 => "Q4_0",
+        GgmlDType::Q4_1 => "Q4_1",
+        GgmlDType::Q5_0 => "Q5_0",
+        GgmlDType::Q5_1 => "Q5_1",
+        GgmlDType::Q8_0 => "Q8_0",
+        GgmlDType::Q8_1 => "Q8_1",
+        GgmlDType::Q2K => "Q2_K",
+        GgmlDType::Q3K => "Q3_K",
+        GgmlDType::Q4K => "Q4_K",
+        GgmlDType::Q5K => "Q5_K",
+        GgmlDType::Q6K => "Q6_K",
+        GgmlDType::Q8K => "Q8_K",
+    }
+}
+
+/// Elements across tensors of these (overflow-checked) shapes.
+pub(crate) fn elements<'a>(shapes: impl IntoIterator<Item = &'a [usize]>) -> u64 {
+    shapes
+        .into_iter()
+        .map(|shape| shape.iter().product::<usize>() as u64)
+        .fold(0, u64::saturating_add)
+}
+
+/// The type holding the most bytes; ties go to the last in order.
+pub(crate) fn heaviest<T: Ord>(sizes: impl IntoIterator<Item = (T, u64)>) -> Option<T> {
+    let mut totals = std::collections::BTreeMap::new();
+    for (dtype, bytes) in sizes {
+        let total: &mut u64 = totals.entry(dtype).or_default();
+        *total = total.saturating_add(bytes);
+    }
+    totals
+        .into_iter()
+        .max_by_key(|(_, bytes)| *bytes)
+        .map(|(dtype, _)| dtype)
 }
 
 fn tensor_n_bytes(name: &str, dtype: GgmlDType, shape: &[usize]) -> Result<usize> {

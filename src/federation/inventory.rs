@@ -134,6 +134,9 @@ where
             let Some(backend @ ("cpu" | "cuda" | "metal" | "rocm" | "vulkan")) = backend else {
                 continue;
             };
+            let Ok(trained_ctx) = u32::try_from(info.trained_ctx) else {
+                continue;
+            };
             let (kind, limits) = match info.kind {
                 crate::registry::Kind::Gguf => {
                     // The configured maxima: power caps apply at admission, so
@@ -175,6 +178,9 @@ where
                 class: info.class,
                 capabilities: info.capabilities.clone(),
                 resident: entry.phase == Phase::Resident,
+                parameters: info.parameters,
+                quantization: info.quantization.clone(),
+                trained_ctx,
             };
             // Invalid/unsupported local names or limits are unexportable.
             if descriptor.validate().is_ok() {

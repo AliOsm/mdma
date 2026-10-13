@@ -27,7 +27,7 @@ export class MemoryView {
         mesh.userData = segment
         const bands = segment.kind === 'weights' ? layerBands(segment.layers, segment.height) : 0
         if (bands > 1) stage.bands(bands, [1.6, segment.height, 1.6], [column.x, segment.y, 0])
-        const detail = segment.kind === 'weights' && segment.layers ? `${bytes(segment.bytes)} · ${segment.layers} layers` : bytes(segment.bytes)
+        const detail = segment.kind === 'weights' ? [segment.facts, bytes(segment.bytes), segment.layers && `${segment.layers} layers`].filter(Boolean).join(' · ') : bytes(segment.bytes)
         stage.label([segment.label, detail], [column.x + 0.95, segment.y + segment.height / 2, 0.8], `segment ${segment.kind}`, [0, 0.5])
       }
       if (column.onDisk.length) {
@@ -105,7 +105,7 @@ export class FederationView {
       if (look.pulse) this.pulsing.push(atom)
       if (look.ring) stage.orbit(look.ring, 0.28, at, 0)
       chip.capabilities.forEach((capability, k) => stage.orbit(`cap-${capability}`, 0.34 + k * 0.08, at, k * 0.7))
-      stage.label([chip.name, chip.note].filter(Boolean), [chip.x, chip.y - 0.42, chip.z], `chip class-${chip.class}`, [0.5, 0], { near, group })
+      stage.label([chip.name, chip.facts, chip.note].filter(Boolean), [chip.x, chip.y - 0.42, chip.z], `chip class-${chip.class}`, [0.5, 0], { near, group })
     }
   }
 

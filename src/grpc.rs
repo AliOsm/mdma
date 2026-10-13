@@ -712,6 +712,9 @@ where
                 residency: entry.phase.as_str().to_owned(),
                 leases: entry.leases,
                 error: entry.error.unwrap_or_default(),
+                parameters: info.parameters,
+                quantization: info.quantization.clone(),
+                trained_ctx: u32::try_from(info.trained_ctx).unwrap_or(u32::MAX),
             });
         }
         let local = models.len();

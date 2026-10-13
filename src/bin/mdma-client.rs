@@ -14,6 +14,7 @@
 //        mdma-client --decide request.json   ({"state": ..., "questions": {...}} to a Laya model)
 use mdma::grpc::client::mtls_client;
 use mdma::grpc::{DecideRequest, IntrospectRequest, SynthesizeRequest};
+use mdma::registry::parameters_label;
 use rama::error::BoxError;
 use std::io::Write;
 use tokio_stream::StreamExt;
@@ -108,9 +109,18 @@ async fn main() -> Result<(), BoxError> {
             } else {
                 String::new()
             };
+            // From the file header; unknown ones are left out.
+            let facts: String = [
+                (m.parameters > 0).then(|| format!(" params={}", parameters_label(m.parameters))),
+                (!m.quantization.is_empty()).then(|| format!(" q={}", m.quantization)),
+                (m.trained_ctx > 0).then(|| format!(" trained={}", m.trained_ctx)),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             let target = m.host.map_or(m.backend, |host| host.name);
             println!(
-                "  {:<20} {:<9} {:<10} ready={} {} leases={} arch={} n_ctx={}{size}",
+                "  {:<20} {:<9} {:<10} ready={} {} leases={} arch={} n_ctx={}{facts}{size}",
                 m.name, m.kind, target, m.ready, m.residency, m.leases, m.architecture, m.n_ctx,
             );
         }

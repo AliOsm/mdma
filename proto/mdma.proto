@@ -67,6 +67,13 @@ message ModelStatus {
   uint32 leases = 15;
   // Why the last load failed or was refused.
   string error = 16;
+  // Elements across the weights' tensors, from the file header; 0 when unknown.
+  uint64 parameters = 17;
+  // llama.cpp's file type ("Q4_K_M", "F16"), else the tensor type holding the
+  // most bytes ("Q4_K"); Laya: the safetensors dtype. Empty when unknown.
+  string quantization = 18;
+  // The model's own context, before MDMA_N_CTX lowers it to n_ctx; 0 when unknown.
+  uint32 trained_ctx = 19;
 }
 
 message Host {
@@ -194,6 +201,10 @@ message CatalogModel {
   repeated string capabilities = 6;
   // Weights loaded; otherwise the first request loads them.
   bool resident = 7;
+  // As in ModelStatus.
+  uint64 parameters = 8;
+  string quantization = 9;
+  uint32 trained_ctx = 10;
 }
 
 message FederationPeer {

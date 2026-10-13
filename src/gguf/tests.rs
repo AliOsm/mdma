@@ -1,4 +1,4 @@
-use super::{GgmlDType, GgufModel, TensorDesc, tensor_n_bytes, tensor_start};
+use super::{GgmlDType, GgufModel, TensorDesc, heaviest, tensor_n_bytes, tensor_start};
 use candle_core::quantized::{
     QTensor,
     gguf_file::{self, Value},
@@ -117,6 +117,14 @@ impl Fixture {
     pub fn replace(&mut self, name: &str, shape: &[usize], dtype: GgmlDType) {
         self.tensors.iter_mut().find(|(k, _)| k == name).unwrap().1 = weight(shape, dtype, 1);
     }
+
+    /// Elements across every tensor.
+    pub fn parameters(&self) -> u64 {
+        self.tensors
+            .iter()
+            .map(|(_, tensor)| tensor.shape().elem_count() as u64)
+            .sum()
+    }
 }
 
 use crate::backend::test_support::fixture;
@@ -164,4 +172,50 @@ fn tensor_ranges_reject_overflow_and_truncation() {
     assert!(tensor_start("weight", &desc, u64::MAX, u64::MAX).is_err());
     desc.offset = u64::MAX - 16;
     assert!(tensor_start("weight", &desc, 0, u64::MAX).is_err());
+}
+
+#[test]
+fn header_names_the_file_type_else_the_type_holding_the_most_bytes() {
+    let mut fixture = Fixture::new(1, 8);
+    let open = |fixture: &Fixture| GgufModel::open(fixture.write().path()).unwrap();
+    let all_f32 = open(&fixture);
+    assert_eq!(all_f32.parameters(), 2648);
+    assert_eq!(all_f32.parameters(), fixture.parameters());
+    assert_eq!(all_f32.quantization(), "F32");
+    // Embeddings and output in F16 outweigh the F32 rest.
+    for name in ["token_embd.weight", "output.weight"] {
+        fixture.replace(name, &[128, 8], GgmlDType::F16);
+    }
+    for (file_type, expected) in [
+        (None, "F16"),
+        (Some(Value::U32(15)), "Q4_K_M"),
+        (Some(Value::U32(0)), "F32"),
+        (Some(Value::U32(32)), "BF16"),
+        (Some(Value::U32(38)), "MXFP4_MOE"),
+        (Some(Value::U32(41)), "Q2_0"),
+        // Removed from llama.cpp, unknown, or not a u32.
+        (Some(Value::U32(4)), "F16"),
+        (Some(Value::U32(1024)), "F16"),
+        (Some(Value::String("Q4_K_M".into())), "F16"),
+    ] {
+        match &file_type {
+            Some(value) => fixture
+                .metadata
+                .insert("general.file_type".into(), value.clone()),
+            None => fixture.metadata.remove("general.file_type"),
+        };
+        let model = open(&fixture);
+        assert_eq!(model.quantization(), expected, "{file_type:?}");
+        assert_eq!(model.parameters(), 2648, "{file_type:?}");
+    }
+    assert_eq!(
+        heaviest([("Q6_K", 10), ("Q4_K", 30), ("F32", 5), ("Q6_K", 25)]),
+        Some("Q6_K")
+    );
+    assert_eq!(
+        heaviest([("F32", 4), ("F16", 4)]),
+        Some("F32"),
+        "ties go last"
+    );
+    assert_eq!(heaviest::<&str>([]), None);
 }

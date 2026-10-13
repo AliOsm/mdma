@@ -186,7 +186,8 @@ fn forward(model: &Model<CpuBackend>) -> Vec<f32> {
 
 #[test]
 fn preflight_reads_metadata_once_per_file_and_uploads_nothing() {
-    let file = Fixture::new(1, 8).with_tokenizer().write();
+    let fixture = Fixture::new(1, 8).with_tokenizer();
+    let file = fixture.write();
     let backend = Arc::new(LoadBackend::default());
     let registry = Registry::new(
         backend.clone(),
@@ -211,6 +212,15 @@ fn preflight_reads_metadata_once_per_file_and_uploads_nothing() {
         (Kind::Gguf, "internlm2", 16)
     );
     assert_eq!(info.disk_bytes, file.as_file().metadata().unwrap().len());
+    assert_eq!(
+        (
+            info.parameters,
+            info.quantization.as_str(),
+            info.trained_ctx
+        ),
+        (fixture.parameters(), "F32", 64),
+        "from the header, before the cap"
+    );
     // Uncapped, a model gets its trained context; a cap never raises it.
     for cap in [usize::MAX, 1000] {
         let uncapped = Registry::new(
@@ -224,6 +234,26 @@ fn preflight_reads_metadata_once_per_file_and_uploads_nothing() {
     }
     assert_eq!((backend.allocations.get(), backend.uploads.get()), (0, 0));
     assert!(registry.resident("m0").is_none());
+}
+
+#[test]
+fn parameter_counts_read_like_model_names() {
+    for (n, expected) in [
+        (0, ""),
+        (999, "999"),
+        (2648, "2.6K"),
+        (149_655_232, "150M"),
+        (494_032_768, "494M"),
+        (999_600_000, "1.0B"),
+        (1_100_048_384, "1.1B"),
+        (7_241_732_096, "7.2B"),
+        (9_960_000_000, "10B"),
+        (70_553_706_496, "71B"),
+        (1_500_000_000_000, "1.5T"),
+        (u64::MAX, "18446744T"),
+    ] {
+        assert_eq!(parameters_label(n), expected, "{n}");
+    }
 }
 
 #[test]

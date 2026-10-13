@@ -1,6 +1,7 @@
 // Server-rendered views.
 use super::upstream::Status;
 use mdma::grpc::{FederationTopology, Host, MemorySnapshot, MemoryUsage, ModelStatus};
+use mdma::registry::parameters_label;
 use rama::http::protocols::html::*;
 use serde::Deserialize;
 
@@ -140,13 +141,17 @@ pub(super) fn models_panel(status: &Status) -> impl IntoHtml + use<> {
             };
             let detail = join([
                 m.architecture.as_str(),
+                facts(m).as_str(),
                 m.class.as_str(),
                 m.kind.as_str(),
                 target(m).as_str(),
             ]);
+            // The trained context, when MDMA_N_CTX lowers it.
+            let trained =
+                (m.trained_ctx > m.n_ctx).then(|| small!(format!("of {}", m.trained_ctx)));
             tr!(
                 td!(m.name.clone(), small!(format!("{detail}{default}"))),
-                td!(class = "num", m.n_ctx.to_string()),
+                td!(class = "num", m.n_ctx.to_string(), trained),
                 td!(class = "num", weights(m)),
                 td!(residency(m)),
             )
@@ -322,6 +327,9 @@ fn model_list(models: &[&ModelStatus], held: &[String]) -> impl IntoHtml + use<>
                 title = m.class.clone(),
                 m.name.clone()
             ),
+            Some(facts(m))
+                .filter(|facts| !facts.is_empty())
+                .map(|facts| small!(class = "facts", facts)),
             m.capabilities
                 .iter()
                 .map(|c| span!(class = format!("cap {c}"), c.clone()))
@@ -646,6 +654,14 @@ fn weights(m: &ModelStatus) -> String {
     } else {
         bytes(m.weight_bytes)
     }
+}
+
+/// "1.1B · Q4_K_M", from the weights' header.
+fn facts(m: &ModelStatus) -> String {
+    join([
+        parameters_label(m.parameters).as_str(),
+        m.quantization.as_str(),
+    ])
 }
 
 fn is_remote(m: &ModelStatus) -> bool {

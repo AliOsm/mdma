@@ -1040,10 +1040,20 @@ async fn check_normal_client(live: Live) {
         .await
         .unwrap()
         .into_inner();
-    for alias in ["remote-native", "remote-laya"] {
+    for (alias, trained_ctx) in [("remote-native", 64), ("remote-laya", 16)] {
         let status = health.models.iter().find(|m| m.name == alias).unwrap();
         assert!(status.ready);
         assert!(status.backend.starts_with("federated/"));
+        // Header facts travel in the executor's catalog.
+        assert_eq!(
+            (
+                status.parameters > 0,
+                status.quantization.as_str(),
+                status.trained_ctx
+            ),
+            (true, "F32", trained_ctx),
+            "{alias}"
+        );
     }
     live.fixture
         .remote_store

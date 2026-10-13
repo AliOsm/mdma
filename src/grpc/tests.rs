@@ -1286,6 +1286,9 @@ async fn a_models_folder_is_listed_and_classified_from_gguf_tags() {
         "general.tags".into(),
         Value::Array(vec![Value::String("text-classification".into())]),
     );
+    fixture
+        .metadata
+        .insert("general.file_type".into(), Value::U32(15));
     fixture.metadata.insert(
         "tokenizer.chat_template".into(),
         Value::String("{{ '<|assistant|>\\n<think>\\n' }}".into()),
@@ -1306,7 +1309,7 @@ async fn a_models_folder_is_listed_and_classified_from_gguf_tags() {
         Arc::new(CpuBackend),
         dir.path(),
         Some("verify"),
-        Options::new(64),
+        Options::new(32),
     )
     .unwrap();
     let host = crate::host::detect("periscope", "CPU");
@@ -1337,6 +1340,19 @@ async fn a_models_folder_is_listed_and_classified_from_gguf_tags() {
         ],
         "broken files are skipped"
     );
+    for m in &status.models {
+        assert_eq!(
+            (
+                m.parameters,
+                m.quantization.as_str(),
+                m.n_ctx,
+                m.trained_ctx
+            ),
+            (fixture.parameters(), "Q4_K_M", 32, 64),
+            "header facts for {}",
+            m.name
+        );
+    }
     assert_eq!(status.default_model, "verify");
     let reported = status.host.unwrap();
     assert_eq!(

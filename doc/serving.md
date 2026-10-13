@@ -120,6 +120,15 @@ until restart and marks the server `degraded`. Names for the **same file**
 (symlinks, hardlinks) share one weight upload and tokenizer; request KV is not
 shared, and so is the context: the trained one, or `MDMA_N_CTX` when lower.
 
+Each model also reports what its file header says, read when the server lists
+it: `parameters` (elements across its tensors), `quantization` (llama.cpp's
+file type such as `Q4_K_M`, else the tensor type holding the most bytes, such
+as `Q4_K`) and `trained_ctx` (its own context, before `MDMA_N_CTX`). A Laya
+checkpoint reads them from its `model.safetensors` header (the dtype, such as
+`F32`) and reports its `max_len`; a header that does not parse fails the
+listing, as a corrupt GGUF does. `mdma-client` prints them as
+`params=1.1B q=Q4_K_M trained=2048`.
+
 Vulkan's f16 prefill staging is fixed at startup by `MDMA_VK_F16_WEIGHTS=1`
 (f32 otherwise) and shared by every decoder; it cannot enable a staging
 pipeline unavailable on the device.

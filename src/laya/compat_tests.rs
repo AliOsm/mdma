@@ -148,6 +148,15 @@ fn frozen_laya_registry_identity_is_consumed_bytes_not_canonicalized_tokenizer_o
                 max_result_bytes: crate::federation::catalog::MAX_DECIDE_RESULT_BYTES,
             }
         );
+        let model = &catalog.models[0];
+        assert_eq!(
+            (
+                model.parameters,
+                model.quantization.as_str(),
+                model.trained_ctx
+            ),
+            (normal.info("").unwrap().parameters, "F32", 16)
+        );
     }
     assert_eq!(
         &original_id,
@@ -371,6 +380,52 @@ fn modernbert_laya_compat_batched_heads_and_padding() {
         }
         let wrong = collate(&items[..1], 0).unwrap();
         assert!(model.forward(&backend, &mut ws, &wrong).is_err());
+    }
+}
+
+#[test]
+fn the_safetensors_header_alone_gives_parameters_and_dtype() {
+    use super::weights::Header;
+    use crate::registry::{Options, Registry, Source};
+    let dir = checkpoint();
+    let path = dir.path().join("model.safetensors");
+    let bytes = std::fs::read(&path).unwrap();
+    let parameters = safetensors::SafeTensors::deserialize(&bytes)
+        .unwrap()
+        .tensors()
+        .iter()
+        .map(|(_, view)| view.shape().iter().product::<usize>() as u64)
+        .sum();
+    assert_eq!(
+        Header::read(&path).unwrap(),
+        Header {
+            parameters,
+            dtype: "F32".into()
+        }
+    );
+    let backend = std::sync::Arc::new(CpuBackend);
+    let registry = laya_registry(backend.clone(), dir.path(), false);
+    let info = registry.info("laya").unwrap();
+    assert_eq!(
+        (
+            info.parameters,
+            info.quantization.as_str(),
+            info.trained_ctx
+        ),
+        (parameters, "F32", 16)
+    );
+    // What a full parse refuses, the header refuses before any load.
+    for broken in [&bytes[..bytes.len() - 1], &bytes[..4], &[0xff; 16]] {
+        std::fs::write(&path, broken).unwrap();
+        assert_matches!(
+            Header::read(&path),
+            Err(super::weights::Error::Checkpoint(_))
+        );
+        let listed = vec![("laya".into(), Source::Laya(dir.path().into()))];
+        let error = Registry::new(backend.clone(), listed, None, Options::new(32))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("safetensors header"), "{error}");
     }
 }
 

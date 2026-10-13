@@ -30,6 +30,7 @@ pub const MAX_MODEL_NAME_BYTES: usize = 128;
 pub const MAX_MAX_INPUT_BYTES: u32 = 65536;
 pub const MAX_DECIDE_QUESTIONS: u32 = 128;
 pub const MAX_DECIDE_RESULT_BYTES: u32 = 524288;
+pub const MAX_QUANTIZATION_BYTES: usize = 32;
 pub const NONCE_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +165,12 @@ pub struct ModelDescriptor {
     pub capabilities: Vec<Capability>,
     /// The weights are loaded; otherwise the first request loads them.
     pub resident: bool,
+    /// Elements across the artifact's tensors; 0 when unknown.
+    pub parameters: u64,
+    /// "Q4_K_M", "F16", ...; empty when unknown.
+    pub quantization: String,
+    /// The model's own context, at least `n_ctx`; 0 when unknown.
+    pub trained_ctx: u32,
 }
 
 impl ModelDescriptor {
@@ -200,6 +207,23 @@ impl ModelDescriptor {
         }
         if !self.capabilities.is_sorted_by(|a, b| a < b) {
             return Err(Error::InvalidField("capabilities"));
+        }
+        if self.parameters > canonical_json::MAX_SAFE_INTEGER.cast_unsigned() {
+            return Err(Error::InvalidField("parameters"));
+        }
+        if self.quantization.len() > MAX_QUANTIZATION_BYTES
+            || !self
+                .quantization
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        {
+            return Err(Error::InvalidField("quantization"));
+        }
+        if let Limits::Synthesize { n_ctx, .. } = self.limits
+            && self.trained_ctx != 0
+            && self.trained_ctx < n_ctx
+        {
+            return Err(Error::InvalidField("trained_ctx"));
         }
         match (self.kind, &self.limits) {
             (
@@ -292,6 +316,18 @@ impl ModelDescriptor {
                 ),
             ),
             ("resident".into(), Value::Bool(self.resident)),
+            (
+                "parameters".into(),
+                Value::Integer(self.parameters.cast_signed()),
+            ),
+            (
+                "quantization".into(),
+                Value::String(self.quantization.clone()),
+            ),
+            (
+                "trained_ctx".into(),
+                Value::Integer(i64::from(self.trained_ctx)),
+            ),
         ];
         Value::object(fields).expect("static field set has no duplicate keys")
     }
@@ -316,6 +352,9 @@ impl ModelDescriptor {
                 "class",
                 "capabilities",
                 "resident",
+                "parameters",
+                "quantization",
+                "trained_ctx",
             ],
         )?;
         let model = field_str(obj, "model")?;
@@ -389,6 +428,9 @@ impl ModelDescriptor {
             class,
             capabilities,
             resident,
+            parameters: field_u64(obj, "parameters")?,
+            quantization: field_str(obj, "quantization")?,
+            trained_ctx: field_u32(obj, "trained_ctx")?,
         };
         descriptor.validate()?;
         Ok(descriptor)

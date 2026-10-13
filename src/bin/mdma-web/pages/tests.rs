@@ -10,12 +10,15 @@ fn status() -> Status {
         backend: backend.into(),
         architecture: "llama".into(),
         n_ctx: 2048,
+        trained_ctx: 4096,
         ready,
         weight_bytes: if backend.starts_with("federated/") {
             0
         } else {
             3 << 30
         },
+        parameters: 1_100_048_384,
+        quantization: "Q4_K_M".into(),
         class: "generative".into(),
         residency: "resident".into(),
         ..ModelStatus::default()
@@ -96,8 +99,22 @@ fn panels_show_state_with_text_not_only_color() {
     );
     assert!(models.contains("3.0 GiB"), "{models}");
     assert!(
-        models.contains("llama · generative · gguf · cpu · default"),
+        models.contains("llama · 1.1B · Q4_K_M · generative · gguf · cpu · default"),
         "{models}"
+    );
+    assert!(
+        models.contains(r#"<td class="num">2048<small>of 4096</small></td>"#),
+        "the trained context under its cap: {models}"
+    );
+    let mut uncapped = status.clone();
+    for m in &mut uncapped.models {
+        (m.trained_ctx, m.parameters, m.quantization) = (m.n_ctx, 0, String::new());
+    }
+    let uncapped = models_panel(&uncapped).into_string();
+    assert!(
+        uncapped.contains(r#"<td class="num">2048</td>"#)
+            && uncapped.contains("llama · generative · gguf · cpu · default"),
+        "unknown facts and an uncapped context add nothing: {uncapped}"
     );
     assert!(
         remote_panel(&status, PIN, &[])
@@ -253,6 +270,7 @@ fn federation_panel_lists_peer_nodes_and_gates_enrollment() {
         remote("minicheck", &citadel, "cpu", "decision", false),
     ];
     models[0].capabilities = vec!["reasoning".into()];
+    (models[0].parameters, models[0].quantization) = (8_190_735_360, "Q4_K_M".into());
     let periscope = Host {
         memory_bytes: 64 << 30,
         memory_available_bytes: 40 << 30,
@@ -285,6 +303,7 @@ fn federation_panel_lists_peer_nodes_and_gates_enrollment() {
         r#"class="class decision""#,
         r#"<strong class="os linux">foundry</strong>"#,
         "Ubuntu 24.04 · x86_64 · AMD Radeon 780M · rocm",
+        r#"<small class="facts">8.2B · Q4_K_M</small>"#,
         r#"class="cap reasoning""#,
         "numarkdown",
     ];
@@ -296,6 +315,11 @@ fn federation_panel_lists_peer_nodes_and_gates_enrollment() {
         at += found;
     }
     assert!(!peers.contains("localhost"), "{peers}");
+    assert_eq!(
+        peers.matches(r#"class="facts""#).count(),
+        3,
+        "tiny, far and qwen3 have known facts: {peers}"
+    );
     assert!(
         !peers.contains("MDMA_OPERATOR_SPKI"),
         "nothing to gate before the first snapshot"

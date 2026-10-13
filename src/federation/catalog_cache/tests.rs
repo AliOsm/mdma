@@ -354,6 +354,9 @@ fn a_new_empty_snapshot_withdraws_previously_advertised_models() {
                 n_ctx: 64,
                 max_output_tokens: 32,
             },
+            parameters: 2648,
+            quantization: "F32".into(),
+            trained_ctx: 64,
         }],
     };
     let envelope = catalog::sign_catalog(&body, "ed25519:catalog", &key).unwrap();
@@ -393,6 +396,14 @@ fn a_new_empty_snapshot_withdraws_previously_advertised_models() {
     assert_eq!(
         (model.class.as_str(), model.capabilities.as_slice()),
         ("decision", ["reasoning".to_owned()].as_slice())
+    );
+    assert_eq!(
+        (
+            model.parameters,
+            model.quantization.as_str(),
+            model.trained_ctx
+        ),
+        (2648, "F32", 64)
     );
     let poll = cache
         .begin(&f.remote_store, &binding, f.now_ms, now)

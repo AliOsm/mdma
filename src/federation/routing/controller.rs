@@ -274,6 +274,9 @@ impl Router {
                     .into(),
                     leases: self.leases.count(&route.alias, std::time::Instant::now()),
                     error: String::new(),
+                    parameters: descriptor.parameters,
+                    quantization: descriptor.quantization,
+                    trained_ctx: descriptor.trained_ctx,
                 })
             })
             .collect()

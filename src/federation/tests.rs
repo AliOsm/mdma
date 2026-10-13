@@ -262,6 +262,9 @@ fn sample_descriptor() -> ModelDescriptor {
             n_ctx: 8192,
             max_output_tokens: 2048,
         },
+        parameters: 70_553_706_496,
+        quantization: "Q4_K_M".to_string(),
+        trained_ctx: 131_072,
     }
 }
 
@@ -346,6 +349,89 @@ fn residency_is_not_part_of_the_selection() {
         ModelDescriptor::from_canonical(&Value::Object(obj)).unwrap_err(),
         catalog::Error::MissingField("resident")
     );
+}
+
+#[test]
+fn header_facts_are_required_bounded_and_part_of_the_selection() {
+    let d = sample_descriptor();
+    let requantized = ModelDescriptor {
+        quantization: "Q8_0".into(),
+        ..d.clone()
+    };
+    assert!(requantized.validate().is_ok() && !d.same_selection(&requantized));
+    let unknown = ModelDescriptor {
+        parameters: 0,
+        quantization: String::new(),
+        trained_ctx: 0,
+        ..d.clone()
+    };
+    assert_eq!(
+        ModelDescriptor::from_canonical(&unknown.to_canonical()),
+        Ok(unknown)
+    );
+    let decision = ModelDescriptor {
+        kind: Kind::Laya,
+        limits: Limits::Decide {
+            max_questions: 1,
+            max_result_bytes: 1,
+        },
+        quantization: "F32".into(),
+        trained_ctx: 16,
+        ..d.clone()
+    };
+    assert!(
+        decision.validate().is_ok(),
+        "decisions have no n_ctx to cover"
+    );
+    let with = |edit: fn(&mut ModelDescriptor)| {
+        let mut bad = d.clone();
+        edit(&mut bad);
+        bad
+    };
+    for (bad, field) in [
+        (with(|m| m.quantization = "Q4_K M".into()), "quantization"),
+        (
+            with(|m| m.quantization = "Q4_K_\u{e9}".into()),
+            "quantization",
+        ),
+        (
+            with(|m| m.quantization = "Q".repeat(catalog::MAX_QUANTIZATION_BYTES + 1)),
+            "quantization",
+        ),
+        (with(|m| m.trained_ctx = 4096), "trained_ctx"),
+        (
+            with(|m| m.parameters = canonical_json::MAX_SAFE_INTEGER.cast_unsigned() + 1),
+            "parameters",
+        ),
+    ] {
+        assert_eq!(
+            bad.validate(),
+            Err(catalog::Error::InvalidField(field)),
+            "{bad:?}"
+        );
+    }
+    let canonical = |edit: &dyn Fn(&mut BTreeMap<String, Value>)| {
+        let Value::Object(mut obj) = d.to_canonical() else {
+            unreachable!()
+        };
+        edit(&mut obj);
+        ModelDescriptor::from_canonical(&Value::Object(obj)).unwrap_err()
+    };
+    for field in ["parameters", "quantization", "trained_ctx"] {
+        assert_eq!(
+            canonical(&|obj| drop(obj.remove(field))),
+            catalog::Error::MissingField(field)
+        );
+    }
+    for (field, value) in [
+        ("parameters", Value::Integer(-1)),
+        ("trained_ctx", Value::Integer(1 << 32)),
+    ] {
+        assert_eq!(
+            canonical(&|obj| drop(obj.insert(field.into(), value.clone()))),
+            catalog::Error::InvalidField(field)
+        );
+    }
 }
 
 #[test]

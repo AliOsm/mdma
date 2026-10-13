@@ -137,6 +137,7 @@ ul.peers > li > small.resources { display: block; margin: 0.1rem 0 0; font-varia
 ul.peers ul { margin: 0.25rem 0 0; color: var(--ink-2); }
 ul.peers > li.self { border-bottom-width: 2px; }
 ul.peers .pill { font-size: 0.8rem; }
+ul.peers .facts { margin-left: 0.4em; color: var(--muted); font-variant-numeric: tabular-nums; }
 .class.generative { --class: var(--class-generative); }
 .class.decision { --class: var(--class-decision); }
 .class.embedding { --class: var(--class-embedding); }

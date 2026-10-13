@@ -31,6 +31,23 @@ export function residencyNote(m) {
   return [state, leases].filter(Boolean).join(' · ')
 }
 
+/** A parameter count as people write it: "494M", "1.1B", "7.2B"; empty when unknown. */
+export function parameters(n) {
+  if (!n) return ''
+  const units = ['', 'K', 'M', 'B', 'T']
+  let value = n
+  let unit = 0
+  while (value >= 999.5 && unit < units.length - 1) {
+    value /= 1000
+    unit += 1
+  }
+  if (unit === 0) return String(n)
+  return `${value < 9.95 ? value.toFixed(1) : value.toFixed(0)}${units[unit]}`
+}
+
+/** "1.1B · Q4_K_M", from the weights' header. */
+export const modelFacts = (m) => [parameters(m.parameters), m.quantization].filter(Boolean).join(' · ')
+
 export function bytes(n) {
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
   let value = n
@@ -108,7 +125,7 @@ function weightSegments(models, memory) {
     const upload = memory?.weights?.find((w) => w.models?.includes(m.name))
     const key = upload ? `upload:${upload.upload_id}` : `model:${m.name}`
     const bytes = upload ? upload.bytes : m.weight_bytes
-    if (!uploads.has(key)) uploads.set(key, { kind: 'weights', names: [], bytes, ready: true, layers: m.geometry?.n_layers ?? 0 })
+    if (!uploads.has(key)) uploads.set(key, { kind: 'weights', names: [], bytes, ready: true, layers: m.geometry?.n_layers ?? 0, facts: modelFacts(m) })
     const entry = uploads.get(key)
     entry.names.push(m.name)
     entry.ready &&= m.ready
@@ -175,7 +192,7 @@ export function federationLayout(scene) {
 /** What the scene needs of a model. */
 const atom = (m) => ({
   name: m.name ?? m.model, class: m.class || 'generative', capabilities: m.capabilities ?? [], ready: m.ready !== false,
-  residency: residency(m), note: residencyNote(m),
+  residency: residency(m), note: residencyNote(m), facts: modelFacts(m),
 })
 
 /** "FreeBSD 16.0-CURRENT · amd64 · CPU" */
