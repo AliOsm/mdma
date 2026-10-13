@@ -10,6 +10,8 @@ mod preflight;
 pub(in crate::model) mod tests;
 
 pub(in crate::model) const ARCH: &str = "internlm2";
+/// llama.cpp's `rope.freq_base` when the key is absent.
+pub(in crate::model) const DEFAULT_ROPE_THETA: f32 = 10_000.0;
 
 pub(in crate::model) fn config_from_gguf(gguf: &GgufModel, arch: &str) -> Option<ModelConfig> {
     let n_embd = gguf.metadata_u32(&format!("{arch}.embedding_length"))? as usize;
@@ -22,9 +24,14 @@ pub(in crate::model) fn config_from_gguf(gguf: &GgufModel, arch: &str) -> Option
         n_embd,
         n_ff: gguf.metadata_u32(&format!("{arch}.feed_forward_length"))? as usize,
         n_heads,
-        n_kv_heads: gguf.metadata_u32(&format!("{arch}.attention.head_count_kv"))? as usize,
+        // llama.cpp's defaults: llama2.c conversions omit both keys.
+        n_kv_heads: gguf
+            .metadata_u32(&format!("{arch}.attention.head_count_kv"))
+            .map_or(n_heads, |n| n as usize),
         head_dim: n_embd.checked_div(n_heads)?,
-        rope_theta: gguf.metadata_f32(&format!("{arch}.rope.freq_base"))?,
+        rope_theta: gguf
+            .metadata_f32(&format!("{arch}.rope.freq_base"))
+            .unwrap_or(DEFAULT_ROPE_THETA),
         rms_eps: gguf.metadata_f32(&format!("{arch}.attention.layer_norm_rms_epsilon"))?,
         n_ctx: gguf.metadata_u32(&format!("{arch}.context_length"))? as usize,
     })

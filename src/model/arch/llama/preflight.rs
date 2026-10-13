@@ -14,10 +14,12 @@ const INTEGER_KEYS: &[&str] = &[
     "embedding_length",
     "feed_forward_length",
     "attention.head_count",
-    "attention.head_count_kv",
     "context_length",
 ];
-const FLOAT_KEYS: &[&str] = &["rope.freq_base", "attention.layer_norm_rms_epsilon"];
+const FLOAT_KEYS: &[&str] = &["attention.layer_norm_rms_epsilon"];
+/// Absent keys take llama.cpp's defaults (KV heads = heads, theta 10000).
+const OPTIONAL_INTEGER_KEYS: &[&str] = &["attention.head_count_kv"];
+const OPTIONAL_FLOAT_KEYS: &[&str] = &["rope.freq_base"];
 const HEAD_KEYS: &[&str] = &[
     "attention.key_length",
     "attention.value_length",
@@ -51,11 +53,19 @@ fn config(gguf: &GgufModel, arch: &str) -> Result<ModelConfig> {
             return Err(unsupported(format!("{key} must be a positive integer")));
         }
     }
-    for suffix in FLOAT_KEYS {
+    for suffix in OPTIONAL_INTEGER_KEYS {
         let key = format!("{arch}.{suffix}");
-        if !gguf
-            .metadata_f32(&key)
-            .is_some_and(|v| v.is_finite() && v > 0.0)
+        if gguf.has_metadata(&key) && gguf.metadata_u32(&key).is_none_or(|v| v == 0) {
+            return Err(unsupported(format!("{key} must be a positive integer")));
+        }
+    }
+    for suffix in FLOAT_KEYS.iter().chain(OPTIONAL_FLOAT_KEYS) {
+        let key = format!("{arch}.{suffix}");
+        let required = FLOAT_KEYS.contains(suffix);
+        if (required || gguf.has_metadata(&key))
+            && !gguf
+                .metadata_f32(&key)
+                .is_some_and(|v| v.is_finite() && v > 0.0)
         {
             return Err(unsupported(format!(
                 "{key} must be a finite positive float"
@@ -78,7 +88,11 @@ fn config(gguf: &GgufModel, arch: &str) -> Result<ModelConfig> {
     for key in gguf.metadata_keys().filter(|k| k.starts_with(&prefix)) {
         let suffix = &key[prefix.len()..];
         match suffix {
-            suffix if INTEGER_KEYS.contains(&suffix) || FLOAT_KEYS.contains(&suffix) => {}
+            suffix
+                if INTEGER_KEYS.contains(&suffix)
+                    || FLOAT_KEYS.contains(&suffix)
+                    || OPTIONAL_INTEGER_KEYS.contains(&suffix)
+                    || OPTIONAL_FLOAT_KEYS.contains(&suffix) => {}
             suffix if HEAD_KEYS.contains(&suffix) => {
                 if gguf.metadata_u32(key).map(|v| v as usize) != Some(c.head_dim) {
                     return Err(unsupported(format!(
