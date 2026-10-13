@@ -296,9 +296,19 @@ where
             sampler(request.sampler.as_ref()),
             n_ctx,
         );
-        let prepared = session
-            .prepare_federated(&request.prompt, max_tokens)
-            .map_err(|error| native_error(&error))?;
+        // Unload idle models while the request's memory does not fit.
+        let prepared = loop {
+            match session.prepare_federated(&request.prompt, max_tokens) {
+                Err(error)
+                    if error.is_memory_exhausted()
+                        && self
+                            .inventory
+                            .registry
+                            .evict_for(&descriptor.model)
+                            .map_err(|error| native_error(&error))? => {}
+                result => break result.map_err(|error| native_error(&error))?,
+            }
+        };
         let admission = prepared.admission().clone();
         let guard = self
             .inventory

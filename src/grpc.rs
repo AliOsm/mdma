@@ -572,15 +572,29 @@ where
         );
         if req.emit_events {
             let started = std::time::Instant::now();
-            let (admission, running) = session
-                .start_tracked(&req.prompt, max_tokens, CancellationToken::new(), guard)
-                .map_err(native_status)?;
+            let (admission, running) = self
+                .with_room(&name, || {
+                    session.start_tracked(
+                        &req.prompt,
+                        max_tokens,
+                        CancellationToken::new(),
+                        guard.clone(),
+                    )
+                })
+                .await?;
             return Ok(Response::new(events::stream(&admission, running, started)));
         }
         // Dropping the HTTP/2 response body cancels the session's worker.
-        let stream = session
-            .generate_guarded(&req.prompt, max_tokens, CancellationToken::new(), guard)
-            .map_err(native_status)?;
+        let stream = self
+            .with_room(&name, || {
+                session.generate_guarded(
+                    &req.prompt,
+                    max_tokens,
+                    CancellationToken::new(),
+                    guard.clone(),
+                )
+            })
+            .await?;
         let mapped = stream.map(|item| item.map(token_response).map_err(native_status));
         Ok(Response::new(Box::pin(mapped)))
     }
@@ -610,8 +624,34 @@ where
     }
 
     /// The loaded model, loading it on another thread if it is not.
+    /// Admits a request on `name`, unloading idle models while its memory
+    /// does not fit; the final refusal names what holds the memory.
+    async fn with_room<T>(
+        &self,
+        name: &str,
+        mut attempt: impl FnMut() -> crate::backend::Result<T>,
+    ) -> Result<T, Status> {
+        loop {
+            match attempt() {
+                Err(error) if error.is_memory_exhausted() => {
+                    let (registry, model) = (self.registry.clone(), name.to_owned());
+                    let evicted = tokio::task::spawn_blocking(move || registry.evict_for(&model))
+                        .await
+                        .map_err(|e| Status::internal(e.to_string()))?
+                        .map_err(native_status)?;
+                    if !evicted {
+                        return Err(Status::resource_exhausted(
+                            self.registry.held(error.to_string()),
+                        ));
+                    }
+                }
+                result => return result.map_err(native_status),
+            }
+        }
+    }
+
     async fn load_model(&self, name: &str) -> Result<Use<B>, Status> {
-        if let Some(loaded) = self.registry.resident(name) {
+        if let Some(loaded) = self.registry.use_resident(name) {
             return Ok(loaded);
         }
         let (registry, name) = (self.registry.clone(), name.to_owned());

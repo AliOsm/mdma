@@ -312,4 +312,20 @@ fn models_load_on_use_and_unload_when_idle_or_evicted_unless_leased() {
         ["a resident leases=0", "b available leases=0"],
         "released, b is evicted like any idle model"
     );
+    drop(server);
+
+    // Request memory evicts too: with room for both models' weights and no
+    // more, b's request unloads the idle a instead of being refused.
+    let server = Server::start(
+        root,
+        "tight",
+        &[("MDMA_NATIVE_TENSOR_BYTES", &(a + b).to_string())],
+    );
+    assert_matches!(server.synthesize("a"), Ok(4));
+    assert_matches!(server.synthesize("b"), Ok(4));
+    assert_eq!(
+        server.states(),
+        ["a available leases=0", "b resident leases=0"],
+        "b's request evicted the idle a"
+    );
 }

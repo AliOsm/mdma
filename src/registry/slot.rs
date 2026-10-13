@@ -253,6 +253,17 @@ impl<B: Backend> Slot<B> {
         }
     }
 
+    /// The loaded model for a request, without loading it; marks it used.
+    pub(super) fn try_use(&self) -> Option<Use<B>> {
+        let mut inner = self.lock();
+        let State::Resident(resident) = &inner.state else {
+            return None;
+        };
+        let resident = resident.clone();
+        inner.used = Instant::now();
+        Some(Use { resident })
+    }
+
     /// When it was last used, if it could be unloaded now.
     pub(super) fn idle_since(&self) -> Option<Instant> {
         let inner = self.lock();

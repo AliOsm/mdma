@@ -441,6 +441,12 @@ impl<B: Backend> Registry<B> {
         self.slot(name)?.resident()
     }
 
+    /// The model for a request if it is loaded, without loading it. Unlike
+    /// [`Self::resident`] this counts as a use for idle unload and eviction.
+    pub fn use_resident(&self, name: &str) -> Option<Use<B>> {
+        self.slot(name)?.try_use()
+    }
+
     /// The model, loading it first if needed. Blocks while it loads.
     pub fn acquire_blocking(&self, name: &str) -> std::result::Result<Use<B>, LoadError> {
         let slot = self
@@ -661,22 +667,8 @@ impl<B: Backend> Registry<B> {
         loop {
             match self.reserve(bytes) {
                 Err(error) if error.is_memory_exhausted() => {
-                    let victim = self
-                        .slots
-                        .iter()
-                        .filter(|other| {
-                            !std::ptr::eq(*other, slot)
-                                && other.info.kind == Kind::Gguf
-                                && !matches!(other.source, slot::Source::Fixed)
-                        })
-                        .filter_map(|other| other.idle_since().map(|used| (used, other)))
-                        .min_by_key(|(used, _)| *used);
-                    let Some((_, victim)) = victim else {
+                    if !self.evict_one(slot)? {
                         return Err(error);
-                    };
-                    if victim.unload_if_idle() {
-                        self.backend.join_execution()?;
-                        self.changed();
                     }
                 }
                 result => return result,
@@ -684,8 +676,42 @@ impl<B: Backend> Registry<B> {
         }
     }
 
+    /// Makes room for a request on `name` that did not fit, by unloading the
+    /// least recently used idle model other than `name`. Returns whether one
+    /// was unloaded, so the caller can retry.
+    pub fn evict_for(&self, name: &str) -> crate::backend::Result<bool> {
+        let Some(slot) = self.slot(name) else {
+            return Ok(false);
+        };
+        let _one = self.admission.lock().expect("admission lock poisoned");
+        self.evict_one(slot)
+    }
+
+    /// Unloads the least recently used idle model other than `keep`; false
+    /// when none can go. Leased and busy models never do.
+    fn evict_one(&self, keep: &Slot<B>) -> crate::backend::Result<bool> {
+        let victim = self
+            .slots
+            .iter()
+            .filter(|other| {
+                !std::ptr::eq(*other, keep)
+                    && other.info.kind == Kind::Gguf
+                    && !matches!(other.source, slot::Source::Fixed)
+            })
+            .filter_map(|other| other.idle_since().map(|used| (used, other)))
+            .min_by_key(|(used, _)| *used);
+        let Some((_, victim)) = victim else {
+            return Ok(false);
+        };
+        if victim.unload_if_idle() {
+            self.backend.join_execution()?;
+            self.changed();
+        }
+        Ok(true)
+    }
+
     /// A refusal, naming what holds the memory.
-    fn held(&self, reason: String) -> String {
+    pub fn held(&self, reason: String) -> String {
         let holders: Vec<_> = self
             .names
             .iter()

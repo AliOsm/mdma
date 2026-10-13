@@ -1025,7 +1025,8 @@ fn a_new_load_evicts_the_least_recently_used_idle_model() {
     std::thread::sleep(Duration::from_millis(5));
     registry.acquire_blocking("m1").unwrap();
     std::thread::sleep(Duration::from_millis(5));
-    registry.acquire_blocking("m0").unwrap();
+    // A request on a loaded model counts as use, as on the server's fast path.
+    drop(registry.use_resident("m0").unwrap());
     assert!(registry.acquire_blocking("m2").is_ok());
     assert_eq!(
         phases(&registry),
@@ -1060,6 +1061,25 @@ fn leased_or_busy_models_are_never_evicted() {
         phases(&registry),
         [Phase::Available, Phase::Resident, Phase::Available]
     );
+}
+
+#[test]
+fn requests_evict_idle_models_but_never_their_own_or_a_leased_one() {
+    let (registry, _budget, _files) = crowded(3);
+    registry.acquire_blocking("m0").unwrap();
+    registry.acquire_blocking("m1").unwrap();
+    assert!(registry.evict_for("m1").unwrap());
+    assert_eq!(
+        phases(&registry),
+        [Phase::Available, Phase::Resident, Phase::Available]
+    );
+    assert!(!registry.evict_for("m1").unwrap(), "only m1 is left");
+    registry.acquire_blocking("m0").unwrap();
+    let holder = Holder::Client("pin".into());
+    let lease = registry.lease(holder.clone(), "m0", None).unwrap();
+    assert!(!registry.evict_for("m1").unwrap(), "m0 is leased");
+    registry.release(&holder, &lease.id).unwrap();
+    assert!(!registry.evict_for("nope").unwrap());
 }
 
 #[test]
