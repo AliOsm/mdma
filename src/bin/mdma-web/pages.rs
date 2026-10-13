@@ -171,12 +171,19 @@ pub(super) fn models_panel(status: &Status) -> impl IntoHtml + use<> {
                 m.kind.as_str(),
                 target(m).as_str(),
             ]);
-            // The trained context, when MDMA_N_CTX lowers it.
-            let trained =
-                (m.trained_ctx > m.n_ctx).then(|| small!(format!("of {}", m.trained_ctx)));
+            // The trained context, when MDMA_N_CTX lowers it or a decide
+            // route does not advertise the executor's.
+            let (n_ctx, trained) = match m.n_ctx {
+                0 if m.trained_ctx > 0 => (m.trained_ctx.to_string(), Some("trained".to_owned())),
+                0 => ("—".to_owned(), None),
+                n_ctx => (
+                    n_ctx.to_string(),
+                    (m.trained_ctx > n_ctx).then(|| format!("of {}", m.trained_ctx)),
+                ),
+            };
             tr!(
                 td!(m.name.clone(), small!(format!("{detail}{default}"))),
-                td!(class = "num", m.n_ctx.to_string(), trained),
+                td!(class = "num", n_ctx, trained.map(|t| small!(t))),
                 td!(class = "num", weights(m)),
                 td!(residency(m)),
             )
@@ -513,10 +520,14 @@ pub(super) fn model_select(status: &Status) -> impl IntoHtml + use<> {
             option!(
                 value = m.name.clone(),
                 format!(
-                    "{} · {} · n_ctx {}{}{}",
+                    "{} · {}{}{}{}",
                     m.name,
                     m.architecture,
-                    m.n_ctx,
+                    if m.n_ctx == 0 {
+                        String::new()
+                    } else {
+                        format!(" · n_ctx {}", m.n_ctx)
+                    },
                     if m.chat_format.is_empty() {
                         String::new()
                     } else {
