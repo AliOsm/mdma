@@ -181,6 +181,7 @@ where
                 parameters: info.parameters,
                 quantization: info.quantization.clone(),
                 trained_ctx,
+                chat_format: info.chat_format,
             };
             // Invalid/unsupported local names or limits are unexportable.
             if descriptor.validate().is_ok() {

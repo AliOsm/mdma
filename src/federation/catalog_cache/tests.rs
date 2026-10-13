@@ -357,6 +357,7 @@ fn a_new_empty_snapshot_withdraws_previously_advertised_models() {
             parameters: 2648,
             quantization: "F32".into(),
             trained_ctx: 64,
+            chat_format: None,
         }],
     };
     let envelope = catalog::sign_catalog(&body, "ed25519:catalog", &key).unwrap();

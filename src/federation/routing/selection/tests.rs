@@ -108,6 +108,7 @@ impl Setup {
             parameters: 2648,
             quantization: "F32".into(),
             trained_ctx: 64,
+            chat_format: None,
         };
         let body = CatalogBody {
             origin: self.route.peer_id.clone(),

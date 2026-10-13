@@ -83,6 +83,9 @@ impl Topology {
                             parameters: m.parameters,
                             quantization: m.quantization,
                             trained_ctx: m.trained_ctx,
+                            chat_format: m
+                                .chat_format
+                                .map_or_else(String::new, |f| f.name().into()),
                         })
                         .collect(),
                 });

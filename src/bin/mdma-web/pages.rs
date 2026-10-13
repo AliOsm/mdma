@@ -562,10 +562,12 @@ pub(super) fn marker_chips(model: Option<&ModelStatus>) -> impl IntoHtml + use<>
         })
         .unwrap_or_default();
     let hint = if chips.is_empty() {
-        format!(
-            "no chat markers: {}",
-            chat_template(model).err().unwrap_or("unknown format")
-        )
+        let why = if model.is_some() {
+            "no chat template"
+        } else {
+            "no such model"
+        };
+        format!("no chat markers: {why}")
     } else {
         format!(
             "{} markers",

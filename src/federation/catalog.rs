@@ -13,6 +13,7 @@ use crate::federation::server_id;
 use crate::federation::signing::{self, KeyPairHandle};
 use crate::grpc::Host;
 use crate::registry::{Capability, Class};
+use crate::tokenizer::ChatFormat;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::collections::{BTreeMap, HashSet};
@@ -171,6 +172,8 @@ pub struct ModelDescriptor {
     pub quantization: String,
     /// The model's own context, at least `n_ctx`; 0 when unknown.
     pub trained_ctx: u32,
+    /// The turn markers its chat template uses; text generators only.
+    pub chat_format: Option<ChatFormat>,
 }
 
 impl ModelDescriptor {
@@ -224,6 +227,9 @@ impl ModelDescriptor {
             && self.trained_ctx < n_ctx
         {
             return Err(Error::InvalidField("trained_ctx"));
+        }
+        if self.kind == Kind::Laya && self.chat_format.is_some() {
+            return Err(Error::InvalidField("chat_format"));
         }
         match (self.kind, &self.limits) {
             (
@@ -328,6 +334,10 @@ impl ModelDescriptor {
                 "trained_ctx".into(),
                 Value::Integer(i64::from(self.trained_ctx)),
             ),
+            (
+                "chat_format".into(),
+                Value::String(self.chat_format.map_or("", ChatFormat::name).into()),
+            ),
         ];
         Value::object(fields).expect("static field set has no duplicate keys")
     }
@@ -355,6 +365,7 @@ impl ModelDescriptor {
                 "parameters",
                 "quantization",
                 "trained_ctx",
+                "chat_format",
             ],
         )?;
         let model = field_str(obj, "model")?;
@@ -415,6 +426,10 @@ impl ModelDescriptor {
             .get("resident")
             .and_then(Value::as_bool)
             .ok_or(Error::MissingField("resident"))?;
+        let chat_format = match field_str(obj, "chat_format")?.as_str() {
+            "" => None,
+            name => Some(ChatFormat::from_name(name).ok_or(Error::InvalidField("chat_format"))?),
+        };
         let descriptor = Self {
             model,
             kind,
@@ -431,6 +446,7 @@ impl ModelDescriptor {
             parameters: field_u64(obj, "parameters")?,
             quantization: field_str(obj, "quantization")?,
             trained_ctx: field_u32(obj, "trained_ctx")?,
+            chat_format,
         };
         descriptor.validate()?;
         Ok(descriptor)

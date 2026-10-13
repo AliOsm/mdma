@@ -206,6 +206,7 @@ message CatalogModel {
   uint64 parameters = 8;
   string quantization = 9;
   uint32 trained_ctx = 10;
+  string chat_format = 11;
 }
 
 message FederationPeer {

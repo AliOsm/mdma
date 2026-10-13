@@ -265,6 +265,7 @@ fn sample_descriptor() -> ModelDescriptor {
         parameters: 70_553_706_496,
         quantization: "Q4_K_M".to_string(),
         trained_ctx: 131_072,
+        chat_format: Some(crate::tokenizer::ChatFormat::Llama3),
     }
 }
 
@@ -377,6 +378,7 @@ fn header_facts_are_required_bounded_and_part_of_the_selection() {
         },
         quantization: "F32".into(),
         trained_ctx: 16,
+        chat_format: None,
         ..d.clone()
     };
     assert!(

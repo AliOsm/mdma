@@ -203,10 +203,13 @@ Each descriptor contains:
 | `parameters` | Elements across the artifact's tensors, at most 2^53 - 1; `0` when unknown |
 | `quantization` | llama.cpp's file type (`Q4_K_M`, `F16`), else the tensor type holding the most bytes (`Q4_K`); Laya's safetensors dtype (`F32`). At most 32 bytes of `[A-Za-z0-9._-]`; empty when unknown |
 | `trained_ctx` | The model's own context; for `synthesize`, at least `n_ctx`. `0` when unknown |
+| `chat_format` | The turn markers of its chat template: `chatml`, `llama3`, `zephyr`, `gemma`, `gemma4` or `inst`; empty when unknown and always empty for Laya |
 
-`parameters`, `quantization` and `trained_ctx` are read from the artifact's
-header when the server lists the model, without loading weights. They are
-fixed per artifact and part of the selection.
+`parameters`, `quantization`, `trained_ctx` and `chat_format` are read from the
+artifact's header when the server lists the model, without loading weights.
+They are fixed per artifact and part of the selection. Routes carry no chat
+requests; `chat_format` tells an origin's clients which markers to write into a
+raw prompt.
 
 `synthesize` limits contain positive `n_ctx` and `max_output_tokens`, with
 `max_output_tokens <= n_ctx`. A native executor advertises its model's context

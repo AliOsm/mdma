@@ -259,7 +259,9 @@ impl Router {
                     ready,
                     weight_bytes: 0,
                     geometry: None,
-                    chat_format: String::new(),
+                    chat_format: descriptor
+                        .chat_format
+                        .map_or_else(String::new, |f| f.name().into()),
                     host: Some(grpc::Host {
                         name: route.peer_id.clone(),
                         ..host
