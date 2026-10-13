@@ -266,6 +266,7 @@ fn sample_descriptor() -> ModelDescriptor {
         quantization: "Q4_K_M".to_string(),
         trained_ctx: 131_072,
         chat_format: Some(crate::tokenizer::ChatFormat::Llama3),
+        decision: None,
     }
 }
 
@@ -379,6 +380,7 @@ fn header_facts_are_required_bounded_and_part_of_the_selection() {
         quantization: "F32".into(),
         trained_ctx: 16,
         chat_format: None,
+        decision: Some(crate::decision::Contract::Laya),
         ..d.clone()
     };
     assert!(

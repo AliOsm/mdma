@@ -86,7 +86,7 @@ impl Topology {
                             chat_format: m
                                 .chat_format
                                 .map_or_else(String::new, |f| f.name().into()),
-                            decision: String::new(),
+                            decision: m.decision.map_or_else(String::new, |c| c.as_str().into()),
                         })
                         .collect(),
                 });

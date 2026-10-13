@@ -1,5 +1,6 @@
 //! Federation administration: a node's identity, its peers and their grants,
 //! and routes to their models. Changes need `mdma-serve` stopped.
+use mdma::decision::Contract;
 use mdma::federation::admin::{self, Bundle, Grants};
 use mdma::federation::config::{ExecuteExport, Operation};
 use mdma::registry::Source;
@@ -99,16 +100,21 @@ fn offered(models: Option<PathBuf>) -> Result<Vec<(String, Operation)>> {
         .or_else(|| std::env::var_os("MDMA_MODELS_DIR").map(PathBuf::from))
         .ok_or("--models or MDMA_MODELS_DIR names the models folder")?;
     let found = mdma::registry::scan(&dir)?;
-    Ok(found
+    found
         .into_iter()
         .map(|(name, source)| {
             let operation = match source {
-                Source::Gguf(_) => Operation::Synthesize,
+                Source::Gguf(path) => match Contract::of_gguf(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?
+                {
+                    Some(_) => Operation::Decide,
+                    None => Operation::Synthesize,
+                },
                 Source::Laya(_) => Operation::Decide,
             };
-            (name, operation)
+            Ok((name, operation))
         })
-        .collect())
+        .collect()
 }
 
 fn pick(spec: &str, offered: &[(String, Operation)]) -> Result<Vec<(String, Operation)>> {

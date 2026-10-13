@@ -26,6 +26,7 @@ fn fixture() -> (SynthesizeRequest, ModelDescriptor, SynthesizeEvent) {
         quantization: "F32".into(),
         trained_ctx: 64,
         chat_format: None,
+        decision: None,
     };
     let envelope = ExecutionEnvelope {
         origin: "origin.mdma.test".into(),
@@ -243,6 +244,7 @@ fn oversized_events_token_overrun_and_wrong_completion_identity_or_timing_are_re
 fn decide_fixture() -> (DecideRequest, ModelDescriptor, DecideResponse) {
     let (request, mut descriptor, _) = fixture();
     descriptor.kind = Kind::Laya;
+    descriptor.decision = Some(crate::decision::Contract::Laya);
     descriptor.limits = Limits::Decide {
         max_questions: 128,
         max_result_bytes: 524288,

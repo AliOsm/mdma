@@ -1,9 +1,11 @@
-//! Local CPU Laya only. Preparation, scratch charge and actual joined worker
-//! lifetime are shared with synthesis accounting, not upstream delegation.
+//! Local decisions: Laya on the CPU, MiniCheck on the native backend.
+//! Preparation, scratch charge and actual joined worker lifetime are shared
+//! with synthesis accounting, not upstream delegation.
 use super::admission::{Service, deadline_error, native_error};
 use super::ledger::Outcome;
 use crate::{
     backend::Backend,
+    decision::{Contract, minicheck},
     federation::{
         catalog::{self, Limits, ModelDescriptor},
         config::Operation,
@@ -11,7 +13,8 @@ use crate::{
         inventory,
     },
     memory::NativeMemoryBudget,
-    session::tracked::Boundary,
+    registry::Use,
+    session::{Session, tracked::Boundary},
 };
 use rama::{
     extensions::Extension,
@@ -72,13 +75,18 @@ fn laya_error(error: crate::laya::Error) -> Status {
     }
 }
 
-pub(super) fn prepare<B: Backend>(
+pub(super) fn prepare<B>(
+    backend: &Arc<B>,
     native: &inventory::Native<B>,
     budget: &NativeMemoryBudget,
     request: &DecideRequest,
     descriptor: &ModelDescriptor,
     boundary: &Boundary,
-) -> Result<Prepared, Status> {
+) -> Result<Prepared, Status>
+where
+    B: Backend + Send + Sync + 'static,
+    B::Buf: Send + Sync,
+{
     let Limits::Decide {
         max_questions,
         max_result_bytes,
@@ -98,6 +106,17 @@ pub(super) fn prepare<B: Backend>(
         .registry
         .acquire_blocking(&descriptor.model)
         .map_err(|_| Status::unavailable("model_unavailable"))?;
+    if descriptor.decision == Some(Contract::MiniCheck) {
+        return prepare_minicheck(
+            backend,
+            native,
+            request,
+            descriptor,
+            loaded,
+            max_questions,
+            max_result_bytes,
+        );
+    }
     let Some(predictor) = loaded.laya() else {
         return Err(Status::failed_precondition("selection_changed"));
     };
@@ -139,6 +158,77 @@ pub(super) fn prepare<B: Backend>(
                 return Ok(None);
             };
             let result = encode(&result, max_result_bytes as usize)?;
+            if !eligible() {
+                return Ok(None);
+            }
+            Ok(Some(result))
+        }),
+    })
+}
+
+/// Every claim against the document on one prefix-reusing session, within
+/// the request's KV: nothing is shared with other requests.
+fn prepare_minicheck<B>(
+    backend: &Arc<B>,
+    native: &inventory::Native<B>,
+    request: &DecideRequest,
+    descriptor: &ModelDescriptor,
+    loaded: Use<B>,
+    max_questions: u32,
+    max_result_bytes: u32,
+) -> Result<Prepared, Status>
+where
+    B: Backend + Send + Sync + 'static,
+    B::Buf: Send + Sync,
+{
+    let Some(decoder) = loaded.decoder() else {
+        return Err(Status::failed_precondition("selection_changed"));
+    };
+    let request = minicheck::Request::parse(&request.state_json, &request.questions_json)
+        .map_err(|_| Status::invalid_argument("invalid_request"))?;
+    if request.claims.len() > max_questions as usize {
+        return Err(Status::invalid_argument("invalid_request"));
+    }
+    let mut n_ctx = native
+        .registry
+        .info(&descriptor.model)
+        .map_or(0, |info| info.n_ctx);
+    if let Some(limits) = native.degraded_limits() {
+        n_ctx = n_ctx.min(limits.n_ctx);
+    }
+    let session = Session::new(
+        backend.clone(),
+        decoder.model.clone(),
+        decoder.tokenizer.clone(),
+        crate::sampler::SamplerConfig::default(),
+        n_ctx,
+    )
+    .with_prefix_reuse();
+    let yes = minicheck::yes_ids(&decoder.tokenizer);
+    let prompts = request.prompts();
+    let registry = native.registry.clone();
+    let model = descriptor.model.clone();
+    let guard = native
+        .shutdown
+        .clone()
+        .map(rama::graceful::WeakShutdownGuard::upgrade);
+    Ok(Prepared {
+        job: Box::new(move |cancel, boundary| {
+            let _guard = guard;
+            let _loaded = loaded;
+            let eligible = || !cancel.is_cancelled() && boundary();
+            // Unload idle models while a claim's memory does not fit.
+            let scored = minicheck::score(&session, &prompts, &yes, &|| !eligible(), || {
+                registry.evict_for(&model)
+            })
+            .map_err(|error| native_error(&error))?;
+            let Some(scored) = scored else {
+                return Ok(None);
+            };
+            let result = encode(
+                &minicheck::answer(&request, &scored),
+                max_result_bytes as usize,
+            )?;
             if !eligible() {
                 return Ok(None);
             }

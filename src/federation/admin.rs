@@ -2,7 +2,7 @@
 //! routes. Changes go through the trust store's locked APIs, so they fail
 //! while `mdma-serve` owns the store.
 use super::{
-    catalog::{self, ModelDescriptor},
+    catalog::ModelDescriptor,
     catalog_cache::Cache,
     config::{
         self, CaRoot, ControlPermissions, ExecuteExport, Operation, RouteImport, SigningKey,
@@ -470,10 +470,7 @@ pub(crate) fn apply_routes(
         .map(|model| Route {
             alias: format!("{prefix}-{}", model.model),
             peer_id: peer_id.into(),
-            operation: match model.kind {
-                catalog::Kind::Gguf => Operation::Synthesize,
-                catalog::Kind::Laya => Operation::Decide,
-            },
+            operation: model.operation(),
             model: model.model,
             artifact_id: model.artifact_id,
             profile_id: model.profile_id,

@@ -71,13 +71,6 @@ pub struct ControlService {
     execution: Option<super::execution::Service>,
 }
 
-const fn operation(kind: catalog::Kind) -> super::config::Operation {
-    match kind {
-        catalog::Kind::Gguf => super::config::Operation::Synthesize,
-        catalog::Kind::Laya => super::config::Operation::Decide,
-    }
-}
-
 fn clock() -> Result<(u64, Instant), Status> {
     Ok((
         utc_ms().map_err(|_| Status::unavailable("invalid UTC clock"))?,
@@ -194,9 +187,10 @@ impl ControlService {
         model: &str,
     ) -> Result<catalog::ModelDescriptor, Status> {
         let descriptor = execution.executor().descriptor(model);
-        let operation = descriptor
-            .as_ref()
-            .map_or(super::config::Operation::Synthesize, |d| operation(d.kind));
+        let operation = descriptor.as_ref().map_or(
+            super::config::Operation::Synthesize,
+            catalog::ModelDescriptor::operation,
+        );
         self.final_check(binding, Action::Execute { model, operation }, generation)?;
         descriptor
     }

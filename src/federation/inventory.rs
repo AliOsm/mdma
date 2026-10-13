@@ -137,7 +137,12 @@ where
             let Ok(trained_ctx) = u32::try_from(info.trained_ctx) else {
                 continue;
             };
+            let decide = Limits::Decide {
+                max_questions: catalog::MAX_DECIDE_QUESTIONS,
+                max_result_bytes: catalog::MAX_DECIDE_RESULT_BYTES,
+            };
             let (kind, limits) = match info.kind {
+                crate::registry::Kind::Gguf if info.decision.is_some() => (Kind::Gguf, decide),
                 crate::registry::Kind::Gguf => {
                     // The configured maxima: power caps apply at admission, so
                     // a battery flip changes the state, never the selection.
@@ -156,13 +161,7 @@ where
                         },
                     )
                 }
-                crate::registry::Kind::Laya => (
-                    Kind::Laya,
-                    Limits::Decide {
-                        max_questions: catalog::MAX_DECIDE_QUESTIONS,
-                        max_result_bytes: catalog::MAX_DECIDE_RESULT_BYTES,
-                    },
-                ),
+                crate::registry::Kind::Laya => (Kind::Laya, decide),
             };
             let descriptor = ModelDescriptor {
                 model: entry.name.to_owned(),
@@ -182,6 +181,7 @@ where
                 quantization: info.quantization.clone(),
                 trained_ctx,
                 chat_format: info.chat_format,
+                decision: info.decision,
             };
             // Invalid/unsupported local names or limits are unexportable.
             if descriptor.validate().is_ok() {

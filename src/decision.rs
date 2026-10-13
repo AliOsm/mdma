@@ -2,6 +2,7 @@
 use crate::gguf::GgufModel;
 use crate::registry::Class;
 use crate::tokenizer::{ChatFormat, Tokenizer};
+use std::path::Path;
 
 pub mod minicheck;
 
@@ -41,5 +42,14 @@ impl Contract {
             && tokenizer.chat_format() == Some(ChatFormat::ChatMl)
             && !minicheck::yes_ids(tokenizer).is_empty())
         .then_some(Self::MiniCheck)
+    }
+
+    /// The contract of the GGUF at `path`, from its header alone.
+    pub fn of_gguf(path: &Path) -> Result<Option<Self>, Box<dyn std::error::Error + Send + Sync>> {
+        let gguf = GgufModel::open(path)?;
+        let tokenizer =
+            Tokenizer::from_gguf(&gguf).ok_or("failed to build tokenizer from GGUF metadata")?;
+        let (class, _) = crate::registry::class::detect(&gguf);
+        Ok(Self::detect(&gguf, &tokenizer, class))
     }
 }

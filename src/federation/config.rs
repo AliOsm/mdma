@@ -118,6 +118,15 @@ pub enum Operation {
     Decide,
 }
 
+impl Operation {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Synthesize => "synthesize",
+            Self::Decide => "decide",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecuteExport {

@@ -193,7 +193,7 @@ Each descriptor contains:
 | `profile_id` | Same digest format, for the execution profile |
 | `architecture` | Architecture identifier |
 | `backend` | Effective executor backend |
-| `operations` | Exactly `["synthesize"]` for GGUF or `["decide"]` for Laya |
+| `operations` | Exactly `["decide"]` when `decision` is set, else `["synthesize"]` |
 | `ready` | Current eligibility, not a capacity reservation |
 | `max_input_bytes` | Positive byte limit, no more than 65536 |
 | `limits` | Operation-specific limits described below |
@@ -204,9 +204,10 @@ Each descriptor contains:
 | `quantization` | llama.cpp's file type (`Q4_K_M`, `F16`), else the tensor type holding the most bytes (`Q4_K`); Laya's safetensors dtype (`F32`). At most 32 bytes of `[A-Za-z0-9._-]`; empty when unknown |
 | `trained_ctx` | The model's own context; for `synthesize`, at least `n_ctx`. `0` when unknown |
 | `chat_format` | The turn markers of its chat template: `chatml`, `llama3`, `zephyr`, `gemma`, `gemma4` or `inst`; empty when unknown and always empty for Laya |
+| `decision` | What `decide` takes: `laya` (always, for Laya), `minicheck` (a Bespoke-MiniCheck GGUF), or empty for a text generator |
 
-`parameters`, `quantization`, `trained_ctx` and `chat_format` are read from the
-artifact's header when the server lists the model, without loading weights.
+`parameters`, `quantization`, `trained_ctx`, `chat_format` and `decision` are
+read from the artifact's header when the server lists the model, without loading weights.
 They are fixed per artifact and part of the selection. Routes carry no chat
 requests; `chat_format` tells an origin's clients which markers to write into a
 raw prompt.
@@ -219,7 +220,8 @@ power state: a degraded executor applies its battery caps when it admits a
 request and reports them in `Accepted`, so a power flip changes
 `server_state`, never the selection. `decide` limits contain positive
 `max_questions` and `max_result_bytes`, capped at 128 and 524288 respectively.
-Only the matching operation's limit fields are permitted.
+Only the matching operation's limit fields are permitted. A MiniCheck GGUF
+serves `decide` only: its route, grant and limits are `decide`'s.
 
 Names are local aliases, not global model identities. Duplicate exported
 names in a snapshot are invalid. Multiple aliases may identify the same

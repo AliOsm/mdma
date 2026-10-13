@@ -171,6 +171,7 @@ where
         boundary: &crate::session::tracked::Boundary,
     ) -> Result<decision::Prepared, Status> {
         decision::prepare(
+            &self.backend,
             &self.inventory,
             &self.decision_budget,
             request,

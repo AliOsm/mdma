@@ -1,5 +1,5 @@
 use crate::federation::{
-    catalog::{Kind, ModelDescriptor},
+    catalog::ModelDescriptor,
     catalog_cache::Cache,
     config::{self, Operation},
     control::ExecutionEnvelope,
@@ -113,10 +113,7 @@ impl Selection {
                     && d.artifact_id == route.artifact_id
                     && d.profile_id == route.profile_id
                     && d.ready
-                    && matches!(
-                        (d.kind, route.operation),
-                        (Kind::Gguf, Operation::Synthesize) | (Kind::Laya, Operation::Decide)
-                    )
+                    && d.operation() == route.operation
             })
             .ok_or_else(|| Status::failed_precondition("selection_changed"))?;
         caller
@@ -195,10 +192,7 @@ impl Selection {
                     && d.artifact_id == route.artifact_id
                     && d.profile_id == route.profile_id
                     && d.ready
-                    && matches!(
-                        (d.kind, route.operation),
-                        (Kind::Gguf, Operation::Synthesize) | (Kind::Laya, Operation::Decide)
-                    )
+                    && d.operation() == route.operation
             })
             .ok_or_else(|| Status::failed_precondition("selection_changed"))?;
         let mut request_id = vec![0; 16];

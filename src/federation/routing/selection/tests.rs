@@ -1,6 +1,6 @@
 use super::*;
 use crate::federation::{
-    catalog::{self, CatalogBody, Limits, ServerState},
+    catalog::{self, CatalogBody, Kind, Limits, ServerState},
     config::{RouteImport, Window},
     control::SignedCatalog,
     signing::KeyPairHandle,
@@ -109,6 +109,7 @@ impl Setup {
             quantization: "F32".into(),
             trained_ctx: 64,
             chat_format: None,
+            decision: None,
         };
         let body = CatalogBody {
             origin: self.route.peer_id.clone(),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::decision::{Contract, minicheck};
 use crate::laya::prompt::{Kind, Question};
 use serde::{
     Deserialize, Deserializer,
@@ -90,10 +91,47 @@ fn common(confidence: f64, action: &Action) -> bool {
     probability(confidence) && probability(action.act_probability)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckBody {
+    model: String,
+    #[serde(deserialize_with = "unique_map")]
+    answers: BTreeMap<String, Check>,
+    usage: Usage,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Check {
+    supported: bool,
+    probability: f64,
+}
+
+/// The answers a request asks for: Laya's typed questions, or MiniCheck's
+/// claim ids.
+enum Expected {
+    Laya(BTreeMap<String, Question>),
+    MiniCheck(std::collections::BTreeSet<String>),
+}
+
+/// MiniCheck's answers: exactly the claims, each a probability that is
+/// `supported` above 0.5, and nothing generated.
+fn checked(claims: &std::collections::BTreeSet<String>, result_json: &str) -> bool {
+    let Ok(body) = serde_json::from_str::<CheckBody>(result_json) else {
+        return false;
+    };
+    body.model == minicheck::NAME
+        && body.usage.output_tokens == 0
+        && body.usage.input_tokens <= claims.len() as u64 * u64::from(u32::MAX)
+        && body.answers.keys().eq(claims.iter())
+        && body.answers.values().all(|check| {
+            probability(check.probability) && check.supported == (check.probability > 0.5)
+        })
+}
+
 pub(in crate::federation::routing) struct Decision {
     envelope: ExecutionEnvelope,
     max_result_bytes: usize,
-    expected: BTreeMap<String, Question>,
+    expected: Expected,
 }
 impl Decision {
     pub(in crate::federation::routing) fn new(
@@ -116,6 +154,20 @@ impl Decision {
         {
             return Err(Status::invalid_argument("invalid_request"));
         }
+        if descriptor.decision == Some(Contract::MiniCheck) {
+            let request = minicheck::Request::parse(&request.state_json, &request.questions_json)
+                .map_err(|_| Status::invalid_argument("invalid_request"))?;
+            if request.claims.len() > max_questions as usize {
+                return Err(Status::invalid_argument("invalid_request"));
+            }
+            return Ok(Self {
+                envelope,
+                max_result_bytes: max_result_bytes as usize,
+                expected: Expected::MiniCheck(
+                    request.claims.into_iter().map(|(id, _)| id).collect(),
+                ),
+            });
+        }
         serde_json::from_str::<serde_json::Value>(&request.state_json)
             .map_err(|_| Status::invalid_argument("invalid_request"))?;
         let questions = serde_json::from_str::<serde_json::Value>(&request.questions_json)
@@ -135,7 +187,7 @@ impl Decision {
         Ok(Self {
             envelope,
             max_result_bytes: max_result_bytes as usize,
-            expected,
+            expected: Expected::Laya(expected),
         })
     }
 
@@ -159,15 +211,23 @@ impl Decision {
         {
             return Err(failure());
         }
+        let expected = match &self.expected {
+            Expected::Laya(expected) => expected,
+            Expected::MiniCheck(claims) => {
+                return checked(claims, &wire.result_json)
+                    .then_some(())
+                    .ok_or_else(failure);
+            }
+        };
         let body: ResultBody = serde_json::from_str(&wire.result_json).map_err(|_| failure())?;
         if body.model != "laya-rl-agent"
             || body.usage.output_tokens != 0
-            || body.usage.input_tokens > self.expected.len() as u64 * u64::from(u32::MAX)
-            || !body.answers.keys().eq(self.expected.keys())
+            || body.usage.input_tokens > expected.len() as u64 * u64::from(u32::MAX)
+            || !body.answers.keys().eq(expected.keys())
         {
             return Err(failure());
         }
-        for (id, question) in &self.expected {
+        for (id, question) in expected {
             let answer = &body.answers[id];
             let valid = match (question.kind, answer) {
                 (

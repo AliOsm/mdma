@@ -8,7 +8,9 @@
 //! and the pinned signing key's validity window, all of which live outside
 //! this module (in the not-yet-implemented peer trust store).
 
+use crate::decision::Contract;
 use crate::federation::canonical_json::{self, Value};
+use crate::federation::config::Operation;
 use crate::federation::server_id;
 use crate::federation::signing::{self, KeyPairHandle};
 use crate::grpc::Host;
@@ -79,14 +81,6 @@ impl Kind {
         match self {
             Self::Gguf => "gguf",
             Self::Laya => "laya",
-        }
-    }
-
-    /// `synthesize` for GGUF, `decide` for Laya.
-    pub fn operation(&self) -> &'static str {
-        match self {
-            Self::Gguf => "synthesize",
-            Self::Laya => "decide",
         }
     }
 }
@@ -174,9 +168,21 @@ pub struct ModelDescriptor {
     pub trained_ctx: u32,
     /// The turn markers its chat template uses; text generators only.
     pub chat_format: Option<ChatFormat>,
+    /// What it takes through `decide`: always Laya's for Laya, MiniCheck's
+    /// for a fact-checking GGUF, `None` for a text generator.
+    pub decision: Option<Contract>,
 }
 
 impl ModelDescriptor {
+    /// `decide` for a decision model, else `synthesize`.
+    pub const fn operation(&self) -> Operation {
+        if self.decision.is_some() {
+            Operation::Decide
+        } else {
+            Operation::Synthesize
+        }
+    }
+
     /// The same model and limits, whether or not it is loaded right now.
     pub fn same_selection(&self, other: &Self) -> bool {
         *self
@@ -231,9 +237,16 @@ impl ModelDescriptor {
         if self.kind == Kind::Laya && self.chat_format.is_some() {
             return Err(Error::InvalidField("chat_format"));
         }
-        match (self.kind, &self.limits) {
+        let decision = match self.kind {
+            Kind::Gguf => matches!(self.decision, None | Some(Contract::MiniCheck)),
+            Kind::Laya => self.decision == Some(Contract::Laya),
+        };
+        if !decision {
+            return Err(Error::InvalidField("decision"));
+        }
+        match (self.operation(), &self.limits) {
             (
-                Kind::Gguf,
+                Operation::Synthesize,
                 Limits::Synthesize {
                     n_ctx,
                     max_output_tokens,
@@ -244,7 +257,7 @@ impl ModelDescriptor {
                 }
             }
             (
-                Kind::Laya,
+                Operation::Decide,
                 Limits::Decide {
                     max_questions,
                     max_result_bytes,
@@ -303,7 +316,7 @@ impl ModelDescriptor {
             ("backend".into(), Value::String(self.backend.clone())),
             (
                 "operations".into(),
-                Value::Array(vec![Value::String(self.kind.operation().into())]),
+                Value::Array(vec![Value::String(self.operation().as_str().into())]),
             ),
             ("ready".into(), Value::Bool(self.ready)),
             (
@@ -338,6 +351,10 @@ impl ModelDescriptor {
                 "chat_format".into(),
                 Value::String(self.chat_format.map_or("", ChatFormat::name).into()),
             ),
+            (
+                "decision".into(),
+                Value::String(self.decision.map_or("", Contract::as_str).into()),
+            ),
         ];
         Value::object(fields).expect("static field set has no duplicate keys")
     }
@@ -366,6 +383,7 @@ impl ModelDescriptor {
                 "quantization",
                 "trained_ctx",
                 "chat_format",
+                "decision",
             ],
         )?;
         let model = field_str(obj, "model")?;
@@ -378,11 +396,20 @@ impl ModelDescriptor {
         let profile_id = field_str(obj, "profile_id")?;
         let architecture = field_str(obj, "architecture")?;
         let backend = field_str(obj, "backend")?;
+        let decision = match field_str(obj, "decision")?.as_str() {
+            "" => None,
+            name => Some(Contract::parse(name).ok_or(Error::InvalidField("decision"))?),
+        };
+        let operation = if decision.is_some() {
+            Operation::Decide
+        } else {
+            Operation::Synthesize
+        };
         let operations = obj
             .get("operations")
             .and_then(Value::as_array)
             .ok_or(Error::MissingField("operations"))?;
-        if operations.len() != 1 || operations[0].as_str() != Some(kind.operation()) {
+        if operations.len() != 1 || operations[0].as_str() != Some(operation.as_str()) {
             return Err(Error::InvalidField("operations"));
         }
         let ready = obj
@@ -394,15 +421,15 @@ impl ModelDescriptor {
             .get("limits")
             .and_then(Value::as_object)
             .ok_or(Error::MissingField("limits"))?;
-        let limits = match kind {
-            Kind::Gguf => {
+        let limits = match operation {
+            Operation::Synthesize => {
                 reject_unknown_fields(limits_obj, &["n_ctx", "max_output_tokens"])?;
                 Limits::Synthesize {
                     n_ctx: field_u32(limits_obj, "n_ctx")?,
                     max_output_tokens: field_u32(limits_obj, "max_output_tokens")?,
                 }
             }
-            Kind::Laya => {
+            Operation::Decide => {
                 reject_unknown_fields(limits_obj, &["max_questions", "max_result_bytes"])?;
                 Limits::Decide {
                     max_questions: field_u32(limits_obj, "max_questions")?,
@@ -447,6 +474,7 @@ impl ModelDescriptor {
             quantization: field_str(obj, "quantization")?,
             trained_ctx: field_u32(obj, "trained_ctx")?,
             chat_format,
+            decision,
         };
         descriptor.validate()?;
         Ok(descriptor)

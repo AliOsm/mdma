@@ -54,9 +54,14 @@ Invalid/nonfinite sampler values are rejected, not canonicalized into
 signed catalog metadata. Prompts are raw text; federation adds no chat
 template rendering.
 
-`Decide` carries `state_json` and `questions_json` with the existing typed
-decision semantics. Their combined UTF-8 size is bounded by
-`max_input_bytes`; JSON/schema validation and question limits apply.
+`Decide` carries `state_json` and `questions_json` with the semantics of the
+descriptor's `decision`: Laya's typed questions, or MiniCheck's document and
+claims (see [serving](../serving.md#grpc-api)). Their combined UTF-8 size is
+bounded by `max_input_bytes`; JSON/schema validation and question limits apply.
+The origin checks the result against the same contract: Laya's typed answers,
+or exactly one `{"supported", "probability"}` per claim with `supported` true
+only above 0.5 and no output tokens. A MiniCheck request runs its claims on
+one prefix-reusing session of its own; nothing is shared across requests.
 Neither operation silently switches models.
 
 Every execution call MUST have a gRPC deadline. The origin subtracts
