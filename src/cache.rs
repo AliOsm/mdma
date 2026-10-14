@@ -215,6 +215,15 @@ fn summary(path: PathBuf, manifest: &Manifest, reused: bool) -> Prepared {
     }
 }
 
+/// MDMA_CACHE_DIR, then XDG_CACHE_HOME/mdma, then HOME/.cache/mdma.
+#[cfg_attr(
+    not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))),
+    expect(dead_code, reason = "read by the Coral backend")
+)]
+pub(crate) fn cache_root() -> io::Result<PathBuf> {
+    cache_dir(|name| std::env::var_os(name))
+}
+
 fn cache_dir(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> io::Result<PathBuf> {
     for (key, suffix) in [
         ("MDMA_CACHE_DIR", ""),

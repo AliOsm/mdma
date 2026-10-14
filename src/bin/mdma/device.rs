@@ -1,10 +1,13 @@
 use mdma::backend::{Backend, cpu::CpuBackend};
 
 pub(super) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-// Backends a target can host: Metal is macOS only; ROCm, CUDA and Level Zero have no macOS driver.
+// Backends a target can host: Metal is macOS only; ROCm, CUDA and Level Zero have no
+// macOS driver; the Coral Edge TPU has PCIe drivers for FreeBSD and Linux.
 #[cfg(target_os = "macos")]
 pub(super) const NAMES: &[&str] = &["cpu", "metal"];
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+pub(super) const NAMES: &[&str] = &["cpu", "vulkan", "rocm", "cuda", "level0", "coral"];
+#[cfg(not(any(target_os = "macos", target_os = "freebsd", target_os = "linux")))]
 pub(super) const NAMES: &[&str] = &["cpu", "vulkan", "rocm", "cuda", "level0"];
 
 pub(super) trait Task {
@@ -25,6 +28,8 @@ pub(super) fn built(name: &str) -> bool {
         "metal" => cfg!(feature = "metal"),
         #[cfg(not(target_os = "macos"))]
         "level0" => cfg!(feature = "level0"),
+        #[cfg(any(target_os = "freebsd", target_os = "linux"))]
+        "coral" => cfg!(feature = "coral"),
         _ => false,
     }
 }
@@ -49,6 +54,8 @@ pub(super) fn dispatch<T: Task>(name: &str, task: T) -> Result<T::Output> {
         "metal" => task.run(mdma::backend::metal::MetalBackend::new()?),
         #[cfg(all(feature = "level0", not(target_os = "macos")))]
         "level0" => task.run(mdma::backend::level0::Level0Backend::new()?),
+        #[cfg(all(feature = "coral", any(target_os = "freebsd", target_os = "linux")))]
+        "coral" => task.run(mdma::backend::coral::CoralBackend::new()?),
         name if NAMES.contains(&name) => Err(format!(
             "{name} backend not built for this target; rebuild mdma with --features {name}"
         )

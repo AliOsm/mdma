@@ -49,6 +49,44 @@ pub(in crate::model) struct Layer<B: Backend> {
     w_down: QWeight<B::Buf>,
 }
 
+/// One layer's matmul weights, for backends that place them before decoding.
+#[cfg_attr(
+    not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))),
+    expect(dead_code, reason = "read by the Coral backend")
+)]
+pub(crate) struct Matmuls<'a, Buf> {
+    pub wq: &'a QWeight<Buf>,
+    pub wk: &'a QWeight<Buf>,
+    pub wv: &'a QWeight<Buf>,
+    pub wo: &'a QWeight<Buf>,
+    pub w_gate: &'a QWeight<Buf>,
+    pub w_up: &'a QWeight<Buf>,
+    pub w_down: &'a QWeight<Buf>,
+}
+
+impl<B: Backend> Layer<B> {
+    #[cfg_attr(
+        not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))),
+        expect(dead_code, reason = "read by the Coral backend")
+    )]
+    /// (attention norm, FFN norm) weights.
+    pub(in crate::model) fn norms(&self) -> (&B::Buf, &B::Buf) {
+        (&self.attn_norm, &self.ffn_norm)
+    }
+
+    pub(in crate::model) fn matmuls(&self) -> Matmuls<'_, B::Buf> {
+        Matmuls {
+            wq: &self.wq,
+            wk: &self.wk,
+            wv: &self.wv,
+            wo: &self.wo,
+            w_gate: &self.w_gate,
+            w_up: &self.w_up,
+            w_down: &self.w_down,
+        }
+    }
+}
+
 pub(in crate::model) struct Llama<B: Backend> {
     pub(in crate::model) layers: Vec<Layer<B>>,
 }
@@ -66,6 +104,7 @@ impl<B: Backend> Llama<B> {
             output_norm,
             output: Some(output),
             architecture: Decoder::Llama(Self { layers }),
+            bos: None,
             memory: None,
         })
     }

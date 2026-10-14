@@ -9,17 +9,29 @@
 //! addresses, `regs` names the registers, `pcie` is the transport over the FreeBSD or Linux driver and `tpu`
 //! runs a program end to end. `isa` encodes the instructions and `codegen` builds
 //! programs from them, checked word for word against the compiler-exact corpus.
+//! `quant` is the host side of the uint8 numerics, `plan` places weights in the
+//! tiles' memory, and `backend` is the `Backend` that runs a model's matmuls here.
 
 pub mod address_space;
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+pub mod backend;
 pub mod codegen;
 pub mod executable;
 pub mod isa;
 pub mod link;
+pub mod model;
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]
 pub mod pcie;
+pub mod plan;
+pub mod quant;
 pub mod regs;
 #[cfg(any(target_os = "freebsd", target_os = "linux"))]
 pub mod tpu;
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+pub mod whole;
+
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+pub use backend::{CoralBackend, Decode, float_weights};
 
 pub type Result<T> = std::result::Result<T, Error>;
 

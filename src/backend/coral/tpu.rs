@@ -8,7 +8,7 @@
 use super::address_space::{
     AddressSpace, PAGE, PAGE_TABLE_ENTRIES, extended_entries, round_up_to_page, simple_entries,
 };
-use super::executable::{Description, Executable, ExecutableType, Hint};
+use super::executable::{Description, Executable, Hint, Layer};
 use super::link::{Addresses, link};
 use super::pcie::host_queue::{self, HostQueue};
 use super::pcie::{Device, DmaDirection, Event, Performance, interrupt};
@@ -48,10 +48,17 @@ pub struct PageBuf {
 }
 
 impl PageBuf {
+    /// Every page is written once here: Linux gasket pins the pages of a host-to-device
+    /// buffer read-only, and a page the process never touched is pinned as the shared
+    /// zero page, so writes made after mapping would never reach the chip.
     pub fn zeroed(bytes: usize) -> Self {
         let len = round_up_to_page(bytes as u64) as usize;
-        let storage = vec![0u8; len + PAGE as usize];
+        let mut storage = vec![0u8; len + PAGE as usize];
         let start = (PAGE as usize - storage.as_ptr() as usize % PAGE as usize) % PAGE as usize;
+        for page in storage[start..start + len].chunks_mut(PAGE as usize) {
+            // An opaque value: the store must happen even though the memory is zero.
+            page[0] = std::hint::black_box(0);
+        }
         Self {
             storage,
             start,
@@ -120,6 +127,71 @@ pub struct RunOutput {
     pub events: Vec<Event>,
 }
 
+/// One input or output buffer of a loaded program.
+struct Io {
+    name: String,
+    len: usize,
+    mapped: Mapped,
+}
+
+impl Io {
+    fn new(layer: &Layer, mapped: Mapped) -> Self {
+        Self {
+            name: layer.name.clone(),
+            len: layer.size_bytes,
+            mapped,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        &self.mapped.buf.as_slice()[..self.len]
+    }
+}
+
+/// A program with its buffers mapped and its chunks linked: the host writes the
+/// inputs in place, may patch instruction fields, invokes it and reads the outputs.
+pub struct Loaded {
+    name: String,
+    inputs: Vec<Io>,
+    outputs: Vec<Io>,
+    scratch: Option<Mapped>,
+    chunks: Vec<(Mapped, u32)>,
+}
+
+impl Loaded {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The input's bytes, the layer's padded size; the chip reads them at `invoke`.
+    pub fn input_mut(&mut self, name: &str) -> Result<&mut [u8]> {
+        let io = self
+            .inputs
+            .iter_mut()
+            .find(|io| io.name == name)
+            .ok_or_else(|| Error::Executable(format!("{}: has no input {name:?}", self.name)))?;
+        Ok(&mut io.mapped.buf.as_mut_slice()[..io.len])
+    }
+
+    /// The output's bytes as the last `invoke` left them.
+    pub fn output(&self, name: &str) -> Result<&[u8]> {
+        self.outputs
+            .iter()
+            .find(|io| io.name == name)
+            .map(Io::bytes)
+            .ok_or_else(|| Error::Executable(format!("{}: has no output {name:?}", self.name)))
+    }
+
+    /// Linked instruction chunk `index`, to patch immediates between invokes.
+    pub fn chunk_mut(&mut self, index: usize) -> Result<&mut [u8]> {
+        let name = &self.name;
+        self.chunks
+            .get_mut(index)
+            .map(|(mapped, size)| &mut mapped.buf.as_mut_slice()[..*size as usize])
+            .ok_or_else(|| Error::Executable(format!("{name}: has no instruction chunk {index}")))
+    }
+}
+
 /// Device state the run needs to report in a timeout.
 fn describe(device: &Device, queue: &HostQueue) -> String {
     let read = |offset| {
@@ -151,7 +223,7 @@ pub struct Tpu {
     queue: HostQueue,
     /// Last seen 16-bit counters of the four scalar-core interrupts.
     int_counts: [u16; regs::SC_HOST_INTERRUPTS as usize],
-    live_parameters: usize,
+    live_mappings: usize,
     closed: bool,
 }
 
@@ -179,7 +251,7 @@ impl Tpu {
             extended,
             queue,
             int_counts: [0; 4],
-            live_parameters: 0,
+            live_mappings: 0,
             closed: false,
         };
         if let Err(error) = tpu.start() {
@@ -283,7 +355,7 @@ impl Tpu {
             ));
         }
         let mapped = self.map(PageBuf::from_bytes(bytes), DmaDirection::ToDevice)?;
-        self.live_parameters += 1;
+        self.live_mappings += 1;
         Ok(Parameters {
             mapped,
             len: bytes.len(),
@@ -291,8 +363,23 @@ impl Tpu {
         })
     }
 
+    /// Maps `blob` and runs `caching`, which copies it into the tiles' wide memory;
+    /// the parameters stay mapped for the execution programs that read them.
+    pub fn cache_parameters(&mut self, caching: &Executable, blob: &[u8]) -> Result<Parameters> {
+        let parameters = self.load_parameters(blob, caching.caching_token)?;
+        match self.run(caching, Some(&parameters), &[]) {
+            Ok(_) => Ok(parameters),
+            Err(error) => match self.unload_parameters(parameters) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(Error::Protocol(format!(
+                    "{error}; unmapping afterwards also failed: {cleanup}"
+                ))),
+            },
+        }
+    }
+
     pub fn unload_parameters(&mut self, parameters: Parameters) -> Result<()> {
-        self.live_parameters -= 1;
+        self.live_mappings -= 1;
         self.unmap(parameters.mapped).map(drop)
     }
 
@@ -303,6 +390,67 @@ impl Tpu {
         parameters: Option<&Parameters>,
         inputs: &[(&str, &[u8])],
     ) -> Result<RunOutput> {
+        if let Some((name, _)) = inputs.iter().find(|(name, _)| exe.input(name).is_none()) {
+            return Err(Error::Executable(format!(
+                "{}: has no input {name:?}",
+                exe.name
+            )));
+        }
+        let mut program = self.load(exe, parameters)?;
+        let outcome = Self::write_inputs(exe, &mut program, inputs).and_then(|()| {
+            let (elapsed, events) = self.execute(&program)?;
+            let outputs = program
+                .outputs
+                .iter()
+                .map(|io| (io.name.clone(), io.bytes().to_vec()))
+                .collect();
+            Ok(RunOutput {
+                outputs,
+                elapsed,
+                events,
+            })
+        });
+        match (outcome, self.unload(program)) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(error), Err(cleanup)) => Err(Error::Protocol(format!(
+                "{error}; unmapping afterwards also failed: {cleanup}"
+            ))),
+        }
+    }
+
+    fn write_inputs(
+        exe: &Executable,
+        program: &mut Loaded,
+        inputs: &[(&str, &[u8])],
+    ) -> Result<()> {
+        for layer in &exe.inputs {
+            let (_, bytes) = inputs
+                .iter()
+                .find(|(name, _)| *name == layer.name)
+                .ok_or_else(|| {
+                    Error::Executable(format!(
+                        "{}: input {:?} was not provided",
+                        exe.name, layer.name
+                    ))
+                })?;
+            if bytes.len() != layer.size_bytes {
+                return Err(Error::Executable(format!(
+                    "{}: input {:?} has {} bytes, the program expects {}",
+                    exe.name,
+                    layer.name,
+                    bytes.len(),
+                    layer.size_bytes
+                )));
+            }
+            program.input_mut(&layer.name)?.copy_from_slice(bytes);
+        }
+        Ok(())
+    }
+
+    /// Maps `exe`'s buffers and links its instruction chunks once, for any number
+    /// of `invoke`s; `unload` releases it. `parameters` must stay loaded meanwhile.
+    pub fn load(&mut self, exe: &Executable, parameters: Option<&Parameters>) -> Result<Loaded> {
         exe.validate()?;
         let needs_parameters = exe
             .bitstreams
@@ -342,99 +490,92 @@ impl Tpu {
                 }
             }
         }
-        if exe.kind == ExecutableType::ParameterCaching
-            && exe.inputs.is_empty()
-            && !inputs.is_empty()
-        {
-            return Err(Error::Executable(format!(
-                "{}: a caching program takes no inputs",
-                exe.name
-            )));
-        }
         if exe.batch_size != 1 {
             return Err(Error::Executable(format!(
                 "{}: batch size {} is not supported yet",
                 exe.name, exe.batch_size
             )));
         }
+        let mut program = Loaded {
+            name: exe.name.clone(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            scratch: None,
+            chunks: Vec::new(),
+        };
         let mut addresses = Addresses {
             parameter: parameters.map(Parameters::device_address),
             ..Addresses::default()
         };
-        let mut mapped = Vec::new();
-        let outcome = self
-            .prepare(exe, inputs, &mut addresses, &mut mapped)
-            .and_then(|chunks| self.execute(exe, &chunks));
-        let bufs = self.unmap_all(mapped);
-        match (outcome, bufs) {
-            (Ok((elapsed, events)), Ok(bufs)) => {
-                let outputs = exe
-                    .outputs
-                    .iter()
-                    .zip(bufs)
-                    .map(|(layer, buf)| {
-                        (
-                            layer.name.clone(),
-                            buf.as_slice()[..layer.size_bytes].to_vec(),
-                        )
-                    })
-                    .collect();
-                Ok(RunOutput {
-                    outputs,
-                    elapsed,
-                    events,
-                })
+        match self.map_program(exe, &mut addresses, &mut program) {
+            Ok(()) => {
+                self.live_mappings += 1;
+                Ok(program)
             }
-            (Err(error), Ok(_)) | (Ok(_), Err(error)) => Err(error),
-            (Err(error), Err(cleanup)) => Err(Error::Protocol(format!(
-                "{error}; unmapping afterwards also failed: {cleanup}"
-            ))),
+            Err(error) => match self.release(program) {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(Error::Protocol(format!(
+                    "{error}; unmapping afterwards also failed: {cleanup}"
+                ))),
+            },
         }
     }
 
-    /// Maps outputs first (so `unmap_all` returns them first), then inputs and
-    /// scratch, then the linked instruction chunks; returns the chunks' device
-    /// addresses and sizes.
-    fn prepare(
+    /// Queues `program`'s chunks and waits for it to finish; its outputs are then
+    /// in `program.output`.
+    pub fn invoke(&mut self, program: &Loaded) -> Result<Duration> {
+        self.execute(program).map(|(elapsed, _)| elapsed)
+    }
+
+    pub fn unload(&mut self, program: Loaded) -> Result<()> {
+        self.live_mappings -= 1;
+        self.release(program)
+    }
+
+    fn release(&mut self, program: Loaded) -> Result<()> {
+        let Loaded {
+            inputs,
+            outputs,
+            scratch,
+            chunks,
+            ..
+        } = program;
+        let mapped = outputs
+            .into_iter()
+            .chain(inputs)
+            .map(|io| io.mapped)
+            .chain(scratch)
+            .chain(chunks.into_iter().map(|(m, _)| m))
+            .collect();
+        self.unmap_all(mapped).map(drop)
+    }
+
+    /// Maps outputs, inputs and scratch, then the linked instruction chunks.
+    fn map_program(
         &mut self,
         exe: &Executable,
-        inputs: &[(&str, &[u8])],
         addresses: &mut Addresses,
-        mapped: &mut Vec<Mapped>,
-    ) -> Result<Vec<(u64, u32)>> {
-        for layer in &exe.outputs {
-            let m = self.map(PageBuf::zeroed(layer.size_bytes), DmaDirection::FromDevice)?;
-            addresses.outputs.insert(layer.name.clone(), vec![m.device]);
-            mapped.push(m);
-        }
-        for layer in &exe.inputs {
-            let (_, bytes) = inputs
-                .iter()
-                .find(|(name, _)| *name == layer.name)
-                .ok_or_else(|| {
-                    Error::Executable(format!(
-                        "{}: input {:?} was not provided",
-                        exe.name, layer.name
-                    ))
-                })?;
-            if bytes.len() != layer.size_bytes {
-                return Err(Error::Executable(format!(
-                    "{}: input {:?} has {} bytes, the program expects {}",
-                    exe.name,
-                    layer.name,
-                    bytes.len(),
-                    layer.size_bytes
-                )));
+        program: &mut Loaded,
+    ) -> Result<()> {
+        for (layers, direction, at, ios) in [
+            (
+                &exe.outputs,
+                DmaDirection::FromDevice,
+                &mut addresses.outputs,
+                &mut program.outputs,
+            ),
+            (
+                &exe.inputs,
+                DmaDirection::ToDevice,
+                &mut addresses.inputs,
+                &mut program.inputs,
+            ),
+        ] {
+            for layer in layers {
+                let m = self.map(PageBuf::zeroed(layer.size_bytes), direction)?;
+                at.insert(layer.name.clone(), vec![m.device]);
+                ios.push(Io::new(layer, m));
             }
-            let m = self.map(PageBuf::from_bytes(bytes), DmaDirection::ToDevice)?;
-            addresses.inputs.insert(layer.name.clone(), vec![m.device]);
-            mapped.push(m);
-        }
-        if let Some((name, _)) = inputs.iter().find(|(name, _)| exe.input(name).is_none()) {
-            return Err(Error::Executable(format!(
-                "{}: has no input {name:?}",
-                exe.name
-            )));
         }
         if exe.scratch_size > 0 {
             let m = self.map(
@@ -442,31 +583,26 @@ impl Tpu {
                 DmaDirection::Bidirectional,
             )?;
             addresses.scratch = Some(m.device);
-            mapped.push(m);
+            program.scratch = Some(m);
         }
-        let mut chunks = Vec::with_capacity(exe.bitstreams.len());
         for bitstream in &exe.bitstreams {
             let linked = link(bitstream, addresses)?;
             let size = u32::try_from(linked.len()).map_err(|_| {
                 Error::Executable(format!("{}: instruction chunk too large", exe.name))
             })?;
             let m = self.map(PageBuf::from_bytes(&linked), DmaDirection::ToDevice)?;
-            chunks.push((m.device, size));
-            mapped.push(m);
+            program.chunks.push((m, size));
         }
-        Ok(chunks)
+        Ok(())
     }
 
     /// Queues the chunks and waits for scalar-core interrupt 0. Completion is the
     /// chip's own interrupt counter moving by one; the kernel's events are only
     /// collected, since they can arrive before or after the counter and a run
     /// reported done early would unmap buffers the chip is still writing.
-    fn execute(
-        &mut self,
-        exe: &Executable,
-        chunks: &[(u64, u32)],
-    ) -> Result<(Duration, Vec<Event>)> {
+    fn execute(&mut self, program: &Loaded) -> Result<(Duration, Vec<Event>)> {
         let timeout = self.options.timeout;
+        let chunks = &program.chunks;
         if self.queue.available() < chunks.len() as u32 {
             self.queue.reconcile(&self.device)?;
         }
@@ -482,12 +618,12 @@ impl Tpu {
         if stale != before {
             return Err(Error::Protocol(format!(
                 "{}: completion counter moved from {before} to {stale} before the program was queued",
-                exe.name
+                program.name
             )));
         }
         let start = Instant::now();
-        for &(address, size) in chunks {
-            self.queue.enqueue(&self.device, address, size)?;
+        for (mapped, size) in chunks {
+            self.queue.enqueue(&self.device, mapped.device, *size)?;
         }
         let mut events = Vec::new();
         let mut spins = 0u32;
@@ -497,27 +633,27 @@ impl Tpu {
             if now.wrapping_sub(before) >= 1 {
                 let elapsed = start.elapsed();
                 self.int_counts[0] = before.wrapping_add(1);
-                self.finish(exe, &mut events)?;
+                self.finish(&program.name, &mut events)?;
                 return Ok((elapsed, events));
             }
             if let Some(fatal) = events.iter().find(|e| e.interrupt == interrupt::FATAL_ERR) {
                 Self::check_hib(&self.device)?;
                 return Err(Error::Protocol(format!(
                     "{}: {fatal} without a HIB error status",
-                    exe.name
+                    program.name
                 )));
             }
             Self::check_hib(&self.device)?;
             if self.queue.status(&self.device)?.fatal_error != 0 {
                 return Err(Error::HostQueue(format!(
                     "{}: the instruction queue reported a fatal error",
-                    exe.name
+                    program.name
                 )));
             }
             if start.elapsed() > timeout {
                 let state = describe(&self.device, &self.queue);
                 return Err(Error::Timeout {
-                    name: exe.name.clone(),
+                    name: program.name.clone(),
                     timeout,
                     state,
                 });
@@ -532,7 +668,7 @@ impl Tpu {
     }
 
     /// Acknowledges the completion interrupt and the instruction fetches.
-    fn finish(&mut self, exe: &Executable, events: &mut Vec<Event>) -> Result<()> {
+    fn finish(&mut self, name: &str, events: &mut Vec<Event>) -> Result<()> {
         let all = (1u64 << regs::SC_HOST_INTERRUPTS) - 1;
         // Status bits are write-zero-to-clear: keep every bit but interrupt 0.
         self.device.write(regs::SC_HOST_INT_STATUS, all & !1)?;
@@ -544,8 +680,7 @@ impl Tpu {
             if start.elapsed() > Duration::from_millis(100) {
                 let state = describe(&self.device, &self.queue);
                 return Err(Error::HostQueue(format!(
-                    "{}: the program completed but the instruction queue did not: {state}",
-                    exe.name
+                    "{name}: the program completed but the instruction queue did not: {state}"
                 )));
             }
             std::thread::sleep(Duration::from_micros(20));
@@ -589,10 +724,10 @@ impl Tpu {
     }
 
     pub fn close(mut self) -> Result<()> {
-        if self.live_parameters > 0 {
+        if self.live_mappings > 0 {
             return Err(Error::Protocol(format!(
-                "{} parameter sets are still loaded",
-                self.live_parameters
+                "{} parameter sets or programs are still loaded",
+                self.live_mappings
             )));
         }
         self.shutdown(false)

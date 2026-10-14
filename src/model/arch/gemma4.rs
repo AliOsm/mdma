@@ -341,6 +341,7 @@ impl<B: Backend> Gemma<B> {
             output_norm,
             output,
             architecture: super::Decoder::Gemma4(gemma),
+            bos: None,
             memory: None,
         })
     }

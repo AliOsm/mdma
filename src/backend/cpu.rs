@@ -33,6 +33,15 @@ fn dequant_row_at(w: &QWeight<CpuBuf>, row: usize, n_cols: usize, out: &mut [f32
     dequantize_row(w.dtype, bytes, out)
 }
 
+/// Row `row` of a `[n_out, n_in]` weight, dequantized into `out` (`n_in` values).
+#[cfg_attr(
+    not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))),
+    expect(dead_code, reason = "read by the Coral backend")
+)]
+pub(crate) fn dequant_row(w: &QWeight<CpuBuf>, row: usize, out: &mut [f32]) -> Result<()> {
+    dequant_row_at(w, row, out.len(), out)
+}
+
 fn softmax_inplace(xs: &mut [f32]) {
     let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0;

@@ -12,6 +12,13 @@ cfg_select! {
     target_os = "freebsd" => {
         pub(super) struct Source;
 
+        // The Linux source owns eventfds; both share one signature.
+        #[expect(
+            clippy::unnecessary_wraps,
+            clippy::unused_self,
+            clippy::needless_pass_by_ref_mut,
+            reason = "the per-OS event sources share one interface"
+        )]
         impl Source {
             pub fn attach(_device: BorrowedFd<'_>) -> io::Result<Self> {
                 Ok(Self)

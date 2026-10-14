@@ -6,6 +6,16 @@ cargo test --release --features rocm       # + fixture-free HIP kernel tests; re
 cargo test --features metal --lib backend::metal  # macOS GPU tests; no model fixture needed
 ```
 
+Coral Edge TPU tests (`tests/coral.rs`) check the generated programs against the
+oracle fixtures in `data/fixtures/coral` on any host; on a card they also run
+the programs and decode stories15M (the F32 `stories15M.gguf` from llama.cpp's
+test models):
+
+```sh
+MDMA_CORAL_DEVICE=/dev/apex_0 MDMA_TEST_STORIES15M_GGUF="$HOME/models/stories15M.gguf" \
+cargo test --release --features coral --test coral
+```
+
 All tests and benchmarks that load external GGUF checkpoints are ignored by default.
 Synthetic Llama, Gemma, ModernBERT, and Laya-head compatibility tests always run with `cargo test`;
 `--features metal`, `rocm`, or `vulkan` adds GPU compatibility tests. Separate optional

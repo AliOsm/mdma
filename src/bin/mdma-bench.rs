@@ -133,8 +133,13 @@ fn main() -> Result<()> {
             let backend = mdma::backend::cuda::CudaBackend::new()?;
             run(&backend, "cuda", start.elapsed().as_secs_f64(), &args)
         }
+        #[cfg(all(feature = "coral", any(target_os = "freebsd", target_os = "linux")))]
+        "coral" => {
+            let backend = mdma::backend::coral::CoralBackend::new()?;
+            run(&backend, "coral", start.elapsed().as_secs_f64(), &args)
+        }
         _ => Err(
-            "mdma-bench supports cpu, cuda (--features cuda), or metal (--features metal on macOS)"
+            "mdma-bench supports cpu, cuda (--features cuda), metal (--features metal on macOS), or coral (--features coral on FreeBSD and Linux)"
                 .into(),
         ),
     }

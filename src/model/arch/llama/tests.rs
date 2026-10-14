@@ -120,6 +120,7 @@ pub(in crate::model) fn tiny_model<B: Backend>(backend: &B) -> Model<B> {
         }),
         output_norm: floats(vec![1.0; 8]),
         output: Some(weight(128, 8, 29)),
+        bos: None,
         memory: None,
     }
 }

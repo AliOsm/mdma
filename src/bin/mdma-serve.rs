@@ -352,8 +352,23 @@ async fn launch(config: Config, guard: ShutdownGuard) -> Result<(), BoxError> {
         "metal" => Err("MDMA_BACKEND=metal requires building with --features metal".into()),
         #[cfg(not(target_os = "macos"))]
         "metal" => Err("MDMA_BACKEND=metal requires macOS with a unified-memory Metal GPU".into()),
+        #[cfg(all(feature = "coral", any(target_os = "freebsd", target_os = "linux")))]
+        "coral" => {
+            run(
+                mdma::backend::coral::CoralBackend::new,
+                "coral",
+                config,
+                guard,
+            )
+            .await
+        }
+        #[cfg(not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))))]
+        "coral" => Err(
+            "MDMA_BACKEND=coral requires FreeBSD or Linux and building with --features coral"
+                .into(),
+        ),
         other => Err(format!(
-            "unknown MDMA_BACKEND '{other}' (expected cpu, rocm, level0, vulkan, cuda, or metal)"
+            "unknown MDMA_BACKEND '{other}' (expected cpu, rocm, level0, vulkan, cuda, metal, or coral)"
         )
         .into()),
     }

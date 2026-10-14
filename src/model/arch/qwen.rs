@@ -92,6 +92,7 @@ impl<B: Backend> Qwen<B> {
             output_norm,
             output,
             architecture: Decoder::Qwen(Self { layers, factors }),
+            bos: None,
             memory: None,
         })
     }

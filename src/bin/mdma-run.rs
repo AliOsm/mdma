@@ -47,6 +47,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "cuda" => run(&mdma::backend::cuda::CudaBackend::new()?, &args[0], &args[1], max),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         "metal" => run(&mdma::backend::metal::MetalBackend::new()?, &args[0], &args[1], max),
-        _ => Err("mdma-run supports cpu, rocm, vulkan, cuda, or metal (macOS); GPU backends require the matching build feature".into()),
+        #[cfg(all(feature = "coral", any(target_os = "freebsd", target_os = "linux")))]
+        "coral" => run(&mdma::backend::coral::CoralBackend::new()?, &args[0], &args[1], max),
+        _ => Err("mdma-run supports cpu, rocm, vulkan, cuda, metal (macOS) or coral (FreeBSD, Linux); accelerators require the matching build feature".into()),
     }
 }

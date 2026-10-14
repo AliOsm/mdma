@@ -120,6 +120,29 @@ impl Oracle {
     }
 }
 
+/// Named program inputs as `Tpu::run` takes them.
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+fn named(inputs: &[(String, Vec<u8>)]) -> Vec<(&str, &[u8])> {
+    inputs
+        .iter()
+        .map(|(n, b)| (n.as_str(), b.as_slice()))
+        .collect()
+}
+
+/// (bytes that differ, largest difference).
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+fn diff(a: &[u8], b: &[u8]) -> (usize, u8) {
+    let n = a.iter().zip(b).filter(|(x, y)| x != y).count();
+    (
+        n,
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap_or(0),
+    )
+}
+
 fn description(text: &str) -> Description {
     match text {
         "INPUT" => Description::InputActivation,
@@ -307,13 +330,9 @@ fn programs_run_bit_exact_on_the_card() {
     };
     for name in fixture_names() {
         let fixture = load(&name);
-        let parameters = tpu.load_parameters(&fixture.caching.parameters, 0).unwrap();
-        let cached = tpu.run(&fixture.caching, Some(&parameters), &[]).unwrap();
-        eprintln!(
-            "{name}: parameters cached in {:?} ({} events)",
-            cached.elapsed,
-            cached.events.len()
-        );
+        let parameters = tpu
+            .cache_parameters(&fixture.caching, &fixture.caching.parameters)
+            .unwrap();
         for round in 0..3 {
             let run = tpu
                 .run(
@@ -396,9 +415,8 @@ fn generated_programs_run_bit_exact_on_the_card() {
         let x = rng.bytes(k);
         let expected = fc_reference(&quant, &x, &w, &bias, n, k);
         let parameters = tpu
-            .load_parameters(&program.params(&w, &bias, quant.w_zp), 0)
+            .cache_parameters(&programs.caching, &program.params(&w, &bias, quant.w_zp))
             .unwrap();
-        let cached = tpu.run(&programs.caching, Some(&parameters), &[]).unwrap();
         let input = program.input_bytes(&x, quant.in_zp);
         let run = tpu
             .run(&programs.execution, Some(&parameters), &[("x", &input)])
@@ -409,11 +427,434 @@ fn generated_programs_run_bit_exact_on_the_card() {
             "fc {n}x{k} shift {shift} offset {offset}: output differs from the reference"
         );
         eprintln!(
-            "generated fc {n}x{k} shift {shift} offset {offset}: bit-exact, cache {:?}, call {:?}",
-            cached.elapsed, run.elapsed
+            "generated fc {n}x{k} shift {shift} offset {offset}: bit-exact in {:?}",
+            run.elapsed
         );
         tpu.unload_parameters(parameters).unwrap();
     }
+    tpu.close().unwrap();
+}
+
+/// stories15M's matmul shapes cached side by side at disjoint (tiles, wide
+/// offset) placements before any of them runs, then invoked interleaved as
+/// loaded programs: fresh inputs written in place and every compute tile's
+/// quantization patched between invokes. Weights of one layer must survive the
+/// caching and execution of the others.
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+#[test]
+fn resident_programs_share_the_chip() {
+    use mdma::backend::coral::codegen::fc::{FcProgram, fc_reference};
+    use mdma::backend::coral::codegen::{Quant, patch_quant};
+    use std::time::{Duration, Instant};
+    let Some((_guard, mut tpu)) = open_device() else {
+        return;
+    };
+    let mut rng = Xorshift(0x51_7cc1_b727_220a);
+    // (N, K, compute tile shift, parameter offset): q and k side by side, the
+    // gate/up width above them, the down projection on the last tiles.
+    let cases = [
+        (288, 288, 0, 0),
+        (288, 288, 5, 0),
+        (768, 288, 0, 18_688),
+        (288, 768, 11, 37_376),
+    ];
+    let w_zp = Quant::REFERENCE.w_zp;
+    let mut layers = Vec::new();
+    for (n, k, shift, offset) in cases {
+        let program = FcProgram::new(n, k);
+        let programs = program.programs(shift, offset, Quant::REFERENCE).unwrap();
+        let w = rng.bytes(n * k);
+        let bias = rng.biases(n);
+        let parameters = tpu
+            .cache_parameters(&programs.caching, &program.params(&w, &bias, w_zp))
+            .unwrap();
+        layers.push((program, programs, w, bias, parameters));
+    }
+    let mut loaded: Vec<_> = layers
+        .iter()
+        .map(|(_, programs, _, _, parameters)| {
+            tpu.load(&programs.execution, Some(parameters)).unwrap()
+        })
+        .collect();
+    for round in 0..6u8 {
+        for ((program, programs, w, bias, _), exe) in layers.iter().zip(&mut loaded) {
+            let (n, k) = (program.n, program.k);
+            // Round 0 keeps the generated quantization; later rounds give every
+            // compute tile its own.
+            let quants: Vec<Quant> = (0..programs.ops.len())
+                .map(|t| {
+                    if round == 0 {
+                        return Quant::REFERENCE;
+                    }
+                    let salt = (round as usize * 31 + t * 7) as u8;
+                    let mut q = Quant::new(
+                        96 + salt % 64,
+                        w_zp,
+                        64 + salt % 128,
+                        1.0 / (1024.0 + 256.0 * f32::from(salt % 16)),
+                    );
+                    (q.lo, q.hi) = (salt % 8, 255 - salt % 8);
+                    q
+                })
+                .collect();
+            for (&word, quant) in programs.ops.iter().zip(&quants) {
+                patch_quant(exe.chunk_mut(0).unwrap(), word, quant).unwrap();
+            }
+            let x = rng.bytes(k);
+            // Every tile reads the same x, so one input zero point serves all tiles;
+            // the first tile's is the one the padding uses.
+            let input = program.input_bytes(&x, quants[0].in_zp);
+            exe.input_mut("x").unwrap().copy_from_slice(&input);
+            tpu.invoke(exe).unwrap();
+            let out = program.output(exe.output("y").unwrap());
+            let per_tile = 64 * programs.geom.p();
+            for (t, quant) in quants.iter().enumerate() {
+                let expected = fc_reference(quant, &x, w, bias, n, k);
+                let rows = per_tile * t..(per_tile * (t + 1)).min(n);
+                assert_eq!(
+                    &out[rows.clone()],
+                    &expected[rows.clone()],
+                    "fc {n}x{k} round {round} tile {t}: output differs from the reference"
+                );
+            }
+        }
+    }
+    // Wall-clock per call of a loaded program: write the input, invoke, read the output.
+    let (program, _, _, _, _) = &layers[0];
+    let x = rng.bytes(program.k);
+    let input = program.input_bytes(&x, Quant::REFERENCE.in_zp);
+    let calls = 2000u32;
+    let mut slowest = Duration::ZERO;
+    let start = Instant::now();
+    for _ in 0..calls {
+        let call = Instant::now();
+        loaded[0].input_mut("x").unwrap().copy_from_slice(&input);
+        tpu.invoke(&loaded[0]).unwrap();
+        std::hint::black_box(loaded[0].output("y").unwrap());
+        slowest = slowest.max(call.elapsed());
+    }
+    eprintln!(
+        "loaded fc 288x288: {:?} per call over {calls} calls, slowest {slowest:?}",
+        start.elapsed() / calls
+    );
+    for exe in loaded {
+        tpu.unload(exe).unwrap();
+    }
+    for (_, _, _, _, parameters) in layers {
+        tpu.unload_parameters(parameters).unwrap();
+    }
+    tpu.close().unwrap();
+}
+
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+fn argmax(logits: &[f32]) -> u32 {
+    logits
+        .iter()
+        .enumerate()
+        .fold((0, f32::NEG_INFINITY), |best, (i, &l)| {
+            if l > best.1 { (i, l) } else { best }
+        })
+        .0 as u32
+}
+
+/// `-ln softmax(logits)[token]`.
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+fn nll(logits: &[f32], token: u32) -> f64 {
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let sum: f64 = logits.iter().map(|&l| f64::from(l - max).exp()).sum();
+    sum.ln() - f64::from(logits[token as usize] - max)
+}
+
+/// stories15M (`MDMA_TEST_STORIES15M_GGUF`) decoded by the coral backend stays
+/// close to the float model in both decode modes: teacher-forced on stories the
+/// float model writes, the perplexity is within a quarter of the CPU's and the
+/// argmax agrees with the CPU's on most tokens.
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+#[test]
+fn stories15m_decodes_on_the_card() {
+    use mdma::backend::Backend;
+    use mdma::backend::coral::tpu::Options;
+    use mdma::backend::coral::{CoralBackend, Decode};
+    use mdma::backend::cpu::CpuBackend;
+    use mdma::gguf::GgufModel;
+    use mdma::model::Model;
+    use std::time::Instant;
+    let (Ok(device), Ok(path)) = (
+        std::env::var("MDMA_CORAL_DEVICE"),
+        std::env::var("MDMA_TEST_STORIES15M_GGUF"),
+    ) else {
+        eprintln!("MDMA_CORAL_DEVICE or MDMA_TEST_STORIES15M_GGUF not set: skipped");
+        return;
+    };
+    let _guard = DEVICE.lock().unwrap();
+    let cpu = CpuBackend;
+    let mut gguf = GgufModel::open(&path).unwrap();
+    let bos = gguf
+        .metadata_u32("tokenizer.ggml.bos_token_id")
+        .unwrap_or(1);
+    let float = Model::load(&cpu, &mut gguf).unwrap();
+    let n_ctx = float.config().n_ctx;
+    // The float model writes the stories and scores them.
+    let mut rng = 0x7e57_5701_1e5a_11ed;
+    let mut stories = Vec::new();
+    for _ in 0..4 {
+        let mut kv = float.new_kv_cache(&cpu, n_ctx).unwrap();
+        let mut ws = float.alloc_workspace(&cpu, 1).unwrap();
+        let mut story = vec![bos];
+        let mut float_logits = Vec::new();
+        for pos in 0..n_ctx - 1 {
+            let logits = float
+                .forward(&cpu, &mut kv, &mut ws, story[pos], pos as u32)
+                .unwrap();
+            story.push(mdma::backend::coral::model::sample(&logits, 1.0, &mut rng));
+            float_logits.push(logits);
+        }
+        stories.push((story, float_logits));
+    }
+    for decode in [Decode::Matmul, Decode::Model] {
+        let coral = CoralBackend::with_decode(
+            Options {
+                device: device.clone(),
+                ..Options::default()
+            },
+            decode,
+        )
+        .unwrap();
+        let mut gguf = GgufModel::open(&path).unwrap();
+        let chip = Model::load(&coral, &mut gguf).unwrap();
+        let (mut float_nll, mut chip_nll, mut agree, mut scored) = (0.0, 0.0, 0usize, 0usize);
+        let mut decode_time = std::time::Duration::ZERO;
+        for (story, float_logits) in &stories {
+            // The chip reads the same story after a one-token prefill.
+            let mut kv = chip.new_kv_cache(&coral, n_ctx).unwrap();
+            let mut prefill = chip.alloc_workspace(&coral, 1).unwrap();
+            let mut logits = chip
+                .prefill(&coral, &mut kv, &mut prefill, &story[..1], 0)
+                .unwrap();
+            let mut ws = chip.alloc_workspace(&coral, 1).unwrap();
+            let mut decoder = coral.decoder(&chip, &mut kv, &mut ws).unwrap();
+            for pos in 1..n_ctx {
+                let next = story[pos];
+                float_nll += nll(&float_logits[pos - 1], next);
+                chip_nll += nll(&logits, next);
+                agree += usize::from(argmax(&logits) == argmax(&float_logits[pos - 1]));
+                scored += 1;
+                if pos + 1 < n_ctx {
+                    let start = Instant::now();
+                    logits = decoder.forward(next, pos as u32).unwrap();
+                    decode_time += start.elapsed();
+                }
+            }
+        }
+        let float_ppl = (float_nll / scored as f64).exp();
+        let chip_ppl = (chip_nll / scored as f64).exp();
+        let agreement = agree as f64 / scored as f64;
+        eprintln!(
+            "stories15M {decode:?} over {scored} tokens: perplexity {float_ppl:.3} float, {chip_ppl:.3} on the card; \
+             argmax agreement {:.1}%; {:.1} tokens/s decoding",
+            100.0 * agreement,
+            (scored - stories.len()) as f64 / decode_time.as_secs_f64()
+        );
+        assert!(
+            chip_ppl <= 1.25 * float_ppl,
+            "{decode:?}: perplexity {chip_ppl:.3} on the card against {float_ppl:.3} in float"
+        );
+        assert!(
+            agreement >= 0.75,
+            "{decode:?}: argmax agreement {agreement:.3}"
+        );
+    }
+}
+
+/// The whole stories15M model as one program per position: the oracle's
+/// quantization (`data/fixtures/coral/model/quants.json`) gives the oracle's
+/// parameter blob and programs, and on the card the programs reproduce the
+/// oracle's bit model at P = 1, 2, 5 and 9 byte for byte.
+#[cfg(any(target_os = "freebsd", target_os = "linux"))]
+#[test]
+fn whole_model_runs_bit_exact_on_the_card() {
+    use mdma::backend::coral::codegen::attention::heads;
+    use mdma::backend::coral::float_weights;
+    use mdma::backend::coral::model::{model_params, rope_inputs};
+    use mdma::backend::coral::whole::{Kv8, Whole};
+    use mdma::backend::cpu::CpuBackend;
+    use mdma::gguf::GgufModel;
+    use mdma::model::Model;
+    let Ok(path) = std::env::var("MDMA_TEST_STORIES15M_GGUF") else {
+        eprintln!("MDMA_TEST_STORIES15M_GGUF not set: skipped");
+        return;
+    };
+    let oracle = Oracle::open();
+    let (dir, main) = (&oracle.dir, &oracle.main);
+    let mut gguf = GgufModel::open(&path).unwrap();
+    let model = Model::load(&CpuBackend, &mut gguf).unwrap();
+    let weights = float_weights(&model).unwrap().unwrap();
+    let blob = model_params(&weights, main);
+    assert_eq!(
+        sha(&blob),
+        oracle.manifest["params"],
+        "the parameter blob differs from the oracle's"
+    );
+    let pl = plan(6).unwrap();
+    let Some((_guard, mut tpu)) = open_device() else {
+        return;
+    };
+    let caching = gen_model(2, main, &pl).unwrap().caching;
+    let parameters = tpu.cache_parameters(&caching, &blob).unwrap();
+    for p in [1usize, 2, 5, 9] {
+        let programs = oracle.programs(p, &pl);
+        let vector = std::fs::read(dir.join(format!("vectors/P{p}.bin"))).unwrap();
+        let (dm, rows) = (288usize, 288 * (p - 1));
+        let mut at = 0;
+        let mut take = |n: usize| {
+            let s = &vector[at..at + n];
+            at += n;
+            s.to_vec()
+        };
+        let (x, cos, sin) = (take(dm), take(dm), take(dm));
+        let mut inputs: Vec<(String, Vec<u8>)> =
+            vec![("x".into(), x), ("cos".into(), cos), ("sin".into(), sin)];
+        if p > 1 {
+            for l in 0..6 {
+                for kv in ["k", "v"] {
+                    let mut block = take(rows);
+                    block.resize(dm * p, 0);
+                    inputs.push((format!("{kv}{l}"), heads(&block, p)));
+                }
+            }
+        }
+        let (x_out, kv) = (take(dm), take(6 * 2 * dm));
+        let run = tpu
+            .run(&programs.execution, Some(&parameters), &named(&inputs))
+            .unwrap();
+        let output = |name: &str| {
+            run.outputs
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, b)| b.clone())
+                .unwrap()
+        };
+        let mut report = vec![format!("out {:?}", diff(&output("out"), &x_out))];
+        for l in 0..6 {
+            let ours = output(&format!("kv{l}"));
+            let theirs = &kv[l * 2 * dm..(l + 1) * 2 * dm];
+            report.push(format!(
+                "k{l} {:?} v{l} {:?}",
+                diff(&ours[..dm], &theirs[..dm]),
+                diff(&ours[dm..], &theirs[dm..])
+            ));
+        }
+        eprintln!("P={p}: {}", report.join(", "));
+        // The scalar core's exp2 and reciprocal are not correctly rounded: at P = 5 a
+        // softmax value next to a rounding tie lands one code off in layer 3, and the
+        // difference carries through the later layers.
+        let outputs: Vec<(Vec<u8>, &[u8])> = (0..6)
+            .map(|l| (output(&format!("kv{l}")), &kv[l * 2 * dm..(l + 1) * 2 * dm]))
+            .chain(std::iter::once((output("out"), x_out.as_slice())))
+            .collect();
+        if p == 5 {
+            let first = outputs
+                .iter()
+                .find(|(a, b)| a != b)
+                .map(|(a, b)| diff(a, b).1);
+            assert_eq!(
+                first,
+                Some(1),
+                "P={p}: the first difference is not a tie: {report:?}"
+            );
+            assert!(
+                outputs.iter().all(|(a, b)| diff(a, b).1 <= 8),
+                "P={p}: the tie spread too far: {report:?}"
+            );
+        } else {
+            assert!(
+                outputs.iter().all(|(a, b)| a == b),
+                "P={p}: differs from the bit model: {report:?}"
+            );
+        }
+        eprintln!("whole model P={p}: {:?} per call", run.elapsed);
+    }
+    tpu.unload_parameters(parameters).unwrap();
+    // The decoder's runtime: every program resident, the KV rows from the uint8
+    // cache, the host's embedding and RoPE inputs.
+    let mut whole = Whole::build(&mut tpu, weights, main.clone(), 128, 0, None).unwrap();
+    let mut kv8 = Kv8::new(6, 128);
+    for p in [2usize, 5, 9] {
+        let vector = std::fs::read(dir.join(format!("vectors/P{p}.bin"))).unwrap();
+        let (dm, rows) = (288usize, 288 * (p - 1));
+        let x = &vector[..dm];
+        let (cos, sin) = rope_inputs(p - 1, &main[0]);
+        assert_eq!(
+            (&cos[..], &sin[..]),
+            (&vector[dm..2 * dm], &vector[2 * dm..3 * dm]),
+            "P={p}: the host's RoPE inputs differ from the oracle's"
+        );
+        let mut at = 3 * dm;
+        for l in 0..6 {
+            let (k, v) = (&vector[at..at + rows], &vector[at + rows..at + 2 * rows]);
+            for pos in 0..p - 1 {
+                kv8.put(
+                    l,
+                    pos,
+                    &k[pos * dm..(pos + 1) * dm],
+                    &v[pos * dm..(pos + 1) * dm],
+                );
+            }
+            at += 2 * rows;
+        }
+        let step = whole.run(&mut tpu, &kv8, x, &cos, &sin, p).unwrap();
+        let kv: Vec<u8> = step.kv.iter().flatten().copied().collect();
+        let reference = &vector[at + dm..at + dm + 6 * 2 * dm];
+        let (differing, _) = diff(&kv, reference);
+        eprintln!(
+            "whole model runtime P={p}: {differing} of {} k'|v bytes differ",
+            kv.len()
+        );
+        if p != 5 {
+            assert_eq!(
+                &kv[..],
+                reference,
+                "P={p}: the resident program differs from the bit model"
+            );
+        }
+    }
+    // Late positions: the resident programs (inputs written after mapping) answer
+    // like freshly mapped ones on the same random inputs.
+    let mut rng = Xorshift(0x0bad_5eed_1234_5678);
+    for p in [64usize, 127] {
+        let (x, cos, sin) = (rng.bytes(288), rng.bytes(288), rng.bytes(288));
+        let mut kv8 = Kv8::new(6, 128);
+        let mut inputs: Vec<(String, Vec<u8>)> = vec![
+            ("x".into(), x.clone()),
+            ("cos".into(), cos.clone()),
+            ("sin".into(), sin.clone()),
+        ];
+        for l in 0..6 {
+            let mut rows = [rng.bytes(288 * (p - 1)), rng.bytes(288 * (p - 1))];
+            for pos in 0..p - 1 {
+                let span = pos * 288..(pos + 1) * 288;
+                kv8.put(l, pos, &rows[0][span.clone()], &rows[1][span]);
+            }
+            for (name, block) in ["k", "v"].iter().zip(&mut rows) {
+                block.resize(288 * p, 0);
+                inputs.push((format!("{name}{l}"), heads(block, p)));
+            }
+        }
+        let fresh = gen_model(p, main, &pl).unwrap();
+        let run = tpu.run(&fresh.execution, None, &named(&inputs)).unwrap();
+        let resident = whole.run(&mut tpu, &kv8, &x, &cos, &sin, p).unwrap();
+        for (l, row) in resident.kv.iter().enumerate() {
+            let name = format!("kv{l}");
+            let fresh_row = &run.outputs.iter().find(|(n, _)| *n == name).unwrap().1;
+            assert_eq!(
+                &row[..],
+                &fresh_row[..],
+                "P={p}: layer {l}'s resident k'|v differs from a fresh run"
+            );
+        }
+        eprintln!("whole model runtime P={p}: resident equals fresh");
+    }
+    whole.release(&mut tpu).unwrap();
     tpu.close().unwrap();
 }
 

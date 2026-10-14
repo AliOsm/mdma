@@ -9,7 +9,8 @@ use serde::Serialize;
 #[derive(Debug, usage_rs::Args)]
 pub(super) struct Args {
     /// Check every backend this target can host, or one: cpu and metal on macOS;
-    /// cpu, vulkan, rocm, cuda or level0 elsewhere.
+    /// cpu, vulkan, rocm, cuda, level0 or coral on FreeBSD and Linux; cpu,
+    /// vulkan, rocm, cuda or level0 elsewhere.
     #[usage(long, default = "all")]
     backend: String,
     #[usage(long)]
@@ -161,8 +162,13 @@ pub(super) fn run(args: &Args) -> Result<()> {
             }
         }
         for accelerator in &inventory.accelerators {
+            let backend = if accelerator.kind == "coral_edge_tpu" && device::built("coral") {
+                "served by the coral backend"
+            } else {
+                "no compute backend yet"
+            };
             println!(
-                "{}: detected — {} {} via {}, no compute backend yet",
+                "{}: detected — {} {} via {}, {backend}",
                 accelerator.kind,
                 accelerator.bus,
                 accelerator.address.as_deref().unwrap_or("unknown address"),

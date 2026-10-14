@@ -11,6 +11,7 @@ pub mod hybrid;
 pub(crate) mod layers;
 pub mod planning;
 pub mod weights;
+pub(crate) use arch::llama::Matmuls as LlamaMatmuls;
 use arch::{Decoder, gemma4, glm4, llama, qwen};
 pub(crate) mod memory;
 mod preflight;
@@ -65,6 +66,8 @@ pub struct Model<B: Backend> {
     output_norm: B::Buf,
     output: Option<QWeight<B::Buf>>,
     architecture: Decoder<B>,
+    /// `tokenizer.ggml.bos_token_id`, when the file names one.
+    bos: Option<u32>,
     // Last: refund only after all weight buffers have been dropped.
     memory: Option<Reservation>,
 }
@@ -154,6 +157,7 @@ impl<B: Backend> Model<B> {
             }
         };
         model.memory = memory;
+        model.bos = gguf.metadata_u32("tokenizer.ggml.bos_token_id");
         gguf.check_cache_source()?;
         Ok(model)
     }
@@ -164,6 +168,47 @@ impl<B: Backend> Model<B> {
 
     pub fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    #[cfg_attr(
+        not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))),
+        expect(dead_code, reason = "read by the Coral backend")
+    )]
+    pub(crate) fn bos_token(&self) -> Option<u32> {
+        self.bos
+    }
+
+    #[cfg_attr(
+        not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))),
+        expect(dead_code, reason = "read by the Coral backend")
+    )]
+    /// Every layer's (attention norm, FFN norm) weights, for a Llama-architecture model.
+    pub(crate) fn llama_norms(&self) -> Option<Vec<(&B::Buf, &B::Buf)>> {
+        match &self.architecture {
+            Decoder::Llama(llama) => Some(llama.layers.iter().map(llama::Layer::norms).collect()),
+            _ => None,
+        }
+    }
+
+    #[cfg_attr(
+        not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))),
+        expect(dead_code, reason = "read by the Coral backend")
+    )]
+    /// The embedding table, the final norm and the classifier.
+    pub(crate) fn head(&self) -> (&QWeight<B::Buf>, &B::Buf, &QWeight<B::Buf>) {
+        (&self.token_embd, &self.output_norm, self.output_weight())
+    }
+
+    /// Every layer's matmul weights, for a Llama-architecture model.
+    #[cfg_attr(
+        not(all(feature = "coral", any(target_os = "freebsd", target_os = "linux"))),
+        expect(dead_code, reason = "read by the Coral backend")
+    )]
+    pub(crate) fn llama_matmuls(&self) -> Option<Vec<LlamaMatmuls<'_, B::Buf>>> {
+        match &self.architecture {
+            Decoder::Llama(llama) => Some(llama.layers.iter().map(llama::Layer::matmuls).collect()),
+            _ => None,
+        }
     }
 
     fn sequential_prefill(&self) -> bool {

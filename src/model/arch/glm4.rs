@@ -64,6 +64,7 @@ impl<B: Backend> Glm4<B> {
             output_norm,
             output,
             architecture: Decoder::Glm4(Self { layers, rotary_dim }),
+            bos: None,
             memory: None,
         })
     }

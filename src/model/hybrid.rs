@@ -92,6 +92,7 @@ impl<G: Backend> HybridModel<G> {
                 layers: Llama::load_layers(&cpu, g, 0..split)?,
             }),
             config,
+            bos: None,
             memory: None,
         };
         let device = Llama {
