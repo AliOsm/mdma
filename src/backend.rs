@@ -1,5 +1,6 @@
 pub mod cpu;
 pub mod dtype_code;
+pub mod select;
 pub mod shape;
 #[cfg(any(feature = "vulkan", test))]
 mod submission;

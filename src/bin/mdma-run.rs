@@ -1,5 +1,5 @@
 //! Local, deterministic model smoke runner. Serving still uses mTLS.
-use mdma::backend::{Backend, cpu::CpuBackend};
+use mdma::backend::{Backend, select};
 use mdma::{gguf::GgufModel, inference};
 
 fn run<B: Backend>(
@@ -24,31 +24,32 @@ fn run<B: Backend>(
     Ok(())
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+struct Run<'a> {
+    path: &'a str,
+    prompt: &'a str,
+    max: usize,
+}
+
+impl select::Task for Run<'_> {
+    type Output = ();
+    fn run<B: Backend>(self, backend: B) -> select::Result<()> {
+        run(&backend, self.path, self.prompt, self.max)
+    }
+}
+
+fn main() -> select::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !(2..=3).contains(&args.len()) {
         return Err("usage: mdma-run MODEL.gguf PROMPT [MAX_TOKENS]".into());
     }
     let max = args.get(2).map(|n| n.parse()).transpose()?.unwrap_or(32);
-    match std::env::var("MDMA_BACKEND").as_deref().unwrap_or("cpu") {
-        "cpu" => run(&CpuBackend, &args[0], &args[1], max),
-        #[cfg(feature = "rocm")]
-        "rocm" => {
-            let backend = if std::env::var("MDMA_HIP_F32").as_deref() == Ok("1") {
-                mdma::backend::rocm::HipBackend::new_f32()?
-            } else {
-                mdma::backend::rocm::HipBackend::new()?
-            };
-            run(&backend, &args[0], &args[1], max)
-        },
-        #[cfg(feature = "vulkan")]
-        "vulkan" => run(&mdma::backend::vulkan::VulkanBackend::new()?, &args[0], &args[1], max),
-        #[cfg(feature = "cuda")]
-        "cuda" => run(&mdma::backend::cuda::CudaBackend::new()?, &args[0], &args[1], max),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        "metal" => run(&mdma::backend::metal::MetalBackend::new()?, &args[0], &args[1], max),
-        #[cfg(all(feature = "coral", any(target_os = "freebsd", target_os = "linux")))]
-        "coral" => run(&mdma::backend::coral::CoralBackend::new()?, &args[0], &args[1], max),
-        _ => Err("mdma-run supports cpu, rocm, vulkan, cuda, metal (macOS) or coral (FreeBSD, Linux); accelerators require the matching build feature".into()),
-    }
+    let run = Run {
+        path: &args[0],
+        prompt: &args[1],
+        max,
+    };
+    select::dispatch(
+        std::env::var("MDMA_BACKEND").as_deref().unwrap_or("cpu"),
+        run,
+    )
 }

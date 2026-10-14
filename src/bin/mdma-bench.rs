@@ -1,5 +1,5 @@
 //! Isolated decoder benchmark. Run one fresh process per backend/model.
-use mdma::backend::{Backend, cpu::CpuBackend};
+use mdma::backend::{Backend, select};
 use mdma::{
     gguf::GgufModel, memory::NativeMemoryBudget, model::Model, sampler::greedy,
     tokenizer::Tokenizer,
@@ -115,32 +115,34 @@ fn run<B: Backend>(backend: &B, name: &str, init_seconds: f64, args: &[String]) 
     Ok(())
 }
 
+struct Bench<'a> {
+    name: &'a str,
+    start: Instant,
+    args: &'a [String],
+}
+
+impl select::Task for Bench<'_> {
+    type Output = ();
+    fn run<B: Backend>(self, backend: B) -> Result<()> {
+        run(
+            &backend,
+            self.name,
+            self.start.elapsed().as_secs_f64(),
+            self.args,
+        )
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() != 4 {
         return Err("usage: mdma-bench MODEL.gguf PROMPT_TOKENS DECODE_STEPS REPETITIONS".into());
     }
-    let start = Instant::now();
-    match std::env::var("MDMA_BACKEND").as_deref().unwrap_or("cpu") {
-        "cpu" => run(&CpuBackend, "cpu", start.elapsed().as_secs_f64(), &args),
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        "metal" => {
-            let backend = mdma::backend::metal::MetalBackend::new()?;
-            run(&backend, "metal", start.elapsed().as_secs_f64(), &args)
-        }
-        #[cfg(feature = "cuda")]
-        "cuda" => {
-            let backend = mdma::backend::cuda::CudaBackend::new()?;
-            run(&backend, "cuda", start.elapsed().as_secs_f64(), &args)
-        }
-        #[cfg(all(feature = "coral", any(target_os = "freebsd", target_os = "linux")))]
-        "coral" => {
-            let backend = mdma::backend::coral::CoralBackend::new()?;
-            run(&backend, "coral", start.elapsed().as_secs_f64(), &args)
-        }
-        _ => Err(
-            "mdma-bench supports cpu, cuda (--features cuda), metal (--features metal on macOS), or coral (--features coral on FreeBSD and Linux)"
-                .into(),
-        ),
-    }
+    let name = std::env::var("MDMA_BACKEND").unwrap_or_else(|_| "cpu".into());
+    let bench = Bench {
+        name: &name,
+        start: Instant::now(),
+        args: &args,
+    };
+    select::dispatch(&name, bench)
 }
