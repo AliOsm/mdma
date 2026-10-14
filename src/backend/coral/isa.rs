@@ -12,9 +12,11 @@
     reason = "field values and geometry are small integers moved between usize and i64"
 )]
 
+pub mod eltwise;
 pub mod op;
 pub mod ring_mesh;
 pub mod scalar;
+pub mod scalar_core;
 pub mod wide_narrow;
 
 use std::collections::{BTreeMap, HashMap};
@@ -39,6 +41,17 @@ pub const fn cdiv_i64(a: i64, b: i64) -> i64 {
 /// The bits of an f32 as a field value.
 pub fn f32_bits(x: f32) -> i64 {
     i64::from(x.to_bits())
+}
+
+/// `x` rounded to float32 and widened back: the host-side float32 arithmetic of
+/// the compiler is f64 operations rounded at every step.
+pub fn f32r(x: f64) -> f64 {
+    f64::from(x as f32)
+}
+
+/// The bits of `x` rounded to float32, as a field value.
+pub fn f64_bits(x: f64) -> i64 {
+    f32_bits(x as f32)
 }
 
 pub const fn opcode(word: u128) -> u8 {
@@ -100,6 +113,10 @@ impl Fields {
 
     pub fn get(&self, name: &str) -> Option<i64> {
         self.0.get(name).copied()
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<i64> {
+        self.0.remove(name)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&str, i64)> {
@@ -247,7 +264,12 @@ impl Layout {
     /// generator bugs and panic with the layout and field named.
     pub fn encode(&self, values: &Fields) -> Vec<u128> {
         let mut bits = vec![0u8; self.nwords * WORD_BYTES];
-        for (name, value) in self.defaults.iter().chain(values.iter()) {
+        // The builder's values override the layout's defaults.
+        let defaults = self
+            .defaults
+            .iter()
+            .filter(|(name, _)| values.get(name).is_none());
+        for (name, value) in defaults.chain(values.iter()) {
             let field = self
                 .field(name)
                 .unwrap_or_else(|| panic!("{}: unknown field {name}", self.name));
@@ -278,6 +300,38 @@ impl Layout {
             opcode(words[0])
         );
         words
+    }
+
+    /// Rewrites fields of the instruction starting at word `word` of an encoded
+    /// program, keeping every other bit; the instruction must be one of this
+    /// layout's. Unknown fields and out-of-range values panic as in `encode`.
+    pub fn patch(&self, program: &mut [u8], word: usize, values: &Fields) -> Option<()> {
+        let bytes = program.get_mut(word * WORD_BYTES..(word + self.nwords) * WORD_BYTES)?;
+        let first = u128::from_le_bytes(bytes[..WORD_BYTES].try_into().ok()?);
+        if !self.ops.is_empty() && !self.ops.contains(&opcode(first)) {
+            return None;
+        }
+        for (name, value) in values.iter() {
+            let field = self
+                .field(name)
+                .unwrap_or_else(|| panic!("{}: unknown field {name}", self.name));
+            assert!(
+                field.width < 63 && (0..1i64 << field.width).contains(&value),
+                "{}.{name}={value} does not fit {} bits",
+                self.name,
+                field.width
+            );
+            for i in 0..field.width {
+                let bit = field.lo + i;
+                let mask = 1u8 << (bit % 8);
+                if (value >> i) & 1 == 1 {
+                    bytes[bit / 8] |= mask;
+                } else {
+                    bytes[bit / 8] &= !mask;
+                }
+            }
+        }
+        Some(())
     }
 
     /// Every field's value, signed fields sign-extended; reserved fields wider than

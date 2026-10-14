@@ -49,7 +49,7 @@ same-file = "1.0.6"
 semver = "1.0.28"
 sysinfo = { version = "0.39.6", default-features = false, features = ["disk", "network", "system"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.152", features = ["preserve_order"] }
+serde_json = { version = "1.0.152", features = ["float_roundtrip", "preserve_order"] }
 sha2 = "0.11.0"
 state-machines = "0.31.0"
 tempfile = "3.27.0"

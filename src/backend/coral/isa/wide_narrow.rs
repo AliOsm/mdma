@@ -106,7 +106,10 @@ pub static N2W: LazyLock<Layout> = LazyLock::new(|| {
     ]);
     f.extend(sync_fields(543, false));
     f.extend([
-        spec("rsv631", 631, 168),
+        // 168 reserved bits, named in pieces an i64 field value can fill (ADD's weight move sets 83 of them).
+        spec("rsv631", 631, 62),
+        spec("rsv693", 693, 62),
+        spec("rsv755", 755, 44),
         spec("tail_f799", 799, 1),
         spec("tail_lvl", 801, 2),
     ]);

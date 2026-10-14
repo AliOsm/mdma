@@ -374,13 +374,49 @@ pub fn sync_reset_mesh(seq: i64) -> Vec<u128> {
         },
     )
 }
-/// After the outfeeds.
-pub fn sync_rpa(seq: i64) -> Vec<u128> {
+/// Resets a ring producer counter and reports completion: after the outfeeds
+/// (A) and after a parameter broadcast's wait (B).
+fn sync_ring_producer(seq: i64, counter: &str) -> Vec<u128> {
     sync(
         seq,
         &Sync {
-            counters: tc(&["RING_PRODUCER_A"]),
+            counters: tc(&[counter]),
             signal: 1,
+            ..Sync::default()
+        },
+    )
+}
+pub fn sync_rpa(seq: i64) -> Vec<u128> {
+    sync_ring_producer(seq, "RING_PRODUCER_A")
+}
+pub fn sync_rpb(seq: i64) -> Vec<u128> {
+    sync_ring_producer(seq, "RING_PRODUCER_B")
+}
+/// Before the NLU spline load (0x19).
+pub fn sync_op_fence(seq: i64) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            counters: tc(&["AVDATA", "PARAMETERS", "PARTIAL_SUMS"]),
+            units: 1,
+            ..Sync::default()
+        },
+    )
+}
+/// Around MUL.
+pub fn sync_reset_n2w(seq: i64) -> Vec<u128> {
+    sync_counters(seq, tc(&["NARROW_TO_WIDE"]))
+}
+/// Around MUL.
+pub fn sync_reset_par(seq: i64) -> Vec<u128> {
+    sync_counters(seq, tc(&["PARAMETERS"]))
+}
+/// A fence that resets `counters`.
+pub fn sync_counters(seq: i64, counters: i64) -> Vec<u128> {
+    sync(
+        seq,
+        &Sync {
+            counters,
             ..Sync::default()
         },
     )
@@ -481,13 +517,25 @@ pub fn scsync_set_avpop() -> Vec<u128> {
 pub fn scsync_nop() -> Vec<u128> {
     scsync(&Scsync::default())
 }
-/// n = outfeeds of the output.
-pub fn scsync_wait_pa(n: i64) -> Vec<u128> {
+/// Waits until the scalar counter `name` reaches `n`.
+fn scsync_wait(name: &str, n: i64) -> Vec<u128> {
+    let k = SCALAR_COUNTERS
+        .iter()
+        .position(|c| *c == name)
+        .unwrap_or_else(|| panic!("unknown scalar counter {name}"));
     scsync(&Scsync {
-        smask: scm(&["PRODUCER_A"]),
-        thresholds: vec![(5, n)],
+        smask: scm(&[name]),
+        thresholds: vec![(k, n)],
         ..Scsync::default()
     })
+}
+/// n = outfeeds of the output.
+pub fn scsync_wait_pa(n: i64) -> Vec<u128> {
+    scsync_wait("PRODUCER_A", n)
+}
+/// n = parameter blocks broadcast.
+pub fn scsync_wait_pb(n: i64) -> Vec<u128> {
+    scsync_wait("PRODUCER_B", n)
 }
 // *** host streams: pops fill the staging buffer, infeeds send buffer ranges over
 // the ring, outfeeds drain the ring to the host ***
@@ -906,6 +954,15 @@ pub fn output_wait(seq: i64, n_outfeeds: i64) -> Vec<u128> {
     let mut words = sync_reset17(seq);
     words.extend(scsync_wait_pa(n_outfeeds));
     words.extend(sync_rpa(seq + 1));
+    words.extend(scsync_fence());
+    words
+}
+
+/// After a parameter broadcast: wait PRODUCER_B >= the rows sent, reset
+/// RING_PRODUCER_B; 1 seq.
+pub fn broadcast_wait(seq: i64, rows: i64) -> Vec<u128> {
+    let mut words = scsync_wait_pb(rows);
+    words.extend(sync_rpb(seq));
     words.extend(scsync_fence());
     words
 }

@@ -78,6 +78,63 @@ pub fn encode_op(f: &Fields) -> Vec<u128> {
     OP.encode(f)
 }
 
+/// Opcode 3: the 17-word op layout of 0x01 / 0x02 (the SUM / MEAN reduction: the
+/// operand is read through the par TTU only).
+pub static OP3: LazyLock<Layout> = LazyLock::new(|| {
+    let header = ["gate", "pred_reg", "pred_pol", "opcode"];
+    let specs = OP
+        .fields
+        .iter()
+        .filter(|f| !f.name.starts_with("rsv") && !header.contains(&f.name.as_str()))
+        .map(|f| (f.name.clone(), f.lo, f.width, f.signed))
+        .collect();
+    Layout::new("op3", &[0x03], 17, specs, Fields::new())
+});
+
+pub fn encode_op3(f: &Fields) -> Vec<u128> {
+    OP3.encode(f)
+}
+
+/// Copies and packs: multiplier 1, unbounded clamps.
+pub fn no_requant() -> Fields {
+    fields(&[
+        ("mult_bits", f32_bits(1.0)),
+        ("clamp_max_bits", f32_bits(f32::INFINITY)),
+        ("clamp_min_bits", f32_bits(f32::NEG_INFINITY)),
+    ])
+}
+
+/// `{p}_base` / `{p}_sel` of a 14-bit wide address.
+pub fn wide(p: &str, addr: i64) -> Fields {
+    fields(&[
+        (&format!("{p}_base"), addr & 0x1fff),
+        (&format!("{p}_sel"), addr >> 13),
+    ])
+}
+
+/// TTU `p` from strides in address units (narrow: bytes, wide: 64-byte units)
+/// and iteration counts, innermost first: the increment's two low bits go to the
+/// previous level's mode slot (`{p}_hmode` for level 0).
+pub fn ttu_fine(p: &str, strides: &[i64], counts: &[i64]) -> Fields {
+    let f = ttu(&format!("{p}_"), strides, counts, 8, "cnt");
+    let mut out = Fields::new();
+    for k in 0..8 {
+        let inc = f.get(&format!("{p}_inc{k}")).unwrap_or(0);
+        out.put(&format!("{p}_inc{k}"), inc >> 2);
+        out.put(
+            &format!("{p}_cnt{k}"),
+            f.get(&format!("{p}_cnt{k}")).unwrap_or(0),
+        );
+        let mode = if k == 0 {
+            format!("{p}_hmode")
+        } else {
+            format!("{p}_mode{}", k - 1)
+        };
+        out.put(&mode, inc & 3);
+    }
+    out
+}
+
 pub struct FcTile {
     pub n: usize,
     pub k: usize,

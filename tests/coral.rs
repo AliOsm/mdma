@@ -6,6 +6,9 @@
 //! they also run on the card.
 #![cfg(feature = "coral")]
 
+use mdma::backend::coral::codegen::layer::{
+    LayerPlan, LayerQuant, ModelPrograms, gen_model, plan, quants_from_json,
+};
 use mdma::backend::coral::executable::{
     Bitstream, Description, Direction, Executable, ExecutableType, FieldOffset, Hint, Layer,
 };
@@ -67,6 +70,54 @@ fn fixture_names() -> Vec<String> {
         fixtures_dir().display()
     );
     names
+}
+
+fn json(path: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+fn sha(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(bytes))
+}
+
+/// tinycoral's whole-model fixture (`data/fixtures/coral/model`): its quantization
+/// (the BOS position's and the others') and the manifest of its programs' hashes.
+struct Oracle {
+    dir: PathBuf,
+    main: Vec<LayerQuant>,
+    bos: Vec<LayerQuant>,
+    manifest: Value,
+}
+
+impl Oracle {
+    fn open() -> Self {
+        let dir = fixtures_dir().join("model");
+        let quants = json(&dir.join("quants.json"));
+        Self {
+            main: quants_from_json(&quants["main"]).unwrap(),
+            bos: quants_from_json(&quants["bos"]).unwrap(),
+            manifest: json(&dir.join("manifest.json")),
+            dir,
+        }
+    }
+
+    /// The programs of `p` positions, asserted equal to tinycoral's.
+    fn programs(&self, p: usize, pl: &[LayerPlan]) -> ModelPrograms {
+        let programs = gen_model(p, if p == 1 { &self.bos } else { &self.main }, pl).unwrap();
+        let hashes: Vec<String> = programs
+            .execution
+            .bitstreams
+            .iter()
+            .map(|b| sha(&b.data))
+            .collect();
+        assert_eq!(
+            Value::from(hashes),
+            self.manifest["programs"][p.to_string()],
+            "P={p}: the program differs from the oracle's"
+        );
+        programs
+    }
 }
 
 fn description(text: &str) -> Description {
@@ -168,8 +219,7 @@ fn executable(dir: &Path, meta: &Value) -> Executable {
 
 fn load(name: &str) -> Fixture {
     let dir = fixtures_dir().join(name);
-    let meta: Value =
-        serde_json::from_slice(&std::fs::read(dir.join("meta.json")).unwrap()).unwrap();
+    let meta = json(&dir.join("meta.json"));
     let executables = meta["executables"].as_array().unwrap();
     let caching = executable(&dir, &executables[0]);
     let execution = executable(&dir, &executables[1]);
@@ -365,4 +415,67 @@ fn generated_programs_run_bit_exact_on_the_card() {
         tpu.unload_parameters(parameters).unwrap();
     }
     tpu.close().unwrap();
+}
+
+/// The whole-model programs this crate generates from the oracle's quantization
+/// (`data/fixtures/coral/model`) equal tinycoral's byte for byte (sha256 in the
+/// manifest) at a spread of positions, and every input and output buffer is linked
+/// through exactly one pair of relocated MOVIs.
+#[test]
+fn whole_model_programs_match_the_oracle() {
+    use mdma::backend::coral::codegen::layer::{Placement, model_io};
+    use mdma::backend::coral::isa::{bytes_to_words, scalar::IMM_BIT, scalar::WORD};
+    let oracle = Oracle::open();
+    let expected_plan = json(&oracle.dir.join("plan.json"));
+    let pl = plan(6).unwrap();
+    for (l, d) in pl.iter().enumerate() {
+        for (m, placement) in d {
+            let e = &expected_plan[l][m.name()];
+            let ours = match placement {
+                Placement::Spread(o) => serde_json::json!(["spread", o]),
+                Placement::Stream(ps) => serde_json::json!([
+                    "stream",
+                    ps.iter().map(|(t, o)| [t, o]).collect::<Vec<_>>()
+                ]),
+            };
+            assert_eq!(&ours, e, "layer {l} {}: placement", m.name());
+        }
+    }
+    for p in [1usize, 2, 3, 4, 5, 8, 9, 16, 17, 64, 127, 128, 255, 256] {
+        let programs = oracle.programs(p, &pl);
+        assert_eq!(
+            sha(&programs.caching.bitstreams[0].data),
+            oracle.manifest["caching"],
+            "the caching program differs from the oracle's"
+        );
+        programs.execution.validate().unwrap();
+        let mut linked = Vec::new();
+        for b in &programs.execution.bitstreams {
+            let words = bytes_to_words(&b.data);
+            for r in &b.relocs {
+                let d = WORD.decode(&[words[(r.offset_bit - IMM_BIT) / 128]]);
+                assert_eq!(
+                    (d.get("s_op"), d.get("imm_scalar")),
+                    (Some(0x2f), Some(0)),
+                    "P={p}: relocation {r:?} is not a MOVI of zero"
+                );
+                linked.push((r.name.clone().unwrap(), r.upper));
+            }
+        }
+        let (inputs, outputs) = model_io(p, 6);
+        for layer in inputs.iter().chain(&outputs) {
+            for upper in [false, true] {
+                let n = linked
+                    .iter()
+                    .filter(|(n, u)| *n == layer.name && *u == upper)
+                    .count();
+                assert_eq!(
+                    n, 1,
+                    "P={p}: {} (upper {upper}) is linked {n} times",
+                    layer.name
+                );
+            }
+        }
+        assert_eq!(linked.len(), 2 * (inputs.len() + outputs.len()));
+    }
 }

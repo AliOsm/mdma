@@ -134,7 +134,7 @@ pub fn narrow_layout(n: usize, k: usize) -> (i64, i64, i64) {
 /// ringConsumer0 of input row group j (tiles 4j..4j+3), fed by one infeed that
 /// multicasts its 256-byte packets. c = packets of the whole input, p = packets of
 /// this group; the consumer skips the other groups' 4*(c-p) 64-byte lanes.
-fn rcons_input(g: &FcGeom, j: usize, tiles: i64, seq: i64) -> Vec<u128> {
+pub(crate) fn rcons_input(g: &FcGeom, j: usize, tiles: i64, seq: i64) -> Vec<u128> {
     let c = cdiv(g.s(), 256) as i64;
     let p = cdiv((4 * g.b()).min(g.s() - 4 * g.b() * j), 256) as i64;
     rm::encode_ring_consumer(
@@ -269,11 +269,11 @@ fn rcons_caching(g: &FcGeom, t: usize, tile: i64, off: i64) -> Fields {
 // *** mesh DMAs (ring_mesh.md section 4) ***
 
 /// A mesh half: (narrow byte address, words).
-type Half = (i64, i64);
+pub(crate) type Half = (i64, i64);
 
 /// meshBus `op` with an outbound half (send to the neighbour in op's direction)
 /// and/or an inbound half (receive from the opposite neighbour).
-fn mesh(
+pub(crate) fn mesh(
     op: u8,
     tiles: i64,
     seq: i64,
@@ -356,28 +356,48 @@ pub fn relay(op: u8, tiles: i64, seq: i64, r: i64, nwords: i64, c: i64) -> Vec<u
     rm::encode_mesh(&f)
 }
 
-/// Bring the input pieces (input tile t holds `x[b*t : b*t+piece(t)]` at X+b*t) to
-/// input tile 0: west within each row of 4 tiles, then north along column 0.
-/// Group k of a phase moves the data of position k, positions 1..k-1 relay it.
-/// Every west group ends with a mesh fence, north groups once they have relays.
-/// The west fence counts are +1.
-fn gather(e: &mut Emitter, g: &FcGeom, x: i64, r: i64, ibit: &dyn Fn(usize) -> i64) {
+/// Bring the input pieces (input tile t holds `x[b*t : b*t+piece(t)]`) to input
+/// tile 0: west within each row of 4 tiles, then north along column 0. Group k of
+/// a phase moves the data of position k, positions 1..k-1 relay it. Every west
+/// group ends with a mesh fence, north groups once they have relays; the west
+/// fence counts are +1. The 1-D layout keeps piece t at `x + b*t` on every tile;
+/// `local`: each tile holds its piece at `x`, and each row's first tile collects
+/// the row contiguously from `x`.
+pub(crate) fn gather(
+    e: &mut Emitter,
+    g: &FcGeom,
+    x: i64,
+    r: i64,
+    ibit: &dyn Fn(usize) -> i64,
+    local: bool,
+) {
     let rows: Vec<Vec<usize>> = (0..cdiv(g.t_in(), 4))
         .map(|row| (4 * row..(4 * row + 4).min(g.t_in())).collect())
         .collect();
     let mask = |ts: &[usize]| ts.iter().map(|t| ibit(*t)).sum::<i64>();
     let words = |nbytes: usize| cdiv(nbytes, 4) as i64;
+    let at = |t: usize| x + (g.b() * t) as i64;
+    // Where a piece leaves from, and where a row's k-th piece lands on its first tile.
+    let src = |t: usize| if local { x } else { at(t) };
+    let west_dst = |row: &[usize], k: usize| at(if local { k } else { row[k] });
+    // Relayed tiles of rows `crs` at step k.
+    let relays = |crs: &[&Vec<usize>], k: usize| -> Vec<usize> {
+        crs.iter()
+            .flat_map(|row| row[1..k].iter().copied())
+            .collect()
+    };
     e.sync(sc::sync_reset17);
     let (mut cum, mut last) = (0i64, 0xffffi64);
     for k in 1..4.min(g.t_in()) {
         let rs: Vec<&Vec<usize>> = rows.iter().filter(|row| row.len() > k).collect();
         for row in &rs {
             let seq = e.seq;
+            let n = words(g.piece(row[k]));
             e.tile(mesh(
                 0x16,
                 mask(&[row[k]]),
                 seq,
-                Some((x + (g.b() * row[k]) as i64, words(g.piece(row[k])))),
+                Some((src(row[k]), n)),
                 None,
                 3,
             ));
@@ -393,22 +413,19 @@ fn gather(e: &mut Emitter, g: &FcGeom, x: i64, r: i64, ibit: &dyn Fn(usize) -> i
                 }
             }
             for (w, crs) in &classes {
-                let tiles: Vec<usize> = crs
-                    .iter()
-                    .flat_map(|row| row[1..k].iter().copied())
-                    .collect();
                 let seq = e.seq;
-                e.tile(relay(0x16, mask(&tiles), seq, r, *w, cum + 1));
+                e.tile(relay(0x16, mask(&relays(crs, k)), seq, r, *w, cum + 1));
             }
         }
         for row in &rs {
             let seq = e.seq;
+            let n = words(g.piece(row[k]));
             e.tile(mesh(
                 0x16,
                 mask(&[row[0]]),
                 seq,
                 None,
-                Some((x + (g.b() * row[k]) as i64, words(g.piece(row[k])))),
+                Some((west_dst(row, k), n)),
                 3,
             ));
         }
@@ -419,7 +436,7 @@ fn gather(e: &mut Emitter, g: &FcGeom, x: i64, r: i64, ibit: &dyn Fn(usize) -> i
             let excluded: Vec<usize> = classes
                 .iter()
                 .filter(|(w, _)| cdiv_i64(*w, 4) == pk)
-                .flat_map(|(_, crs)| crs.iter().flat_map(|row| row[1..k].iter().copied()))
+                .flat_map(|(_, crs)| relays(crs, k))
                 .collect();
             last = 0xffff & !mask(&excluded);
         }
@@ -431,32 +448,24 @@ fn gather(e: &mut Emitter, g: &FcGeom, x: i64, r: i64, ibit: &dyn Fn(usize) -> i
     cum = 0;
     for (k, row) in rows.iter().enumerate().skip(1) {
         let n = words(row.iter().map(|t| g.piece(*t)).sum());
+        let relays: Vec<usize> = (1..k).map(|j| 4 * j).collect();
         let seq = e.seq;
         e.tile(mesh(
             0x17,
             mask(&[4 * k]),
             seq,
-            Some((x + (g.b() * 4 * k) as i64, n)),
+            Some((src(4 * k), n)),
             None,
             0,
         ));
         if k >= 2 {
-            let relays: Vec<usize> = (1..k).map(|j| 4 * j).collect();
             let seq = e.seq;
             e.tile(relay(0x17, mask(&relays), seq, r, n, cum));
         }
         let seq = e.seq;
-        e.tile(mesh(
-            0x17,
-            mask(&[0]),
-            seq,
-            None,
-            Some((x + (g.b() * 4 * k) as i64, n)),
-            0,
-        ));
+        e.tile(mesh(0x17, mask(&[0]), seq, None, Some((at(4 * k), n)), 0));
         if k >= 2 {
             cum += cdiv_i64(n, 4);
-            let relays: Vec<usize> = (1..k).map(|j| 4 * j).collect();
             last = 0xffff & !mask(&relays);
             e.sync(|seq| sc::sync_mesh(seq, 0x17, last, cum));
         }
@@ -530,7 +539,7 @@ pub fn caching_part(g: &FcGeom, pl: &Place, off: i64, base: i64) -> Vec<CachingP
 }
 
 /// x (`g.k` bytes at narrow X on the tiles `src`) -> the tiles `dest` over the ring, through the wide FIFO.
-fn broadcast(e: &mut Emitter, g: &FcGeom, x: i64, src: i64, dest: i64, fifo: i64) {
+pub(crate) fn broadcast(e: &mut Emitter, g: &FcGeom, x: i64, src: i64, dest: i64, fifo: i64) {
     let seq = e.seq;
     e.tile(wn::w2n_ring_recv(g.k, dest, x / 4, seq, fifo));
     let seq = e.seq;
@@ -573,7 +582,7 @@ fn input_block(e: &mut Emitter, g: &FcGeom, pl: &Place, x: i64, r: i64) {
     e.sync(|seq| sc::sync_drain(seq, 0xffff));
     e.sync(sc::sync_reset17);
     if g.t_in() >= 2 {
-        gather(e, g, x, r, &|t| pl.i(t));
+        gather(e, g, x, r, &|t| pl.i(t), false);
     }
     e.scalar(sc::scsync_nop(), 0);
     e.sync(sc::sync_reset17);
@@ -589,6 +598,7 @@ fn input_block(e: &mut Emitter, g: &FcGeom, pl: &Place, x: i64, r: i64) {
     clippy::too_many_arguments,
     reason = "mirrors the generator's block signature"
 )]
+#[expect(clippy::too_many_arguments, reason = "mirrors the compiler's op block")]
 fn ops_block(
     e: &mut Emitter,
     g: &FcGeom,
@@ -598,6 +608,7 @@ fn ops_block(
     off: i64,
     quant: &Quant,
     tail: bool,
+    sites: &mut Vec<usize>,
 ) {
     e.sync(sc::signal_fence);
     if g.bias {
@@ -636,6 +647,7 @@ fn ops_block(
                 ("cfg4", 0),
             ]));
         }
+        sites.push(e.here());
         e.tile(op::encode_op(&f));
     }
     e.sync(sc::sync_reset17);
@@ -718,6 +730,9 @@ pub struct FcPrograms {
     pub geom: FcGeom,
     pub caching: Executable,
     pub execution: Executable,
+    /// Program word of compute tile t's op in the execution program, by t: the
+    /// sites `patch_quant` rewrites. Tile t computes outputs `[64*P*t, 64*P*(t+1))`.
+    pub ops: Vec<usize>,
 }
 
 /// `(PARAMETER_CACHING, EXECUTION_ONLY)` for `y[N] = W[N,K] x[K]` (uint8),
@@ -763,7 +778,8 @@ pub fn build_fc(spec: &FcSpec) -> Result<FcPrograms> {
     let mut e = Emitter::new();
     e.scalar(sc::exe_prologue(), 1);
     input_block(&mut e, &g, &pl, x, r);
-    ops_block(&mut e, &g, &pl, x, y, off, &spec.quant, true);
+    let mut ops = Vec::new();
+    ops_block(&mut e, &g, &pl, x, y, off, &spec.quant, true, &mut ops);
     output_block(&mut e, &g, &pl, y);
     e.sync(|seq| sc::epilogue(seq, false));
     let (exe_bytes, exe_relocs) = e.program();
@@ -837,6 +853,7 @@ pub fn build_fc(spec: &FcSpec) -> Result<FcPrograms> {
         geom: g,
         caching,
         execution,
+        ops,
     })
 }
 
