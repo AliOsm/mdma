@@ -2,8 +2,8 @@ mod dequant;
 mod encoder;
 
 use super::{
-    AttnSpec, Backend, EncoderSpec, Error, KvView, Operation, Pool, QWeight, Result, RopeSpec,
-    shape,
+    AttnSpec, Backend, DeltaInputs, DeltaSpec, EncoderSpec, Error, KvView, Operation, Pool,
+    QWeight, Result, RopeSpec, shape,
 };
 use crate::gguf::GgmlDType;
 use dequant::dequantize_row;
@@ -98,7 +98,10 @@ impl Backend for CpuBackend {
             | Operation::RopeSplitHalf
             | Operation::WindowedAttention
             | Operation::AddBias
-            | Operation::RopePartialInterleaved => true,
+            | Operation::RopePartialInterleaved
+            | Operation::RopePartialSplitHalf
+            | Operation::SigmoidMul
+            | Operation::GatedDeltaNet => true,
         }
     }
 
@@ -173,7 +176,7 @@ impl Backend for CpuBackend {
         rotary_dim: usize,
     ) -> Result<()> {
         let x = as_f32_mut(&mut x.0)?;
-        shape::rope_partial_interleaved(x.len(), spec, rotary_dim)?;
+        shape::rope_partial(x.len(), spec, rotary_dim)?;
         for head in x.chunks_exact_mut(spec.head_dim) {
             for i in (0..rotary_dim).step_by(2) {
                 let angle = pos as f32 * spec.theta.powf(-(i as f32) / rotary_dim as f32);
@@ -183,6 +186,115 @@ impl Backend for CpuBackend {
                 head[i + 1] = a * s + b * c;
             }
         }
+        Ok(())
+    }
+
+    fn rope_partial_split_half(
+        &self,
+        x: &mut CpuBuf,
+        pos: u32,
+        spec: &RopeSpec,
+        rotary_dim: usize,
+    ) -> Result<()> {
+        let x = as_f32_mut(&mut x.0)?;
+        shape::rope_partial(x.len(), spec, rotary_dim)?;
+        let half = rotary_dim / 2;
+        for head in x.chunks_exact_mut(spec.head_dim) {
+            for i in 0..half {
+                let angle = pos as f32 * spec.theta.powf(-2.0 * i as f32 / rotary_dim as f32);
+                let (s, c) = angle.sin_cos();
+                let (a, b) = (head[i], head[i + half]);
+                head[i] = a * c - b * s;
+                head[i + half] = a * s + b * c;
+            }
+        }
+        Ok(())
+    }
+
+    fn sigmoid_mul(&self, gate: &CpuBuf, x: &CpuBuf, y: &mut CpuBuf) -> Result<()> {
+        let (gate, x, y) = (as_f32(&gate.0)?, as_f32(&x.0)?, as_f32_mut(&mut y.0)?);
+        shape::elementwise("sigmoid_mul", &[gate.len(), x.len()], &[y.len()])?;
+        for ((g, x), y) in gate.iter().zip(x).zip(y) {
+            *y = x / (1.0 + (-g).exp());
+        }
+        Ok(())
+    }
+
+    fn ssm_conv_silu(
+        &self,
+        w: &CpuBuf,
+        state: &mut CpuBuf,
+        x: &CpuBuf,
+        y: &mut CpuBuf,
+    ) -> Result<()> {
+        let (w, state) = (as_f32(&w.0)?, as_f32_mut(&mut state.0)?);
+        let (x, y) = (as_f32(&x.0)?, as_f32_mut(&mut y.0)?);
+        let (_, taps) = shape::ssm_conv(w.len(), state.len(), x.len(), y.len())?;
+        for (((taps, past), &x), y) in w
+            .chunks_exact(taps)
+            .zip(state.chunks_exact_mut(taps - 1))
+            .zip(x)
+            .zip(y)
+        {
+            let sum = dot(past, taps) + x * taps[taps.len() - 1];
+            past.copy_within(1.., 0);
+            past[past.len() - 1] = x;
+            *y = sum / (1.0 + (-sum).exp());
+        }
+        Ok(())
+    }
+
+    fn gated_delta_step(
+        &self,
+        spec: &DeltaSpec,
+        inputs: &DeltaInputs<CpuBuf>,
+        state: &mut CpuBuf,
+        o: &mut CpuBuf,
+    ) -> Result<()> {
+        let qkv = as_f32(&inputs.qkv.0)?;
+        let (alpha, beta) = (as_f32(&inputs.alpha.0)?, as_f32(&inputs.beta.0)?);
+        let (dt_bias, a) = (as_f32(&inputs.dt_bias.0)?, as_f32(&inputs.a.0)?);
+        let (state, o) = (as_f32_mut(&mut state.0)?, as_f32_mut(&mut o.0)?);
+        shape::gated_delta(
+            spec,
+            qkv.len(),
+            [alpha.len(), beta.len(), dt_bias.len(), a.len()],
+            state.len(),
+            o.len(),
+        )?;
+        let d = spec.head_dim;
+        let (q, kv) = qkv.split_at(spec.n_k_heads * d);
+        let (k, v) = kv.split_at(spec.n_k_heads * d);
+        let l2 = |x: &[f32]| {
+            let inv = 1.0 / (dot(x, x) + spec.eps).sqrt();
+            x.iter().map(|v| v * inv).collect::<Vec<_>>()
+        };
+        let q: Vec<_> = q.chunks_exact(d).map(l2).collect();
+        let k: Vec<_> = k.chunks_exact(d).map(l2).collect();
+        let scale = 1.0 / (d as f32).sqrt();
+        state
+            .par_chunks_exact_mut(d * d)
+            .zip(o[..spec.n_v_heads * d].par_chunks_exact_mut(d))
+            .zip(v.par_chunks_exact(d))
+            .enumerate()
+            .for_each(|(h, ((s, o), v))| {
+                let (q, k) = (&q[h % spec.n_k_heads], &k[h % spec.n_k_heads]);
+                let x = alpha[h] + dt_bias[h];
+                let softplus = if x > 20.0 { x } else { x.exp().ln_1p() };
+                let decay = (softplus * a[h]).exp();
+                let beta = 1.0 / (1.0 + (-beta[h]).exp());
+                // Each value row of the state updates from itself and k alone.
+                for ((row, v), o) in s.chunks_exact_mut(d).zip(v).zip(o) {
+                    for s in row.iter_mut() {
+                        *s *= decay;
+                    }
+                    let delta = (v - dot(row, k)) * beta;
+                    for (s, k) in row.iter_mut().zip(k) {
+                        *s += k * delta;
+                    }
+                    *o = dot(row, q) * scale;
+                }
+            });
         Ok(())
     }
 

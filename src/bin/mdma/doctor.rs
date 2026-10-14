@@ -81,6 +81,9 @@ impl Task for Probe {
                 "rope_partial_interleaved",
                 Operation::RopePartialInterleaved,
             ),
+            ("rope_partial_split_half", Operation::RopePartialSplitHalf),
+            ("sigmoid_mul", Operation::SigmoidMul),
+            ("gated_delta_net", Operation::GatedDeltaNet),
         ];
         Ok(Capabilities {
             device: b.device_label(),

@@ -12,7 +12,7 @@ fn buf_from(backend: &CpuBackend, bytes: &[u8]) -> crate::backend::cpu::CpuBuf {
 
 /// Layer 0 keeps a window of 3 rows, layer 1 all 8 positions.
 fn ring(backend: &CpuBackend) -> KvCache<CpuBackend> {
-    KvCache::with_geometry_reserved(backend, &[2, 2], &[3, 0], 8, None).expect("ring cache")
+    KvCache::with_geometry_reserved(backend, &[2, 2], &[3, 0], &[], 8, None).expect("ring cache")
 }
 
 /// Decode-style writes: every layer gets one row per position, filled with
@@ -37,11 +37,11 @@ fn ring_layers_store_only_their_window_and_expose_it_as_a_prefix() {
     assert_eq!(cache.view(0).k.0.len(), 3 * row_bytes);
     assert_eq!(cache.view(1).v.0.len(), 8 * row_bytes);
     assert_eq!(
-        KvCache::allocation_bytes(&backend, &[2, 2], &[3, 0], 8).unwrap(),
+        KvCache::allocation_bytes(&backend, &[2, 2], &[3, 0], &[], 8).unwrap(),
         (3 + 8) * row_bytes * 2
     );
     assert_matches!(
-        KvCache::allocation_bytes(&backend, &[2, 2], &[3], 8),
+        KvCache::allocation_bytes(&backend, &[2, 2], &[3], &[], 8),
         Err(Error::ShapeMismatch(_))
     );
     for pos in 0..5 {

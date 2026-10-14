@@ -26,8 +26,9 @@ softcap, split-half RoPE, and windowed attention with heads up to 512. Gemma pre
 sequentially; use a 2048-token session cap. Audio, vision, E4B, MoE, and
 long-context support are not included.
 
-Native GGUF loading validates Llama/InternLM2, Gemma 4, dense GLM-4, and
-Qwen2/Qwen3 text decoder layouts, not arbitrary llama.cpp models. Qwen2-VL
+Native GGUF loading validates Llama/InternLM2, Gemma 4, dense GLM-4,
+Qwen2/Qwen3 and hybrid Qwen3.5 text decoder layouts, not arbitrary llama.cpp
+models. Qwen2-VL
 accepts text input only: its image projector/OCR path is not implemented.
 The pinned GLM-4-32B checkpoint gate covers three bounded greedy references on
 ROCm in f32 and fast modes; Qwen3's checkpoint gate remains open.
@@ -132,20 +133,64 @@ preparer refuses raw-only copies, so use `MDMA_CACHE=off` or an `auto` cache
 miss for this file; `required` cannot admit it. Other admitted Q4_K files may
 use prepared caches. Cache policy still applies globally to the daemon.
 
+## Hybrid Qwen3.5 text decoder
+
+`qwen35` (the Qwen3.5 family's text decoder) interleaves gated DeltaNet layers
+with gated full attention: every `full_attention_interval`-th layer (4 in
+published files) attends, the rest are recurrent.
+
+- DeltaNet layers: a fused QKV projection, a causal depthwise convolution of
+  `ssm.conv_kernel` taps with SiLU, L2-normalized query/key heads, and the gated
+  delta rule per value head, with decay `exp(softplus(alpha + dt_bias) * a)`
+  and update rate `sigmoid(beta)`. Value head `h` reads key head
+  `h % ssm.group_count`. The output is RMS-normalized per head and gated by
+  SiLU of the `attn_gate` projection.
+- Attention layers: the query projection carries a per-head output gate,
+  split from the query rows at load. Per-head Q/K RMSNorm, GQA, and a
+  sigmoid-gated output.
+- RoPE is interleaved multi-section RoPE. Text positions reach every section
+  alike, so it reduces to split-half RoPE over the first `rope.dimension_count`
+  values; files whose sections would leave a rotated pair on the fourth
+  (position 0) section are rejected.
+- Multi-token prediction blocks (`nextn_predict_layers`) are validated by name
+  and skipped: neither loaded nor counted in the weight reservation.
+- Sequential prefill; only the attention layers grow KV.
+
+Recurrent state is fixed per session: each DeltaNet layer keeps its
+convolution window and a `head_dim`² matrix per value head, about 53 MB for
+Qwen3.8-9B. It counts toward the KV reservation but not the per-token KV
+figure. The state has absorbed every position written, so a session resumes
+only where it stopped; any other shared prefix restarts from position 0.
+
+CPU implements the required operations (`rope_partial_split_half`,
+`sigmoid_mul`, `ssm_conv_silu`, `gated_delta_step`); GPU backends reject
+`qwen35` before weight upload. The vision projector is not implemented.
+
+The `qwen35_cpu_greedy_checkpoint` test pins Qwen3.8-9B Q4_K_M's SHA-256 and
+three continuations: English (32 tokens), chat arithmetic `[19, 248046]` (`4`
+plus EOS) and Chinese (32 tokens). A 16-layer Qwen3.6 finetune with 48 value
+heads over 16 key heads (model width 5120, value width 6144) matched llama.cpp's
+48-token continuation in a manual run; it has no pinned test.
+
+Reference: llama.cpp `d812350493`, CPU, `llama-server` context 512 with context
+checkpoints off, greedy/no penalties. With checkpoints on, the server splits
+the prompt and flips a near tie in the English case at output 8;
+`llama-simple` agrees with the stored tokens.
+
 ## Remaining architecture and task work
 
 | Architecture | Example artifact | Remaining validation/task work |
 |---|---|---|
 | `qwen3` + classifier head | Qwen3-Reranker-4B | Dedicated two-class head/pooling and reranking API; do not treat two class logits as vocabulary logits |
-| `qwen35` | Qwen3.6-9B | Hybrid gated-delta recurrent layers, convolution/state lifetime, hybrid attention, and vision projector |
+| `qwen35` | Qwen3.8-9B | Native CPU decoder and CPU checkpoint gate; GPU kernels, multi-token prediction drafting and vision projector |
 | `qwen2vl` | NuMarkdown-8B | Text decoder is separate from its image encoder/projector and OCR API |
 | `glm4` | GLM-4-32B-0414 | Native CPU/ROCm decoder and bounded ROCm checkpoint gate; raw-only cache policy and long-context validation |
 | `gemma2` | ShieldGemma-9B | Scaled embedding, four norms, GELU gating, attention/final softcaps, alternating local/global attention |
 
 Native DeepSeek V2/V3/R1 additionally require MLA and MoE routing. A
 DeepSeek **distillation** may instead be a Qwen or Llama decoder; inspect its
-GGUF metadata. No native DeepSeek, MoE, recurrent, or vision support is claimed
-by the Qwen implementation.
+GGUF metadata. No native DeepSeek, MoE, or vision support is claimed by the
+Qwen implementations; recurrent layers belong to `qwen35` alone.
 
 ## Multi-model daemon
 

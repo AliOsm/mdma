@@ -144,6 +144,32 @@ pub enum Operation {
     WindowedAttention,
     AddBias,
     RopePartialInterleaved,
+    RopePartialSplitHalf,
+    SigmoidMul,
+    /// `ssm_conv_silu` and `gated_delta_step`, the recurrent half of a hybrid decoder.
+    GatedDeltaNet,
+}
+
+/// Gated DeltaNet geometry. Value head `h` reads query/key head
+/// `h % n_k_heads`; every head is `head_dim` wide, and each value head keeps a
+/// `head_dim`×`head_dim` state with one row per value element.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeltaSpec {
+    pub n_k_heads: usize,
+    pub n_v_heads: usize,
+    pub head_dim: usize,
+    /// Added to each query/key head's squared norm before L2 normalization.
+    pub eps: f32,
+}
+
+/// One token's gated DeltaNet inputs: the convolved `[q | k | v]` row, and
+/// one `alpha`, `beta`, `dt_bias` and `a` per value head.
+pub struct DeltaInputs<'a, Buf> {
+    pub qkv: &'a Buf,
+    pub alpha: &'a Buf,
+    pub beta: &'a Buf,
+    pub dt_bias: &'a Buf,
+    pub a: &'a Buf,
 }
 
 /// Geometry of an encoder (bidirectional, batched, no KV cache) activation:
@@ -252,6 +278,55 @@ pub trait Backend {
     ) -> Result<()> {
         let _ = (x, pos, spec, rotary_dim);
         Err(Error::NotImplemented("rope_partial_interleaved"))
+    }
+
+    /// Split-half RoPE over the first `rotary_dim` values of each head at one
+    /// position: value `i` pairs with `i + rotary_dim / 2`, frequencies use
+    /// `rotary_dim`, and the remaining values are unchanged.
+    fn rope_partial_split_half(
+        &self,
+        x: &mut Self::Buf,
+        pos: u32,
+        spec: &RopeSpec,
+        rotary_dim: usize,
+    ) -> Result<()> {
+        let _ = (x, pos, spec, rotary_dim);
+        Err(Error::NotImplemented("rope_partial_split_half"))
+    }
+
+    /// `y = sigmoid(gate) * x`, elementwise.
+    fn sigmoid_mul(&self, gate: &Self::Buf, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
+        let _ = (gate, x, y);
+        Err(Error::NotImplemented("sigmoid_mul"))
+    }
+
+    /// One token of a causal depthwise convolution, then SiLU. `w` holds each
+    /// channel's taps, oldest input first; `state` holds each channel's
+    /// previous `taps - 1` inputs, oldest first, and takes `x` in.
+    fn ssm_conv_silu(
+        &self,
+        w: &Self::Buf,
+        state: &mut Self::Buf,
+        x: &Self::Buf,
+        y: &mut Self::Buf,
+    ) -> Result<()> {
+        let _ = (w, state, x, y);
+        Err(Error::NotImplemented("ssm_conv_silu"))
+    }
+
+    /// One token of the gated delta rule. Per value head, with its query and
+    /// key head L2-normalized: `S ← exp(g)·S`, `S ← S + β(v − S·k)·kᵀ`,
+    /// `o = S·q / √head_dim`, where `g = softplus(alpha + dt_bias)·a` and
+    /// `β = sigmoid(beta)`.
+    fn gated_delta_step(
+        &self,
+        spec: &DeltaSpec,
+        inputs: &DeltaInputs<Self::Buf>,
+        state: &mut Self::Buf,
+        o: &mut Self::Buf,
+    ) -> Result<()> {
+        let _ = (spec, inputs, state, o);
+        Err(Error::NotImplemented("gated_delta_step"))
     }
 
     /// Causal attention with an explicit score multiplier and window size.

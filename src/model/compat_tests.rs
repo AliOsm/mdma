@@ -290,7 +290,16 @@ fn inference<B: Backend>(backend: &B, f: &Fixture) -> Vec<f32> {
         .unwrap();
     assert_eq!(kv.len(), tokens.len());
     // Full-context reference: Gemma's window of 2 wraps its rings repeatedly.
-    let mut sequential = KvCache::with_geometry(backend, &model.kv_widths().unwrap(), 8).unwrap();
+    let widths = model.kv_widths().unwrap();
+    let mut sequential = KvCache::with_geometry_reserved(
+        backend,
+        &widths,
+        &vec![0; widths.len()],
+        &model.kv_states().unwrap(),
+        8,
+        None,
+    )
+    .unwrap();
     let mut decode = model.alloc_workspace(backend, 1).unwrap();
     let mut logits = Vec::new();
     for (pos, &token) in tokens.iter().enumerate() {
@@ -351,6 +360,110 @@ fn gemma4_compat_tied_embeddings_shared_kv_and_variable_heads() {
         b.tensor(&name, &shape, None);
     }
     inference(&CpuBackend, &b.write());
+}
+
+/// Two trunk layers, DeltaNet then gated attention, and one multi-token
+/// prediction block that is never run.
+fn qwen35_fixture() -> Builder {
+    let mut b = Builder {
+        metadata: Vec::new(),
+        tensors: Vec::new(),
+    };
+    b.set("general.architecture", Value::String("qwen35".into()));
+    for (name, value) in [
+        ("block_count", 3),
+        ("nextn_predict_layers", 1),
+        ("full_attention_interval", 2),
+        ("embedding_length", 8),
+        ("feed_forward_length", 16),
+        ("attention.head_count", 2),
+        ("attention.head_count_kv", 1),
+        ("attention.key_length", 8),
+        ("attention.value_length", 8),
+        ("rope.dimension_count", 4),
+        ("context_length", 16),
+        ("ssm.conv_kernel", 4),
+        ("ssm.state_size", 4),
+        ("ssm.group_count", 1),
+        ("ssm.time_step_rank", 2),
+        ("ssm.inner_size", 8),
+    ] {
+        b.set(&format!("qwen35.{name}"), Value::U32(value));
+    }
+    b.set(
+        "qwen35.rope.dimension_sections",
+        Value::Array([1, 1, 0, 0].map(Value::I32).to_vec()),
+    );
+    b.set("qwen35.rope.freq_base", Value::F32(10000.0));
+    b.set("qwen35.attention.layer_norm_rms_epsilon", Value::F32(1e-6));
+    b.tensor("token_embd.weight", &[32, 8], None);
+    b.norm("output_norm.weight", 8);
+    for i in 0..2 {
+        let name = |s: &str| format!("blk.{i}.{s}");
+        for n in ["attn_norm.weight", "post_attention_norm.weight"] {
+            b.norm(&name(n), 8);
+        }
+        b.tensor(&name("ffn_gate.weight"), &[16, 8], None);
+        b.tensor(&name("ffn_up.weight"), &[16, 8], None);
+        b.tensor(&name("ffn_down.weight"), &[8, 16], None);
+    }
+    b.tensor("blk.0.attn_qkv.weight", &[16, 8], None);
+    b.tensor("blk.0.attn_gate.weight", &[8, 8], None);
+    b.tensor("blk.0.ssm_alpha.weight", &[2, 8], None);
+    b.tensor("blk.0.ssm_beta.weight", &[2, 8], None);
+    b.tensor("blk.0.ssm_conv1d.weight", &[16, 4], None);
+    b.tensor("blk.0.ssm_dt.bias", &[2], Some(vec![0.5, -1.0]));
+    b.tensor("blk.0.ssm_a", &[2], Some(vec![-0.5, -0.05]));
+    b.norm("blk.0.ssm_norm.weight", 4);
+    b.tensor("blk.0.ssm_out.weight", &[8, 8], None);
+    b.tensor("blk.1.attn_q.weight", &[32, 8], None);
+    b.tensor("blk.1.attn_k.weight", &[8, 8], None);
+    b.tensor("blk.1.attn_v.weight", &[8, 8], None);
+    b.tensor("blk.1.attn_output.weight", &[8, 16], None);
+    b.norm("blk.1.attn_q_norm.weight", 8);
+    b.norm("blk.1.attn_k_norm.weight", 8);
+    b.norm("blk.2.attn_norm.weight", 8);
+    b.tensor("blk.2.nextn.eh_proj.weight", &[8, 16], None);
+    b
+}
+
+#[test]
+fn qwen35_compat_recurrent_state_resumes_only_where_it_stopped() {
+    let f = qwen35_fixture().write();
+    inference(&CpuBackend, &f);
+    let model = Model::load(&CpuBackend, &mut GgufModel::open(&f.0).unwrap()).unwrap();
+    let mut kv = model.new_kv_cache(&CpuBackend, 8).unwrap();
+    let mut ws = model.alloc_workspace(&CpuBackend, 3).unwrap();
+    let first = model
+        .prefill(&CpuBackend, &mut kv, &mut ws, &[1, 3, 4], 0)
+        .unwrap();
+    // The state has absorbed all three positions, so it resumes at 3 alone.
+    assert!(kv.can_resume(3));
+    assert!(!kv.can_resume(2));
+    assert_eq!(kv.rewind(2), 0);
+    // Starting over clears the state rather than folding the first run in.
+    let again = model
+        .prefill(&CpuBackend, &mut kv, &mut ws, &[1, 3, 4], 0)
+        .unwrap();
+    assert_eq!(first, again);
+    for (key, value) in [
+        ("qwen35.ssm.inner_size", Value::U32(4)),
+        // The second rotated pair would fall to the fourth section.
+        (
+            "qwen35.rope.dimension_sections",
+            Value::Array([1, 0, 0, 1].map(Value::I32).to_vec()),
+        ),
+        ("qwen35.rope.scaling.type", Value::String("yarn".into())),
+    ] {
+        let mut b = qwen35_fixture();
+        b.set(key, value);
+        let f = b.write();
+        assert_matches!(
+            Model::load(&CpuBackend, &mut GgufModel::open(&f.0).unwrap()).map(|_| ()),
+            Err(Error::UnsupportedModel(_)),
+            "{key}"
+        );
+    }
 }
 
 #[cfg(feature = "vulkan")]

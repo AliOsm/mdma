@@ -540,7 +540,7 @@ pub(super) fn trace<B: Backend>(
 #[test]
 #[ignore = "requires pinned MDMA_TEST_NUMARKDOWN_GGUF and ROCm; greedy/EOS checkpoint gate"]
 fn numarkdown_rocm_greedy_checkpoint() {
-    use crate::{sampler::greedy, tokenizer::Tokenizer};
+    use crate::{model::test_support::assert_greedy, tokenizer::Tokenizer};
     // llama.cpp 6f41ac59e0a49a00483a316a22ada6b04edd2950, HIP, ctx128,
     // ubatch1, f16 KV, flash attention off, raw prompts, greedy/no penalties.
     let mut g = GgufModel::open(
@@ -583,15 +583,11 @@ fn numarkdown_rocm_greedy_checkpoint() {
         ),
     ];
     for (prompt, expected) in cases {
-        let ids = tok.try_encode(prompt).unwrap();
-        let capacity = ids.len() + expected.len();
-        let mut kv = model.new_kv_cache(&b, capacity).unwrap();
-        let mut ws = model.alloc_workspace(&b, ids.len()).unwrap();
-        let mut logits = model.prefill(&b, &mut kv, &mut ws, &ids, 0).unwrap();
-        drop(ws);
+        let (ids, logits) = assert_greedy(&b, &model, &tok, prompt, expected);
+        // Sequential decode reproduces the prefill, eagerly.
+        let mut seq = model.new_kv_cache(&b, ids.len()).unwrap();
         let mut decode = model.alloc_workspace(&b, 1).unwrap();
-        assert!(!b.decoder(&model, &mut kv, &mut decode).unwrap().is_graph());
-        let mut seq = model.new_kv_cache(&b, capacity).unwrap();
+        assert!(!b.decoder(&model, &mut seq, &mut decode).unwrap().is_graph());
         let mut other = Vec::new();
         for (pos, &id) in ids.iter().enumerate() {
             other = model
@@ -599,23 +595,5 @@ fn numarkdown_rocm_greedy_checkpoint() {
                 .unwrap();
         }
         close(&logits, &other, 1e-5);
-        drop(seq);
-        let mut generated = Vec::new();
-        for (i, &target) in expected.iter().enumerate() {
-            assert!(logits.iter().all(|v| v.is_finite()));
-            let id = greedy(&logits);
-            assert_eq!(id, target, "{prompt:?}: output position {i}");
-            generated.push(id);
-            if tok.is_eos(id) {
-                assert_eq!(i + 1, expected.len(), "unexpected early EOS");
-                break;
-            }
-            if i + 1 < expected.len() {
-                logits = model
-                    .forward(&b, &mut kv, &mut decode, id, (ids.len() + i) as u32)
-                    .unwrap();
-            }
-        }
-        eprintln!("{prompt:?}: {generated:?}");
     }
 }

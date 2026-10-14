@@ -7,7 +7,7 @@
 //! Inputs must be exactly whole rows or tokens; an output only has to be
 //! large enough. Kernels write nothing past the result, and the GPU
 //! suites prove that with oversized outputs and a canary tail.
-use super::{AttnSpec, EncoderSpec, Error, Result, RopeSpec};
+use super::{AttnSpec, DeltaSpec, EncoderSpec, Error, Result, RopeSpec};
 
 fn err(msg: String) -> Error {
     Error::ShapeMismatch(msg)
@@ -184,7 +184,7 @@ pub fn rope_split_half(n: usize, factors: usize, spec: &RopeSpec) -> Result<()> 
 }
 
 /// Complete heads with an even, nonempty rotary prefix. Returns rotated pairs.
-pub fn rope_partial_interleaved(n: usize, spec: &RopeSpec, rotary_dim: usize) -> Result<usize> {
+pub fn rope_partial(n: usize, spec: &RopeSpec, rotary_dim: usize) -> Result<usize> {
     if spec.head_dim == 0
         || !spec.head_dim.is_multiple_of(2)
         || n == 0
@@ -195,9 +195,76 @@ pub fn rope_partial_interleaved(n: usize, spec: &RopeSpec, rotary_dim: usize) ->
         || !spec.theta.is_finite()
         || spec.theta <= 0.0
     {
-        return Err(err("partial interleaved RoPE requires complete heads and an even rotary prefix within head width".into()));
+        return Err(err(
+            "partial RoPE requires complete heads and an even rotary prefix within head width"
+                .into(),
+        ));
     }
     Ok((n / spec.head_dim) * (rotary_dim / 2))
+}
+
+/// One token through `channels` causal depthwise filters of `taps` inputs:
+/// `w` holds `[channels, taps]`, `state` the previous `taps - 1` inputs per
+/// channel, `x` one input per channel. Returns `(channels, taps)`.
+pub fn ssm_conv(
+    w_elems: usize,
+    state_elems: usize,
+    x_elems: usize,
+    y_elems: usize,
+) -> Result<(usize, usize)> {
+    let channels = x_elems;
+    if channels == 0 || w_elems == 0 || !w_elems.is_multiple_of(channels) {
+        return Err(err(format!(
+            "ssm_conv: {w_elems} taps are not whole filters for {channels} channels"
+        )));
+    }
+    let taps = w_elems / channels;
+    if taps < 2 || state_elems != channels * (taps - 1) || y_elems < channels {
+        return Err(err(format!(
+            "ssm_conv: {taps}-tap filters need {} state and {channels} output elems, got {state_elems} and {y_elems}",
+            channels * (taps.max(1) - 1)
+        )));
+    }
+    Ok((channels, taps))
+}
+
+/// One token of the gated delta rule: `qkv` is `[q | k | v]` for
+/// `spec`'s heads, `gates` the `alpha`, `beta`, `dt_bias` and `a` lengths,
+/// `state` one `head_dim`² matrix per value head.
+pub fn gated_delta(
+    spec: &DeltaSpec,
+    qkv_elems: usize,
+    gates: [usize; 4],
+    state_elems: usize,
+    o_elems: usize,
+) -> Result<()> {
+    let DeltaSpec {
+        n_k_heads,
+        n_v_heads,
+        head_dim,
+        eps,
+    } = *spec;
+    let width = (2 * n_k_heads + n_v_heads) * head_dim;
+    if n_k_heads == 0
+        || head_dim == 0
+        || !n_v_heads.is_multiple_of(n_k_heads)
+        || !eps.is_finite()
+        || eps < 0.0
+    {
+        return Err(err(format!(
+            "gated_delta: {n_v_heads} value heads over {n_k_heads} key heads of {head_dim} with eps {eps}"
+        )));
+    }
+    if qkv_elems != width
+        || gates.iter().any(|&n| n != n_v_heads)
+        || state_elems != n_v_heads * head_dim * head_dim
+        || o_elems < n_v_heads * head_dim
+    {
+        return Err(err(format!(
+            "gated_delta: qkv {qkv_elems} (needs {width}), gates {gates:?} (need {n_v_heads}), state {state_elems}, o {o_elems}"
+        )));
+    }
+    Ok(())
 }
 
 pub fn softcap(cap: f32) -> Result<()> {

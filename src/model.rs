@@ -12,7 +12,7 @@ pub(crate) mod layers;
 pub mod planning;
 pub mod weights;
 pub(crate) use arch::llama::Matmuls as LlamaMatmuls;
-use arch::{Decoder, gemma4, glm4, llama, qwen};
+use arch::{Decoder, gemma4, glm4, llama, qwen, qwen35};
 pub(crate) mod memory;
 mod preflight;
 
@@ -56,6 +56,7 @@ pub struct Workspace<B: Backend> {
     logits: B::Buf,
     gemma: Option<gemma4::Workspace<B>>,
     qwen: Option<qwen::Workspace<B>>,
+    qwen35: Option<qwen35::Workspace<B>>,
     glm: Option<glm4::Workspace<B>>,
     _memory: Option<Arc<Reservation>>,
 }
@@ -158,6 +159,7 @@ impl<B: Backend> Model<B> {
             Some("gemma4") => gemma4::Gemma::load(backend, gguf)?,
             Some("glm4") => glm4::Glm4::load(backend, gguf, config)?,
             Some(arch) if qwen::is_arch(arch) => qwen::Qwen::load(backend, gguf, config)?,
+            Some(qwen35::ARCH) => qwen35::Qwen35::load(backend, gguf)?,
             _ => {
                 return Err(Error::UnsupportedModel(
                     "unvalidated decoder architecture".into(),
@@ -256,6 +258,7 @@ impl<B: Backend> Model<B> {
             backend,
             &self.kv_widths()?,
             &self.kv_windows(),
+            &self.kv_states()?,
             n_ctx,
             memory,
         )
@@ -296,6 +299,10 @@ impl<B: Backend> Model<B> {
         };
         workspace.qwen = match &self.architecture {
             Decoder::Qwen(q) => Some(q.workspace(backend, &self.config)?),
+            _ => None,
+        };
+        workspace.qwen35 = match &self.architecture {
+            Decoder::Qwen35(q) => Some(q.workspace(backend, &self.config)?),
             _ => None,
         };
         workspace.glm = match &self.architecture {
@@ -368,6 +375,10 @@ impl<B: Backend> Model<B> {
                 qwen.run(backend, self, kv, ws, token_id, pos)?;
                 backend.qmatmul(self.output_weight(), &ws.normed, &mut ws.logits)
             }
+            Decoder::Qwen35(qwen) => {
+                qwen.run(backend, self, kv, ws, token_id, pos)?;
+                backend.qmatmul(self.output_weight(), &ws.normed, &mut ws.logits)
+            }
             Decoder::Glm4(glm) => {
                 glm.run(backend, self, kv, ws, token_id, pos)?;
                 backend.qmatmul(self.output_weight(), &ws.normed, &mut ws.logits)
@@ -432,6 +443,13 @@ impl<B: Backend> Model<B> {
                 backend.qmatmul(self.output_weight(), &ws.normed, &mut ws.logits)?;
                 return self.download_logits(backend, ws);
             }
+            Decoder::Qwen35(qwen) => {
+                for (i, &token) in tokens.iter().enumerate() {
+                    qwen.run(backend, self, kv, ws, token, pos + i as u32)?;
+                }
+                backend.qmatmul(self.output_weight(), &ws.normed, &mut ws.logits)?;
+                return self.download_logits(backend, ws);
+            }
             Decoder::Glm4(glm) => {
                 for (i, &token) in tokens.iter().enumerate() {
                     glm.run(backend, self, kv, ws, token, pos + i as u32)?;
@@ -469,6 +487,7 @@ impl<B: Backend> Workspace<B> {
             logits: backend.alloc(sizes[12], Pool::Scratch)?,
             gemma: None,
             qwen: None,
+            qwen35: None,
             glm: None,
             _memory: None,
         })
@@ -481,5 +500,7 @@ mod checkpoint_tests;
 pub(crate) mod compat_tests;
 #[cfg(test)]
 mod long_context_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 pub(crate) mod tests;

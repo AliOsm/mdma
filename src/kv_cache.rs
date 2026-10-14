@@ -6,6 +6,10 @@
 //! lands in row `p % rows`. One query attends exactly the rows its window
 //! covers, and softmax plus the weighted sum ignore row order (K is stored
 //! rotated), so kernels read the ring as an ordinary `min(len, rows)` prefix.
+//!
+//! A recurrent layer keeps fixed-size state instead of rows. The state has
+//! absorbed every position written, so such a cache resumes only where it
+//! stopped.
 use crate::backend::{Backend, Error, KvView, Pool, Result, RopeSpec};
 use crate::memory::{Reservation, product, sum};
 
@@ -20,6 +24,9 @@ pub struct KvCache<B: Backend> {
     len: usize,
     /// One past the highest position written since the last reset.
     written: usize,
+    /// Recurrent layer state, f32, covering exactly the `written` positions.
+    states: Vec<B::Buf>,
+    state_bytes: Vec<usize>,
     _memory: Option<Reservation>,
 }
 
@@ -48,14 +55,16 @@ impl<B: Backend> KvCache<B> {
     /// Only producer layers need storage; callers map shared layers to them.
     /// Every layer keeps all `n_ctx` positions.
     pub fn with_geometry(backend: &B, widths: &[usize], n_ctx: usize) -> Result<Self> {
-        Self::with_geometry_reserved(backend, widths, &vec![0; widths.len()], n_ctx, None)
+        Self::with_geometry_reserved(backend, widths, &vec![0; widths.len()], &[], n_ctx, None)
     }
 
-    /// Bytes for rows of `widths` elements, each layer keeping `layer_rows`.
+    /// Bytes for rows of `widths` elements, each layer keeping `layer_rows`,
+    /// plus `states` bytes of recurrent state.
     pub(crate) fn allocation_bytes(
         backend: &B,
         widths: &[usize],
         windows: &[usize],
+        states: &[usize],
         n_ctx: usize,
     ) -> Result<usize> {
         if widths.len() != windows.len() {
@@ -63,21 +72,22 @@ impl<B: Backend> KvCache<B> {
                 "KV widths and windows must cover the same layers".into(),
             ));
         }
-        widths
-            .iter()
-            .zip(windows)
-            .try_fold(0, |bytes, (&width, &window)| {
+        widths.iter().zip(windows).try_fold(
+            sum(states.iter().copied())?,
+            |bytes, (&width, &window)| {
                 sum([
                     bytes,
                     product(&[width, backend.kv_elem_bytes(), layer_rows(window, n_ctx), 2])?,
                 ])
-            })
+            },
+        )
     }
 
     pub(crate) fn with_geometry_reserved(
         backend: &B,
         widths: &[usize],
         windows: &[usize],
+        states: &[usize],
         n_ctx: usize,
         memory: Option<Reservation>,
     ) -> Result<Self> {
@@ -89,13 +99,22 @@ impl<B: Backend> KvCache<B> {
                 "KV layer geometry must be nonempty".into(),
             ));
         }
-        Self::allocation_bytes(backend, widths, windows, n_ctx)?;
+        if states.contains(&0) {
+            return Err(Error::ShapeMismatch(
+                "recurrent state must be nonempty".into(),
+            ));
+        }
+        Self::allocation_bytes(backend, widths, windows, states, n_ctx)?;
         let rows: Vec<usize> = windows.iter().map(|&w| layer_rows(w, n_ctx)).collect();
         for (&width, &rows) in widths.iter().zip(&rows) {
             let layer_bytes = product(&[width, elem_bytes, rows])?;
             k.push(backend.alloc(layer_bytes, Pool::Kv)?);
             v.push(backend.alloc(layer_bytes, Pool::Kv)?);
         }
+        let buffers = states
+            .iter()
+            .map(|&bytes| backend.alloc(bytes, Pool::Kv))
+            .collect::<Result<_>>()?;
         Ok(Self {
             k,
             v,
@@ -105,6 +124,8 @@ impl<B: Backend> KvCache<B> {
             elem_bytes,
             len: 0,
             written: 0,
+            states: buffers,
+            state_bytes: states.to_vec(),
             _memory: memory,
         })
     }
@@ -234,12 +255,16 @@ impl<B: Backend> KvCache<B> {
     /// Whether a query at `pos` sees only the current sequence: its prefix is
     /// initialized and no ring overwrote a row it attends. A ring holds the
     /// last `rows` positions written, so going back is only safe before any
-    /// ring wrapped, or onto the last position written.
+    /// ring wrapped, or onto the last position written. Recurrent state
+    /// cannot go back at all.
     pub fn can_resume(&self, pos: usize) -> bool {
         pos <= self.len
             && (pos == 0
-                || pos + 1 >= self.written
-                || self.rows.iter().all(|&rows| self.written <= rows))
+                || if self.states.is_empty() {
+                    pos + 1 >= self.written || self.rows.iter().all(|&rows| self.written <= rows)
+                } else {
+                    pos == self.written
+                })
     }
 
     /// Truncate to `len` positions if decoding can resume there, otherwise
@@ -248,6 +273,22 @@ impl<B: Backend> KvCache<B> {
         let len = if self.can_resume(len) { len } else { 0 };
         self.set_len(len);
         len
+    }
+
+    /// Recurrent state buffer `index`, in the order the cache was built with.
+    pub(crate) fn state_mut(&mut self, index: usize) -> Result<&mut B::Buf> {
+        self.states
+            .get_mut(index)
+            .ok_or_else(|| Error::ShapeMismatch(format!("KV cache has no recurrent state {index}")))
+    }
+
+    /// Zero every recurrent state, for a sequence starting at position 0.
+    pub(crate) fn clear_states(&mut self, backend: &B) -> Result<()> {
+        let zeros = vec![0; self.state_bytes.iter().copied().max().unwrap_or(0)];
+        for (state, &bytes) in self.states.iter_mut().zip(&self.state_bytes) {
+            backend.upload(state, 0, &zeros[..bytes])?;
+        }
+        Ok(())
     }
 
     /// A full ring exposes all its rows, in storage order.

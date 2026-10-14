@@ -1,7 +1,7 @@
 //! Metadata-only native tensor estimates and contiguous GPU-suffix placement.
 use super::{
     Model, ModelConfig,
-    arch::{gemma4, glm4, qwen},
+    arch::{gemma4, glm4, qwen, qwen35},
     memory,
 };
 use crate::backend::{Backend, Error, Result, cpu::CpuBackend};
@@ -66,6 +66,7 @@ pub fn estimate<B: Backend>(
     let weights_bytes = memory::weight_bytes(g)?;
     let mut widths = vec![product(&[c.n_kv_heads, c.head_dim])?; c.n_layers];
     let mut windows = vec![0; c.n_layers];
+    let mut states = Vec::new();
     let mut extra_workspace = 0;
     let mut gemma = false;
     if arch == "gemma4" {
@@ -74,6 +75,12 @@ pub fn estimate<B: Backend>(
         windows = config.kv_windows();
         extra_workspace = config.workspace_bytes(&c)?;
         gemma = true;
+    } else if arch == qwen35::ARCH {
+        let (_, config) = qwen35::Config::read(g)?;
+        widths = config.kv_widths(&c)?;
+        windows = vec![0; widths.len()];
+        states = config.state_bytes()?;
+        extra_workspace = config.workspace_bytes(&c)?;
     } else if qwen::is_arch(arch) {
         extra_workspace = qwen::Qwen::<B>::workspace_bytes(&c)?;
     } else if arch == "glm4" {
@@ -94,7 +101,7 @@ pub fn estimate<B: Backend>(
     };
     let prefill_workspace_bytes = workspace(batch)?;
     let decode_workspace_bytes = workspace(1)?;
-    let kv_bytes = KvCache::allocation_bytes(b, &widths, &windows, context)?;
+    let kv_bytes = KvCache::allocation_bytes(b, &widths, &windows, &states, context)?;
     let load_staging_bytes = staging(g);
     let peak_bytes = sum([
         weights_bytes,

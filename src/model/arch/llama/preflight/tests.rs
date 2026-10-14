@@ -144,7 +144,7 @@ fn supported_load_preserves_tiny_model_logits() {
 
 #[test]
 fn rejects_other_architectures_even_with_compatible_tensor_names() {
-    for arch in ["qwen35", "gemma2", "clip", "unknown"] {
+    for arch in ["qwen3moe", "gemma2", "clip", "unknown"] {
         let mut fixture = Fixture::new(2, 8);
         fixture.metadata = fixture
             .metadata
@@ -455,7 +455,7 @@ fn registry_preflights_later_models_before_loading_the_first() {
     let mut invalid = Fixture::new(2, 8);
     invalid.metadata.insert(
         "general.architecture".into(),
-        Value::String("qwen35".into()),
+        Value::String("qwen3moe".into()),
     );
     let second = invalid.write();
     let models = [("first", &first), ("second", &second)]
@@ -469,7 +469,7 @@ fn registry_preflights_later_models_before_loading_the_first() {
     assert!(
         error
             .to_string()
-            .contains("model second: unsupported model: architecture \"qwen35\""),
+            .contains("model second: unsupported model: architecture \"qwen3moe\""),
         "{error}"
     );
     backend.assert_unused();

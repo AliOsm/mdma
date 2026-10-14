@@ -103,6 +103,7 @@ weights. Unsupported architectures are rejected, not approximated.
 | `llama`, `internlm2` | Bespoke-MiniCheck-7B, TinyLlama 1.1B Chat | all |
 | `gemma4` (text only) | Gemma 4 E2B IT | CPU, Metal, ROCm, Vulkan, CUDA |
 | `qwen2`, `qwen3`, `qwen2vl` (text only) | NuMarkdown-8B; Qwen3-8B still open | CPU, ROCm |
+| `qwen35` (text only) | Qwen3.8-9B | CPU |
 | `glm4` | GLM-4-32B-0414 | CPU, ROCm |
 
 Bespoke-MiniCheck answers `Decide`: a document and claims in, the probability

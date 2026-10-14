@@ -108,7 +108,7 @@ impl HipBackend {
         spec: &RopeSpec,
         rotary_dim: usize,
     ) -> Result<()> {
-        let pairs = shape::rope_partial_interleaved(
+        let pairs = shape::rope_partial(
             shape::elems("rope_partial_interleaved", x.len)?,
             spec,
             rotary_dim,

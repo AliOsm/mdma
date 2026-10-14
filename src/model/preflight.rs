@@ -1,7 +1,7 @@
 //! Shared metadata-only admission and tensor validation for native decoders.
 use super::{
     ModelConfig,
-    arch::{gemma4, glm4, llama, qwen},
+    arch::{gemma4, glm4, llama, qwen, qwen35},
 };
 use crate::backend::{Backend, Error, Result};
 use crate::gguf::{GgmlDType, GgufModel, TensorDesc};
@@ -33,9 +33,10 @@ pub(super) fn validate<B: Backend>(backend: &B, gguf: &GgufModel) -> Result<Mode
         "glm4" => glm4::Glm4::validate(backend, gguf)?,
         "llama" | llama::ARCH => llama::Llama::validate(backend, gguf, arch)?,
         arch if qwen::is_arch(arch) => qwen::Qwen::validate(backend, gguf, arch)?,
+        qwen35::ARCH => qwen35::Qwen35::validate(backend, gguf)?.0,
         _ => {
             return Err(unsupported(format!(
-                "architecture {arch:?}; native text decoders support llama, {}, gemma4, glm4, qwen2, qwen2vl and qwen3",
+                "architecture {arch:?}; native text decoders support llama, {}, gemma4, glm4, qwen2, qwen2vl, qwen3 and qwen35",
                 llama::ARCH
             )));
         }
@@ -123,6 +124,11 @@ impl<'a, B: Backend> Layout<'a, B> {
         validate_tensor(self.backend, name, desc, shape, norm)?;
         self.remaining.remove(name);
         Ok(())
+    }
+
+    /// Strikes off, unchecked, every remaining tensor `skipped` names.
+    pub fn skip(&mut self, skipped: impl Fn(&str) -> bool) {
+        self.remaining.retain(|name| !skipped(name));
     }
 
     /// Rejects any tensor not struck off; `reason` says what is not implemented.

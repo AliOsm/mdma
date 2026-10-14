@@ -19,6 +19,14 @@ pub(crate) fn weight_bytes(gguf: &GgufModel) -> Result<usize> {
         let (config, gemma) = super::gemma4::Config::read(gguf)?;
         return sum([bytes, gemma.generated_weight_bytes(&config)?]);
     }
+    if gguf.metadata_str("general.architecture") == Some(super::qwen35::ARCH) {
+        // Multi-token prediction blocks after the trunk are never loaded.
+        let (config, _) = super::qwen35::Config::read(gguf)?;
+        return sum(gguf
+            .tensor_names()
+            .filter(|&name| super::planning::layer_index(name).is_none_or(|l| l < config.n_layers))
+            .map(|name| gguf.weight_bytes(name)));
+    }
     if let Some(arch) = gguf.metadata_str("general.architecture")
         && super::qwen::is_arch(arch)
     {
@@ -80,22 +88,40 @@ impl<B: Backend> Model<B> {
             backend,
             &self.kv_widths()?,
             &self.kv_windows(),
+            &self.kv_states()?,
             capacity.min(self.config.n_ctx),
         )
     }
 
     /// Sliding window of each KV layer, 0 where it keeps every position.
     pub(crate) fn kv_windows(&self) -> Vec<usize> {
-        if let Decoder::Gemma4(gemma) = &self.architecture {
-            return gemma.config.kv_windows();
+        match &self.architecture {
+            Decoder::Gemma4(gemma) => gemma.config.kv_windows(),
+            Decoder::Qwen35(qwen) => qwen
+                .config
+                .recurrent
+                .iter()
+                .filter(|&&r| !r)
+                .map(|_| 0)
+                .collect(),
+            _ => vec![0; self.config.n_layers],
         }
-        vec![0; self.config.n_layers]
+    }
+
+    /// Bytes of each recurrent state buffer, which no position count changes.
+    pub(crate) fn kv_states(&self) -> Result<Vec<usize>> {
+        match &self.architecture {
+            Decoder::Qwen35(qwen) => qwen.config.state_bytes(),
+            _ => Ok(Vec::new()),
+        }
     }
 
     /// K (and V) elements per position, per layer.
     pub(crate) fn kv_widths(&self) -> Result<Vec<usize>> {
-        if let Decoder::Gemma4(gemma) = &self.architecture {
-            return gemma.config.kv_widths(&self.config);
+        match &self.architecture {
+            Decoder::Gemma4(gemma) => return gemma.config.kv_widths(&self.config),
+            Decoder::Qwen35(qwen) => return qwen.config.kv_widths(&self.config),
+            _ => {}
         }
         Ok(vec![
             product(&[
@@ -121,6 +147,7 @@ impl<B: Backend> Model<B> {
                 bytes,
                 super::qwen::Qwen::<B>::workspace_bytes(&self.config)?,
             ]),
+            Decoder::Qwen35(qwen) => sum([bytes, qwen.config.workspace_bytes(&self.config)?]),
             Decoder::Glm4(_) => sum([
                 bytes,
                 super::glm4::Glm4::<B>::workspace_bytes(&self.config)?,

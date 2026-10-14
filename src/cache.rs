@@ -9,7 +9,7 @@ use artifact::{Manifest, Tensor, invalid};
 pub(crate) use source::Stamp;
 use source::digest;
 pub(crate) use source::fingerprint;
-#[cfg(all(test, feature = "rocm"))]
+#[cfg(test)]
 pub(crate) use source::fingerprint as source_fingerprint;
 use std::{
     collections::BTreeMap,

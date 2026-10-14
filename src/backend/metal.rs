@@ -752,7 +752,11 @@ impl Backend for MetalBackend {
             | Operation::Softcap
             | Operation::RopeSplitHalf
             | Operation::WindowedAttention => true,
-            Operation::AddBias | Operation::RopePartialInterleaved => false,
+            Operation::AddBias
+            | Operation::RopePartialInterleaved
+            | Operation::RopePartialSplitHalf
+            | Operation::SigmoidMul
+            | Operation::GatedDeltaNet => false,
         }
     }
 
