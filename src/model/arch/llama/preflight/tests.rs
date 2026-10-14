@@ -5,6 +5,7 @@ use crate::gguf::tests::{Fixture, weight};
 use crate::gguf::{GgmlDType, TensorDesc};
 use crate::model::Model;
 use crate::model::arch::llama::ARCH;
+use crate::model::preflight::validate_tensor;
 use crate::registry::{Options, Registry, Source};
 use candle_core::quantized::gguf_file::Value;
 use std::assert_matches;

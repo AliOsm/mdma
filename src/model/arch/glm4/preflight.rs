@@ -3,8 +3,7 @@ use crate::backend::{Backend, Operation, Result};
 use crate::gguf::GgufModel;
 use crate::memory::product;
 use crate::model::ModelConfig;
-use crate::model::preflight::{unsupported, validate_tensor};
-use std::collections::HashSet;
+use crate::model::preflight::{Layout, positive, positive_f32, unsupported};
 
 pub(super) fn rotary_dim(g: &GgufModel, c: &ModelConfig) -> Result<usize> {
     let rot = g
@@ -21,19 +20,8 @@ pub(super) fn rotary_dim(g: &GgufModel, c: &ModelConfig) -> Result<usize> {
 
 impl<B: Backend> Glm4<B> {
     pub(in crate::model) fn validate(b: &B, g: &GgufModel) -> Result<ModelConfig> {
-        let u = |suffix: &str| {
-            let key = format!("glm4.{suffix}");
-            g.metadata_u32(&key)
-                .filter(|v| *v > 0)
-                .map(|v| v as usize)
-                .ok_or_else(|| unsupported(format!("{key} must be a positive integer")))
-        };
-        let f = |suffix: &str| {
-            let key = format!("glm4.{suffix}");
-            g.metadata_f32(&key)
-                .filter(|v| v.is_finite() && *v > 0.0)
-                .ok_or_else(|| unsupported(format!("{key} must be a finite positive float")))
-        };
+        let u = |suffix: &str| positive(g, "glm4", suffix);
+        let f = |suffix: &str| positive_f32(g, "glm4", suffix);
         let n_embd = u("embedding_length")?;
         let n_heads = u("attention.head_count")?;
         let head_dim = if g.has_metadata("glm4.attention.key_length") {
@@ -107,35 +95,7 @@ impl<B: Backend> Glm4<B> {
 }
 
 fn layout<B: Backend>(b: &B, g: &GgufModel, c: &ModelConfig) -> Result<()> {
-    let mut remaining: HashSet<_> = g.tensor_names().collect();
-    if c.n_layers > remaining.len() {
-        return Err(unsupported("block_count exceeds tensor count"));
-    }
-    let embd = g
-        .tensor_desc("token_embd.weight")
-        .ok_or_else(|| unsupported("missing tensor token_embd.weight"))?;
-    let vocab = match embd.shape.as_slice() {
-        &[vocab, width] if vocab > 0 && width == c.n_embd => vocab,
-        _ => return Err(unsupported("invalid GLM embedding shape")),
-    };
-    if g.has_metadata("glm4.vocab_size")
-        && g.metadata_u32("glm4.vocab_size").map(|v| v as usize) != Some(vocab)
-    {
-        return Err(unsupported("glm4.vocab_size must match token_embd.weight"));
-    }
-    let mut tensor = |name: &str, shape: &[usize], norm: bool| -> Result<()> {
-        let desc = g
-            .tensor_desc(name)
-            .ok_or_else(|| unsupported(format!("missing tensor {name}")))?;
-        validate_tensor(b, name, desc, shape, norm)?;
-        remaining.remove(name);
-        Ok(())
-    };
-    tensor("token_embd.weight", &[vocab, c.n_embd], false)?;
-    tensor("output_norm.weight", &[c.n_embd], true)?;
-    if g.tensor_desc("output.weight").is_some() {
-        tensor("output.weight", &[vocab, c.n_embd], false)?;
-    }
+    let (mut tensors, _) = Layout::new(b, g, "glm4", c, true)?;
     let q = product(&[c.n_heads, c.head_dim])?;
     let kv = product(&[c.n_kv_heads, c.head_dim])?;
     let packed = product(&[2, c.n_ff])?;
@@ -152,13 +112,8 @@ fn layout<B: Backend>(b: &B, g: &GgufModel, c: &ModelConfig) -> Result<()> {
             ("ffn_down", vec![c.n_embd, c.n_ff], false),
             ("post_ffw_norm", vec![c.n_embd], true),
         ] {
-            tensor(&format!("blk.{i}.{suffix}.weight"), &shape, norm)?;
+            tensors.tensor(&format!("blk.{i}.{suffix}.weight"), &shape, norm)?;
         }
     }
-    if let Some(name) = remaining.into_iter().min() {
-        return Err(unsupported(format!(
-            "unexpected tensor {name}; GLM MTP, MoE, adapters and task heads are not implemented"
-        )));
-    }
-    Ok(())
+    tensors.finish("GLM MTP, MoE, adapters and task heads are not implemented")
 }

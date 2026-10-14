@@ -4,7 +4,7 @@ use crate::backend::{AttnSpec, Backend, Pool, QWeight, Result, RopeSpec};
 use crate::gguf::GgufModel;
 use crate::kv_cache::KvCache;
 use crate::memory::product;
-use crate::model::{Model, ModelConfig, load_norm, load_weight};
+use crate::model::{Model, ModelConfig, load_norm, load_output, load_weight};
 
 mod preflight;
 #[cfg(test)]
@@ -37,11 +37,7 @@ impl<B: Backend> Glm4<B> {
         let rotary_dim = preflight::rotary_dim(g, &c)?;
         let token_embd = load_weight(b, g, "token_embd.weight")?;
         let output_norm = load_norm(b, g, "output_norm.weight")?;
-        let output = if g.tensor_desc("output.weight").is_some() {
-            Some(load_weight(b, g, "output.weight")?)
-        } else {
-            None
-        };
+        let output = load_output(b, g)?;
         let mut layers = Vec::with_capacity(c.n_layers);
         for i in 0..c.n_layers {
             let name = |s: &str| format!("blk.{i}.{s}.weight");

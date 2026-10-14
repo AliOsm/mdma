@@ -42,6 +42,11 @@ pub(crate) fn dequant_row(w: &QWeight<CpuBuf>, row: usize, out: &mut [f32]) -> R
     dequant_row_at(w, row, out.len(), out)
 }
 
+/// Sequential sum of products, so every caller reduces in one order.
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(a, b)| a * b).sum()
+}
+
 fn softmax_inplace(xs: &mut [f32]) {
     let max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0;
@@ -237,7 +242,7 @@ impl Backend for CpuBackend {
                 dequant_row_at(w, row, n_in, row_f32)?;
                 for (t, y) in out.iter_mut().enumerate() {
                     let x_t = &x_f32[t * n_in..(t + 1) * n_in];
-                    *y = row_f32.iter().zip(x_t).map(|(a, b)| a * b).sum();
+                    *y = dot(row_f32, x_t);
                 }
                 Ok::<(), Error>(())
             },
@@ -275,7 +280,7 @@ impl Backend for CpuBackend {
         let dim = w_f32.len();
         shape::rows("rmsnorm", dim, x_f32.len(), y_f32.len())?;
         for (row, out) in x_f32.chunks_exact(dim).zip(y_f32.chunks_exact_mut(dim)) {
-            let mean_sq = row.iter().map(|v| v * v).sum::<f32>() / dim as f32;
+            let mean_sq = dot(row, row) / dim as f32;
             let scale = 1.0 / (mean_sq + eps).sqrt();
             for i in 0..dim {
                 out[i] = row[i] * scale * w_f32[i];
@@ -454,7 +459,7 @@ impl CpuBackend {
                     let t = first + offset;
                     let k_vec = &k_f32
                         [t * kv_row + kvh * spec.head_dim..t * kv_row + (kvh + 1) * spec.head_dim];
-                    *score = q_vec.iter().zip(k_vec).map(|(a, b)| a * b).sum::<f32>() * scale;
+                    *score = dot(q_vec, k_vec) * scale;
                 }
                 softmax_inplace(&mut scores);
 

@@ -4,7 +4,7 @@ use crate::backend::{AttnSpec, Backend, Pool, QWeight, Result, RopeSpec};
 use crate::gguf::GgufModel;
 use crate::kv_cache::KvCache;
 use crate::memory::product;
-use crate::model::{Model, ModelConfig, load_norm, load_weight};
+use crate::model::{Model, ModelConfig, load_norm, load_output, load_weight};
 
 mod preflight;
 pub(in crate::model) use preflight::config as preflight_config;
@@ -43,11 +43,7 @@ impl<B: Backend> Qwen<B> {
         let qwen3 = g.metadata_str("general.architecture") == Some("qwen3");
         let token_embd = load_weight(b, g, "token_embd.weight")?;
         let output_norm = load_norm(b, g, "output_norm.weight")?;
-        let output = if g.tensor_desc("output.weight").is_some() {
-            Some(load_weight(b, g, "output.weight")?)
-        } else {
-            None
-        };
+        let output = load_output(b, g)?;
         let mut factors = b.alloc(product(&[c.head_dim / 2, 4])?, Pool::Weights)?;
         b.upload(
             &mut factors,

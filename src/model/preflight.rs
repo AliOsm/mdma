@@ -5,6 +5,7 @@ use super::{
 };
 use crate::backend::{Backend, Error, Result};
 use crate::gguf::{GgmlDType, GgufModel, TensorDesc};
+use std::collections::HashSet;
 
 pub(super) fn unsupported(message: impl Into<String>) -> Error {
     Error::UnsupportedModel(message.into())
@@ -42,6 +43,95 @@ pub(super) fn validate<B: Backend>(backend: &B, gguf: &GgufModel) -> Result<Mode
     gguf.validate_tensor_ranges()
         .map_err(|e| unsupported(e.to_string()))?;
     Ok(config)
+}
+
+/// `{arch}.{suffix}` as a positive integer.
+pub(super) fn positive(g: &GgufModel, arch: &str, suffix: &str) -> Result<usize> {
+    let key = format!("{arch}.{suffix}");
+    g.metadata_u32(&key)
+        .filter(|v| *v > 0)
+        .map(|v| v as usize)
+        .ok_or_else(|| unsupported(format!("{key} must be a positive integer")))
+}
+
+/// `{arch}.{suffix}` as a finite positive float.
+pub(super) fn positive_f32(g: &GgufModel, arch: &str, suffix: &str) -> Result<f32> {
+    let key = format!("{arch}.{suffix}");
+    g.metadata_f32(&key)
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .ok_or_else(|| unsupported(format!("{key} must be a finite positive float")))
+}
+
+/// Tensor-by-tensor layout check: each expected tensor is validated and
+/// struck off, and whatever the decoder would not run is rejected.
+pub(super) struct Layout<'a, B> {
+    backend: &'a B,
+    gguf: &'a GgufModel,
+    remaining: HashSet<&'a str>,
+}
+
+impl<'a, B: Backend> Layout<'a, B> {
+    /// Checks the embedding, the final norm and the output projection, which
+    /// may be tied to the embedding when `tied`. `{arch}.vocab_size`, when
+    /// present, must match the embedding. Returns the vocabulary size too.
+    pub fn new(
+        backend: &'a B,
+        gguf: &'a GgufModel,
+        arch: &str,
+        c: &ModelConfig,
+        tied: bool,
+    ) -> Result<(Self, usize)> {
+        let remaining: HashSet<_> = gguf.tensor_names().collect();
+        // Bound descriptor work even if a corrupt header claims billions of layers.
+        if c.n_layers > remaining.len() {
+            return Err(unsupported("block_count exceeds tensor count"));
+        }
+        let embd = gguf
+            .tensor_desc("token_embd.weight")
+            .ok_or_else(|| unsupported("missing tensor token_embd.weight"))?;
+        let vocab = match embd.shape.as_slice() {
+            &[vocab, width] if vocab > 0 && width == c.n_embd => vocab,
+            shape => {
+                return Err(unsupported(format!(
+                    "token_embd.weight: expected [vocab > 0, {}], got {shape:?}",
+                    c.n_embd
+                )));
+            }
+        };
+        let key = format!("{arch}.vocab_size");
+        if gguf.has_metadata(&key) && gguf.metadata_u32(&key).map(|v| v as usize) != Some(vocab) {
+            return Err(unsupported(format!("{key} must match token_embd.weight")));
+        }
+        let mut layout = Self {
+            backend,
+            gguf,
+            remaining,
+        };
+        layout.tensor("token_embd.weight", &[vocab, c.n_embd], false)?;
+        layout.tensor("output_norm.weight", &[c.n_embd], true)?;
+        if !tied || gguf.tensor_desc("output.weight").is_some() {
+            layout.tensor("output.weight", &[vocab, c.n_embd], false)?;
+        }
+        Ok((layout, vocab))
+    }
+
+    pub fn tensor(&mut self, name: &str, shape: &[usize], norm: bool) -> Result<()> {
+        let desc = self
+            .gguf
+            .tensor_desc(name)
+            .ok_or_else(|| unsupported(format!("missing tensor {name}")))?;
+        validate_tensor(self.backend, name, desc, shape, norm)?;
+        self.remaining.remove(name);
+        Ok(())
+    }
+
+    /// Rejects any tensor not struck off; `reason` says what is not implemented.
+    pub fn finish(self, reason: &str) -> Result<()> {
+        match self.remaining.into_iter().min() {
+            Some(name) => Err(unsupported(format!("unexpected tensor {name}; {reason}"))),
+            None => Ok(()),
+        }
+    }
 }
 
 pub(super) fn validate_tensor<B: Backend>(

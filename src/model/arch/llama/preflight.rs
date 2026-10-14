@@ -3,8 +3,7 @@ use super::Llama;
 use crate::backend::{Backend, Result};
 use crate::gguf::GgufModel;
 use crate::model::ModelConfig;
-use crate::model::preflight::{unsupported, validate_tensor};
-use std::collections::HashSet;
+use crate::model::preflight::{Layout, unsupported};
 
 #[cfg(test)]
 mod tests;
@@ -120,42 +119,7 @@ fn config(gguf: &GgufModel, arch: &str) -> Result<ModelConfig> {
 }
 
 fn layout<B: Backend>(backend: &B, gguf: &GgufModel, c: &ModelConfig, arch: &str) -> Result<()> {
-    let mut remaining: HashSet<_> = gguf.tensor_names().collect();
-    // Bound descriptor work even if a corrupt header claims billions of layers.
-    if c.n_layers > remaining.len() {
-        return Err(unsupported("block_count exceeds tensor count"));
-    }
-    let embd = gguf
-        .tensor_desc("token_embd.weight")
-        .ok_or_else(|| unsupported("missing tensor token_embd.weight"))?;
-    let vocab = match embd.shape.as_slice() {
-        &[vocab, width] if vocab > 0 && width == c.n_embd => vocab,
-        _ => {
-            return Err(unsupported(format!(
-                "token_embd.weight: expected [vocab > 0, {}], got {:?}",
-                c.n_embd, embd.shape
-            )));
-        }
-    };
-    let vocab_key = format!("{arch}.vocab_size");
-    if gguf.has_metadata(&vocab_key)
-        && gguf.metadata_u32(&vocab_key).map(|v| v as usize) != Some(vocab)
-    {
-        return Err(unsupported(format!(
-            "{vocab_key} must match token_embd.weight"
-        )));
-    }
-    let mut tensor = |name: &str, shape: &[usize], norm: bool| -> Result<()> {
-        let desc = gguf
-            .tensor_desc(name)
-            .ok_or_else(|| unsupported(format!("missing tensor {name}")))?;
-        validate_tensor(backend, name, desc, shape, norm)?;
-        remaining.remove(name);
-        Ok(())
-    };
-    tensor("token_embd.weight", &[vocab, c.n_embd], false)?;
-    tensor("output_norm.weight", &[c.n_embd], true)?;
-    tensor("output.weight", &[vocab, c.n_embd], false)?;
+    let (mut tensors, _) = Layout::new(backend, gguf, arch, c, false)?;
     let kv_dim = c
         .n_kv_heads
         .checked_mul(c.head_dim)
@@ -172,13 +136,8 @@ fn layout<B: Backend>(backend: &B, gguf: &GgufModel, c: &ModelConfig, arch: &str
             ("ffn_up", vec![c.n_ff, c.n_embd], false),
             ("ffn_down", vec![c.n_embd, c.n_ff], false),
         ] {
-            tensor(&format!("blk.{i}.{suffix}.weight"), &shape, norm)?;
+            tensors.tensor(&format!("blk.{i}.{suffix}.weight"), &shape, norm)?;
         }
     }
-    if let Some(name) = remaining.into_iter().min() {
-        return Err(unsupported(format!(
-            "unexpected tensor {name}; biases, extra norms and task heads are not implemented"
-        )));
-    }
-    Ok(())
+    tensors.finish("biases, extra norms and task heads are not implemented")
 }

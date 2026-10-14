@@ -111,6 +111,14 @@ fn load_norm<B: Backend>(backend: &B, gguf: &mut GgufModel, name: &str) -> Resul
     Ok(buf)
 }
 
+/// `output.weight`, or `None` when the output projection is tied to the embedding.
+fn load_output<B: Backend>(backend: &B, gguf: &mut GgufModel) -> Result<Option<QWeight<B::Buf>>> {
+    gguf.tensor_desc("output.weight")
+        .is_some()
+        .then(|| load_weight(backend, gguf, "output.weight"))
+        .transpose()
+}
+
 impl<B: Backend> Model<B> {
     /// Checks native decoder support using metadata and tensor descriptors only.
     /// Does not read weight payloads or allocate/upload backend buffers.

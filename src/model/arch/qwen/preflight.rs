@@ -3,8 +3,7 @@ use crate::backend::{Backend, Operation, Result};
 use crate::gguf::GgufModel;
 use crate::memory::product;
 use crate::model::ModelConfig;
-use crate::model::preflight::{unsupported, validate_tensor};
-use std::collections::HashSet;
+use crate::model::preflight::{Layout, positive, positive_f32, unsupported};
 
 const INTS: &[&str] = &[
     "block_count",
@@ -17,19 +16,8 @@ const INTS: &[&str] = &[
 const FLOATS: &[&str] = &["rope.freq_base", "attention.layer_norm_rms_epsilon"];
 
 pub(in crate::model) fn config(g: &GgufModel, arch: &str) -> Result<ModelConfig> {
-    let u = |suffix: &str| {
-        let key = format!("{arch}.{suffix}");
-        g.metadata_u32(&key)
-            .filter(|v| *v > 0)
-            .map(|v| v as usize)
-            .ok_or_else(|| unsupported(format!("{key} must be a positive integer")))
-    };
-    let f = |suffix: &str| {
-        let key = format!("{arch}.{suffix}");
-        g.metadata_f32(&key)
-            .filter(|v| v.is_finite() && *v > 0.0)
-            .ok_or_else(|| unsupported(format!("{key} must be a finite positive float")))
-    };
+    let u = |suffix: &str| positive(g, arch, suffix);
+    let f = |suffix: &str| positive_f32(g, arch, suffix);
     let n_embd = u("embedding_length")?;
     let n_heads = u("attention.head_count")?;
     let n_kv_heads = u("attention.head_count_kv")?;
@@ -124,34 +112,7 @@ impl<B: Backend> Qwen<B> {
 }
 
 fn layout<B: Backend>(b: &B, g: &GgufModel, c: &ModelConfig, arch: &str) -> Result<()> {
-    let mut remaining: HashSet<_> = g.tensor_names().collect();
-    if c.n_layers > remaining.len() {
-        return Err(unsupported("block_count exceeds tensor count"));
-    }
-    let embd = g
-        .tensor_desc("token_embd.weight")
-        .ok_or_else(|| unsupported("missing tensor token_embd.weight"))?;
-    let vocab = match embd.shape.as_slice() {
-        &[vocab, width] if vocab > 0 && width == c.n_embd => vocab,
-        _ => return Err(unsupported("invalid Qwen embedding shape")),
-    };
-    let key = format!("{arch}.vocab_size");
-    if g.has_metadata(&key) && g.metadata_u32(&key).map(|v| v as usize) != Some(vocab) {
-        return Err(unsupported(format!("{key} must match token_embd.weight")));
-    }
-    let mut tensor = |name: &str, shape: &[usize], norm: bool| -> Result<()> {
-        let desc = g
-            .tensor_desc(name)
-            .ok_or_else(|| unsupported(format!("missing tensor {name}")))?;
-        validate_tensor(b, name, desc, shape, norm)?;
-        remaining.remove(name);
-        Ok(())
-    };
-    tensor("token_embd.weight", &[vocab, c.n_embd], false)?;
-    tensor("output_norm.weight", &[c.n_embd], true)?;
-    if g.tensor_desc("output.weight").is_some() {
-        tensor("output.weight", &[vocab, c.n_embd], false)?;
-    }
+    let (mut tensors, _) = Layout::new(b, g, arch, c, true)?;
     let q = product(&[c.n_heads, c.head_dim])?;
     let kv = product(&[c.n_kv_heads, c.head_dim])?;
     for i in 0..c.n_layers {
@@ -166,22 +127,17 @@ fn layout<B: Backend>(b: &B, g: &GgufModel, c: &ModelConfig, arch: &str) -> Resu
             ("ffn_up", vec![c.n_ff, c.n_embd], false),
             ("ffn_down", vec![c.n_embd, c.n_ff], false),
         ] {
-            tensor(&format!("blk.{i}.{suffix}.weight"), &shape, norm)?;
+            tensors.tensor(&format!("blk.{i}.{suffix}.weight"), &shape, norm)?;
         }
         if arch == "qwen3" {
             for suffix in ["attn_q_norm", "attn_k_norm"] {
-                tensor(&format!("blk.{i}.{suffix}.weight"), &[c.head_dim], true)?;
+                tensors.tensor(&format!("blk.{i}.{suffix}.weight"), &[c.head_dim], true)?;
             }
         } else {
             for (suffix, width) in [("attn_q", q), ("attn_k", kv), ("attn_v", kv)] {
-                tensor(&format!("blk.{i}.{suffix}.bias"), &[width], true)?;
+                tensors.tensor(&format!("blk.{i}.{suffix}.bias"), &[width], true)?;
             }
         }
     }
-    if let Some(name) = remaining.into_iter().min() {
-        return Err(unsupported(format!(
-            "unexpected tensor {name}; Qwen task heads and adapters are not text decoders"
-        )));
-    }
-    Ok(())
+    tensors.finish("Qwen task heads and adapters are not text decoders")
 }
