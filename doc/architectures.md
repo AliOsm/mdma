@@ -23,7 +23,8 @@ Gemma also runs on CPU and Metal. Its decoder
 uses shared KV, local/global attention, per-layer inputs, and tied embeddings.
 ROCm and Vulkan support its BF16/Q5_K weights, scale, GELU-tanh gating,
 softcap, split-half RoPE, and windowed attention with heads up to 512. Gemma prefills
-sequentially; use a 2048-token session cap. Audio, vision, E4B, MoE, and
+sequentially; use a 2048-token session cap. Gemma 4 E4B IT loads and runs on
+CPU and ROCm without a pinned checkpoint gate. Audio, vision, MoE, and
 long-context support are not included.
 
 Native GGUF loading validates Llama/InternLM2, Gemma 4, dense GLM-4,
