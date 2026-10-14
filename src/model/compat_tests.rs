@@ -338,6 +338,19 @@ fn llama_compat_load_prefill_decode() {
 #[test]
 fn gemma4_compat_tied_embeddings_shared_kv_and_variable_heads() {
     inference(&CpuBackend, &fixture(true).write());
+    // Uniform FFN widths arrive as one scalar (E4B), not a per-layer array.
+    let mut b = fixture(true);
+    b.set("gemma4.feed_forward_length", Value::U32(16));
+    for (suffix, shape) in [
+        ("ffn_gate", [16, 8]),
+        ("ffn_up", [16, 8]),
+        ("ffn_down", [8, 16]),
+    ] {
+        let name = format!("blk.1.{suffix}.weight");
+        b.tensors.retain(|(n, _)| *n != name);
+        b.tensor(&name, &shape, None);
+    }
+    inference(&CpuBackend, &b.write());
 }
 
 #[cfg(feature = "vulkan")]

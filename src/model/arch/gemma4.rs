@@ -47,8 +47,13 @@ impl Config {
         let local = g
             .metadata_bool_array("gemma4.attention.sliding_window_pattern")
             .ok_or_else(|| invalid("missing Gemma attention pattern"))?;
+        // Uniform widths are written as one scalar (E4B), mixed ones per layer
+        // (E2B). A scalar is repeated per pattern entry, which the geometry
+        // check below holds to n_layers, so no bare header integer sizes it.
         let ffn: Vec<usize> = g
-            .metadata_u32_array("gemma4.feed_forward_length")
+            .metadata_u32("gemma4.feed_forward_length")
+            .map(|width| vec![width; local.len()])
+            .or_else(|| g.metadata_u32_array("gemma4.feed_forward_length"))
             .ok_or_else(|| invalid("missing Gemma FFN widths"))?
             .into_iter()
             .map(|v| v as usize)
