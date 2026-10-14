@@ -268,10 +268,9 @@ fn build_vulkan_kernels() {
         for (name, value) in defines {
             command.arg(format!("-D{name}={value}u"));
         }
-        let status = command
-            .arg(&path)
-            .status()
-            .unwrap_or_else(|e| panic!("failed to run {glslang}: {e}"));
+        let status = command.arg(&path).status().unwrap_or_else(|e| {
+            panic!("failed to run {glslang}: {e} -- install glslang or set GLSLANG")
+        });
         assert!(
             status.success(),
             "{glslang} failed compiling {}",

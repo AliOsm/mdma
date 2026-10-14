@@ -192,8 +192,9 @@ cargo build --release --features metal   # + native Metal on macOS 12+, unified-
 cargo build --release --features coral   # + Coral Edge TPU, PCIe/M.2 cards on FreeBSD and Linux
 ```
 
-FreeBSD builds need `protoc` on `PATH`. See [backend details](doc/backends.md)
-for kernel compilation and runtime switches.
+FreeBSD builds need `protoc` on `PATH`; Vulkan builds there also need
+`pkg install glslang vulkan-loader`, plus `mesa-dri` for AMD/Intel GPUs. See
+[backend details](doc/backends.md) for kernel compilation and runtime switches.
 
 ## Serving
 
