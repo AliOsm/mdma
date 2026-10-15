@@ -345,6 +345,10 @@ impl Service {
         std::fs::File::open(&dir)
             .and_then(|dir| dir.sync_all())
             .map_err(|e| Status::internal(format!("syncing the models folder: {e}")))?;
+        if let Err(error) = settle(&target) {
+            remove(&target);
+            return Err(Status::internal(format!("placing the model: {error}")));
+        }
         let artifact_id = artifact.as_str().to_owned();
         if let Err(error) = self.folder.add(model, Some(artifact)) {
             remove(&target);
@@ -376,6 +380,30 @@ impl Service {
             .map_err(|error| {
                 Status::unavailable(format!("listed {model} but cannot record it: {error}"))
             })
+    }
+}
+
+/// Waits until a just-placed file's size and times stop changing. Some
+/// filesystems finish a link or rename later: FreeBSD's soft updates bump the
+/// inode's ctime about half a second after, which a pin taken before would
+/// read as the file changing under it.
+fn settle(path: &Path) -> std::io::Result<()> {
+    const STILL: Duration = Duration::from_secs(2);
+    const LIMIT: Duration = Duration::from_secs(30);
+    let stamp = || crate::cache::Stamp::read(&std::fs::metadata(path)?);
+    let started = Instant::now();
+    let (mut last, mut since) = (stamp()?, Instant::now());
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let now = stamp()?;
+        if now != last {
+            (last, since) = (now, Instant::now());
+        } else if since.elapsed() >= STILL {
+            return Ok(());
+        }
+        if started.elapsed() >= LIMIT {
+            return Err(std::io::Error::other("the model file kept changing"));
+        }
     }
 }
 
