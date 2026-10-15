@@ -83,6 +83,9 @@ advertises for that model, and forwarded as a plain prompt; the executor sees
 no new field. A model whose catalog names no format refuses `chat` before any
 dial, as does a system message without `chat`.
 
+An origin that only routes needs no local models: `mdma-serve` accepts an
+empty `MDMA_MODELS_DIR` when routing is enabled, and refuses it otherwise.
+
 ## Bounded lifetime and output
 
 The origin permits one active/undrained routed response, eight client

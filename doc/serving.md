@@ -93,6 +93,11 @@ empty name means `MDMA_DEFAULT_MODEL`, else the first name alphabetically.
 Models on other MDMA nodes are reached through [federation](federation.md)
 routes.
 
+A server refuses an empty folder unless it routes to peers. A node that only
+routes is a front door: it lists its routed models, is ready without local
+ones, and answers a request with an empty model name with `NOT_FOUND`
+("this server has no local models").
+
 ### Memory, eviction and leases
 
 When a load, or a request's KV and workspace, does not fit, the server unloads

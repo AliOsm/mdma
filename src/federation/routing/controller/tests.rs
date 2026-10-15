@@ -598,6 +598,47 @@ async fn actual_single_hop_native_synthesis_decision_and_response_quota() {
 }
 
 #[tokio::test]
+async fn a_front_door_without_local_models_is_ready_and_routes() {
+    use crate::grpc::Mdma as _;
+    let live = Live::new().await;
+    // The folder mdma-serve opens; it holds no models.
+    let empty = tempfile::tempdir().unwrap();
+    let registry =
+        Registry::open(Arc::new(CpuBackend), empty.path(), None, Options::new(32)).unwrap();
+    let mut door = grpc::MdmaService::new(registry, "cpu");
+    door.set_federation_router(live.router.clone());
+    let status = door
+        .introspect(live.request(grpc::IntrospectRequest {}, "3000m"))
+        .await
+        .unwrap()
+        .into_inner();
+    let names: Vec<_> = status.models.iter().map(|m| m.name.as_str()).collect();
+    assert!(status.ready, "routes alone make it ready");
+    assert_eq!(status.default_model, "");
+    assert!(names.contains(&"remote-native"), "{names:?}");
+    let mut local = synth(false);
+    local.model = String::new();
+    let error = door
+        .synthesize(live.request(local, "3000m"))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), Code::NotFound);
+    assert!(
+        error.message().contains("no local models"),
+        "{}",
+        error.message()
+    );
+    let stream = door
+        .synthesize(live.request(synth(false), "3000m"))
+        .await
+        .unwrap()
+        .into_inner();
+    tokens_only(&replies(stream).await);
+    live.close().await;
+}
+
+#[tokio::test]
 async fn power_flips_keep_the_route_selected_and_events_report_the_executors_caps() {
     use crate::federation::catalog::ServerState;
     use crate::power::{PowerStatus, ServerState as PowerState};

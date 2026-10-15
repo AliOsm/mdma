@@ -199,7 +199,7 @@ fn preflight_reads_metadata_once_per_file_and_uploads_nothing() {
     assert_eq!(registry.names(), ["m0", "m1", "m2"]);
     assert_eq!(
         (registry.default_name(), registry.resolve("")),
-        ("m2", Some("m2"))
+        (Some("m2"), Some("m2"))
     );
     assert!(
         registry
@@ -457,7 +457,7 @@ fn device_pressure_refuses_before_upload_and_a_later_use_retries() {
         registry.acquire_blocking("m1").is_ok(),
         "the next use loads it"
     );
-    assert_eq!(registry.default_name(), "m1");
+    assert_eq!(registry.default_name(), Some("m1"));
 }
 
 #[test]
@@ -473,7 +473,7 @@ fn a_model_that_does_not_fit_leaves_the_others_loading() {
     assert_eq!(backend.live_bytes.load(SeqCst), bytes);
     assert_eq!(
         registry.default_name(),
-        "m0",
+        Some("m0"),
         "never silently change the requested default"
     );
 }

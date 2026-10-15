@@ -290,6 +290,11 @@ impl Prepared {
     pub fn client_policy(&self) -> ClientPolicy {
         self.client_policy
     }
+    /// Whether this node routes requests to its peers.
+    pub fn routing_enabled(&self) -> bool {
+        self.routing.is_some()
+    }
+
     pub fn execution_enabled(&self) -> bool {
         self.execution_enabled
     }

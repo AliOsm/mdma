@@ -173,7 +173,8 @@ pub struct Registry<B: Backend> {
 impl<B: Backend> Registry<B> {
     /// Every `*.gguf` and Laya checkpoint folder in `dir`, named by file stem or
     /// folder. Files that do not preflight are skipped with a log line. The
-    /// default is `default`, else the first name.
+    /// default is `default`, else the first name. The list may be empty; the
+    /// caller decides whether a server without local models is useful.
     pub fn open(
         backend: Arc<B>,
         dir: &Path,
@@ -183,12 +184,6 @@ impl<B: Backend> Registry<B> {
         let found = scan::scan(dir)?;
         let mut registry = Self::build(backend, found, default, options, true)?;
         registry.dir = Some(dir.to_path_buf());
-        if registry.names.is_empty() {
-            return Err(Error::Config(format!(
-                "no usable models in {}",
-                dir.display()
-            )));
-        }
         Ok(registry)
     }
 
@@ -391,8 +386,9 @@ impl<B: Backend> Registry<B> {
         self.names.iter().map(|(name, _)| name.as_str()).collect()
     }
 
-    pub fn default_name(&self) -> &str {
-        &self.names[self.default].0
+    /// `None` when nothing is listed.
+    pub fn default_name(&self) -> Option<&str> {
+        self.names.get(self.default).map(|(name, _)| name.as_str())
     }
 
     /// `""` means the default model.
@@ -413,7 +409,7 @@ impl<B: Backend> Registry<B> {
     /// The listed name, resolving `""` to the default.
     pub fn resolve<'a>(&'a self, name: &'a str) -> Option<&'a str> {
         if name.is_empty() {
-            return Some(self.default_name());
+            return self.default_name();
         }
         self.names
             .iter()

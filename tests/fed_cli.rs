@@ -85,6 +85,19 @@ impl Node {
     }
 }
 
+/// Waits until the server's stderr log mentions `line`; returns the log.
+fn logged(log: &Path, line: &str) -> String {
+    let deadline = Instant::now() + Duration::from_mins(1);
+    loop {
+        let text = std::fs::read_to_string(log.with_extension("err")).unwrap_or_default();
+        if text.contains(line) {
+            return text;
+        }
+        assert!(Instant::now() < deadline, "waiting for {line:?}:\n{text}");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 /// Retries `attempt` until it succeeds, for things that wait on a starting node.
 fn eventually(what: &str, log: &Path, mut attempt: impl FnMut() -> Output) -> String {
     let deadline = Instant::now() + Duration::from_mins(1);
@@ -141,7 +154,7 @@ fn an_origin_routes_an_executors_model_set_up_with_mdma_fed() {
     ]));
 
     let executor_log = root.path().join("executor.log");
-    let _executor = executor.serve(&certs, &executor_log);
+    let running = executor.serve(&certs, &executor_log);
     // The executor lists its model once it has hashed it.
     let routes = eventually("routes", &executor_log, || {
         fed(&[
@@ -194,4 +207,39 @@ fn an_origin_routes_an_executors_model_set_up_with_mdma_fed() {
         !refused.status.success()
             && String::from_utf8_lossy(&refused.stderr).contains("stop mdma-serve first")
     );
+
+    // Only a node that routes may start without local models.
+    drop(running);
+    let empty = root.path().join("empty-models");
+    std::fs::create_dir(&empty).unwrap();
+    let mut plain = command(env!("CARGO_BIN_EXE_mdma-serve"))
+        .env("MDMA_MODELS_DIR", &empty)
+        .env("MDMA_BACKEND", "cpu")
+        .env("MDMA_LISTEN", format!("127.0.0.1:{}", free_port()))
+        .env("MDMA_POWER", "off")
+        .env("MDMA_TLS_CERT", certs.join("server.pem"))
+        .env("MDMA_TLS_KEY", certs.join("server-key.pem"))
+        .env("MDMA_TLS_CA", certs.join("ca.pem"))
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while plain.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "a node without models kept running"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = plain.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success() && stderr.contains("no usable models"),
+        "{stderr}"
+    );
+    std::fs::remove_file(origin.models.join("tiny.gguf")).unwrap();
+    let origin_log = root.path().join("origin.log");
+    let _origin = origin.serve(&certs, &origin_log);
+    let text = logged(&origin_log, "mdma listening on");
+    assert!(text.contains("serving routes only"), "{text}");
 }

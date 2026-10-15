@@ -13,7 +13,7 @@ use crate::registry::{
 };
 use crate::sampler::SamplerConfig;
 use crate::session::{GeneratedToken, Session};
-use proto::mdma_server::Mdma;
+pub(crate) use proto::mdma_server::Mdma;
 use rama::futures::FutureExt;
 use rama::graceful::WeakShutdownGuard;
 use rama::http::grpc::{Request, Response, Status};
@@ -231,6 +231,9 @@ impl<B: Backend> MdmaService<B> {
     /// The listed name and what is known about it; `""` is the default.
     fn model(&self, name: &str) -> Result<(String, &Info), Status> {
         let listed = self.registry.resolve(name).ok_or_else(|| {
+            if name.is_empty() && self.registry.names().is_empty() {
+                return Status::not_found("this server has no local models; name a routed model");
+            }
             Status::not_found(format!(
                 "no model named {name:?}; available: {}",
                 self.registry.names().join(", ")
@@ -846,17 +849,19 @@ where
             models.extend(router.statuses(req, ready));
         }
         let default = self.registry.default_name();
-        let default_status = models.iter().find(|m| m.name == default);
+        let default_status = models.iter().find(|m| Some(m.name.as_str()) == default);
         let state_name = if state == ServerState::Serving && failed {
             "degraded".to_string()
         } else {
             state.name().to_ascii_lowercase()
         };
         IntrospectResponse {
+            // A node without local models serves routes alone.
             ready: ready
-                && models[..local]
-                    .iter()
-                    .any(|model| model.residency != Phase::Failed.as_str()),
+                && (local == 0
+                    || models[..local]
+                        .iter()
+                        .any(|model| model.residency != Phase::Failed.as_str())),
             model_architecture: default_status
                 .map(|m| m.architecture.clone())
                 .unwrap_or_default(),
@@ -872,7 +877,7 @@ where
                 .reading
                 .and_then(|r| r.gpu)
                 .map_or(0, |g| g.default_mw),
-            default_model: default.to_owned(),
+            default_model: default.unwrap_or_default().to_owned(),
             models,
             host: Some(self.registry.live_host(&self.host)),
         }
