@@ -158,6 +158,28 @@ async fn unknown_model_fails_without_retry() {
     .unwrap_err();
     assert_eq!(calls, 1);
     assert!(error.to_string().contains("unknown model 'missing'"));
+
+    let front_door = IntrospectResponse {
+        default_model: String::new(),
+        models: vec![ModelStatus {
+            name: "linux-qwen".into(),
+            ready: true,
+            ..Default::default()
+        }],
+        ..healthy()
+    };
+    let error = wait(
+        || ready(Ok(front_door.clone())),
+        Some(""),
+        Duration::from_secs(120),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("no local models") && error.contains("linux-qwen"),
+        "{error}"
+    );
 }
 
 #[tokio::test]

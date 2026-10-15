@@ -29,10 +29,17 @@ fn not_ready(health: &IntrospectResponse, model: Option<&str>) -> Result<Option<
         return Ok(Some(format!("node state={}", health.server_state)));
     }
     if let Some(name) = model {
-        let name = if name.is_empty() {
-            health.default_model.as_str()
-        } else {
-            name
+        let name = match name {
+            // A front door that only routes has no default to fall back on.
+            "" if health.default_model.is_empty() => {
+                let names: Vec<_> = health.models.iter().map(|m| m.name.as_str()).collect();
+                return Err(Status::not_found(format!(
+                    "the server has no local models; set MDMA_MODEL to one of: {}",
+                    names.join(", ")
+                )));
+            }
+            "" => health.default_model.as_str(),
+            name => name,
         };
         let selected = health
             .models
