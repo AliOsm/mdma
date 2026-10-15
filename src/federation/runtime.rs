@@ -129,6 +129,8 @@ pub struct Prepared {
     execution_enabled: bool,
     /// A peer may push models here.
     accepts_installs: bool,
+    /// This node dialing its peers, when its identity may.
+    outbound: Option<outbound::Credentials>,
     integrated: bool,
     client_policy: ClientPolicy,
 }
@@ -207,19 +209,27 @@ impl Prepared {
         )?;
         let local_expires_ms =
             tls::local_server_expiry(&chain, &local, &signer.public_key(), tls::utc_ms()?)?;
-        let polling = if config.poll_catalogs {
-            let expires_ms =
-                tls::local_client_expiry(&chain, &local, &signer.public_key(), tls::utc_ms()?)?
-                    .min(local_expires_ms);
-            Some(polling::Poller::new(outbound::Credentials {
-                store: store.clone(),
-                chain: chain.clone(),
-                key: Arc::new(key.clone_key()),
-                signing_key: signer.public_key(),
-                local_expires_ms: expires_ms,
-            }))
-        } else {
-            None
+        // Dialing peers needs a client-capable identity: polling requires it,
+        // pushing models uses it when present.
+        let outbound =
+            tls::local_client_expiry(&chain, &local, &signer.public_key(), tls::utc_ms()?).map(
+                |expires_ms| outbound::Credentials {
+                    store: store.clone(),
+                    chain: chain.clone(),
+                    key: Arc::new(key.clone_key()),
+                    signing_key: signer.public_key(),
+                    local_expires_ms: expires_ms.min(local_expires_ms),
+                },
+            );
+        let (outbound, polling) = match outbound {
+            Ok(credentials) => (
+                Some(credentials.clone()),
+                config
+                    .poll_catalogs
+                    .then(|| polling::Poller::new(credentials)),
+            ),
+            Err(error) if config.poll_catalogs => return Err(error.into()),
+            Err(_) => (None, None),
         };
         let routing = if config.enable_routing {
             let poller = polling.as_ref().ok_or("routing requires polling")?;
@@ -243,6 +253,7 @@ impl Prepared {
             routing,
             execution_enabled: config.enable_execution,
             accepts_installs,
+            outbound,
             integrated: false,
             client_policy,
         })
@@ -277,6 +288,10 @@ impl Prepared {
             .with_install(service.federation_folder());
         if self.execution_enabled {
             self.service = self.service.with_execution(service.federation_executor());
+        }
+        if let (Some(credentials), Some(models)) = (&self.outbound, service.registry().dir()) {
+            let pusher = super::push::Pusher::new(credentials.clone(), models.to_path_buf());
+            service.set_federation_pusher(pusher);
         }
         let cache = self.polling.as_ref().map(|poller| poller.cache.clone());
         let mut configured = Vec::new();

@@ -359,7 +359,8 @@ in the Mac's budget.
   change, stop the Mac's server, run `mdma-fed routes` again and restart it.
 - **Machines you do not log into**: enroll a peer with `--install 20G
   --installed` and the node may start with an empty models folder; push GGUFs
-  to it with `mdma-fed push`. See
+  to it with `mdma-fed push`, or from a running server with `mdma-client
+  --push`. See
   [pushing models](federation/routing-runtime.md#pushing-models-to-a-peer).
 - **Certificates expire** after 30 days by default (`mdma-fed init --days`, up
   to 397). Renewing is a new `init` and enrolling again.

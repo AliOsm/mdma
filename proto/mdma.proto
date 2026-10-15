@@ -308,6 +308,25 @@ message LeaseStatus {
   string residency = 4;
 }
 
+message PushRequest {
+  // An enrolled federation peer's server id.
+  string peer = 1;
+  // <file>.gguf in this server's models folder; a name, never a path.
+  string file = 2;
+  // Its name on the peer; empty means `file`.
+  string model = 3;
+}
+
+message PushProgress {
+  // Bytes sent so far, of `size`.
+  uint64 sent = 1;
+  uint64 size = 2;
+  // Set on the last message: the model holding the bytes on the peer.
+  string installed = 3;
+  // The peer already held them, so nothing was sent.
+  bool present = 4;
+}
+
 service Mdma {
   rpc Synthesize(SynthesizeRequest) returns (stream SynthesizeResponse);
   rpc Decide(DecideRequest) returns (DecideResponse);
@@ -316,4 +335,7 @@ service Mdma {
   rpc Acquire(AcquireRequest) returns (LeaseStatus);
   rpc Renew(RenewRequest) returns (LeaseStatus);
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
+  // Send a model file to a federation peer that grants installs, reporting
+  // progress. Needs a MDMA_PUSH_SPKI pin; dropping the stream cancels it.
+  rpc Push(PushRequest) returns (stream PushProgress);
 }

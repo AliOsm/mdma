@@ -35,6 +35,7 @@ pub(crate) mod execution;
 pub(crate) mod install;
 pub(crate) mod inventory;
 pub mod profile;
+pub(crate) mod push;
 pub(crate) mod routing;
 pub mod runtime;
 pub mod server_id;

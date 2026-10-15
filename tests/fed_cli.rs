@@ -1,7 +1,7 @@
 //! Federation set up with nothing but mdma-fed: a real executor serves its
 //! signed catalog to the origin, whose routes then pass mdma-serve's startup
-//! checks, and takes models the origin pushes. One daemon runs per machine,
-//! so the origin is not started here.
+//! checks, and takes models the origin pushes. One daemon runs per machine:
+//! where both sides serve, the receiving one runs in this process.
 #[path = "runtime_cli/fixture.rs"]
 mod fixture;
 #[path = "runtime_cli/process.rs"]
@@ -11,7 +11,7 @@ use process::{Process, command, free_port};
 use rustls_pki_types::pem::PemObject;
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 /// One mdma-serve per machine: tests that start one take turns.
@@ -77,9 +77,23 @@ impl Node {
         }
     }
 
+    /// Enrolls the bundle `root/<peer>.json` for control only.
+    fn trust(&self, root: &Path, peer: &str) {
+        ok(&fed(&[
+            "enroll",
+            path(&self.dir),
+            path(&root.join(format!("{peer}.json"))),
+        ]));
+    }
+
     fn serve(&self, certs: &Path, log: &Path) -> Process {
+        self.serve_with(certs, log, &[])
+    }
+
+    fn serve_with(&self, certs: &Path, log: &Path, env: &[(&str, &str)]) -> Process {
         Process(
             command(env!("CARGO_BIN_EXE_mdma-serve"))
+                .envs(env.iter().copied())
                 .env("MDMA_MODELS_DIR", &self.models)
                 .env("MDMA_N_CTX", "64")
                 .env("MDMA_BACKEND", "cpu")
@@ -97,6 +111,43 @@ impl Node {
     }
 }
 
+impl Node {
+    /// This node's federation listener and models, served the way
+    /// mdma-serve serves them, in this process. Runs until the runtime drops.
+    fn serve_in_process(&self, certs: &Path) -> tokio::runtime::Runtime {
+        use mdma::backend::cpu::CpuBackend;
+        use mdma::federation::runtime::{Config, Prepared};
+        use mdma::registry::{Options, Registry};
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (dir, models, client) = (self.dir.clone(), self.models.clone(), self.client);
+        let (ca, chain) = (pem(certs, "ca.pem"), pem(certs, "server.pem"));
+        runtime.block_on(async move {
+            let config = Config::load(&dir.join("runtime.toml")).unwrap();
+            let client_listen = format!("127.0.0.1:{client}").parse().unwrap();
+            let prepared = Prepared::load(config, client_listen, &ca, &chain).unwrap();
+            let options = Options {
+                frozen: true,
+                ..Options::new(64)
+            };
+            let mut registry =
+                Registry::open(Arc::new(CpuBackend), &models, None, options).unwrap();
+            registry.capture_execution_profiles().unwrap();
+            let mut service = mdma::grpc::MdmaService::new(registry, "cpu");
+            service.registry().hash_artifacts(|| false);
+            let executor = rama::rt::Executor::default();
+            let prepared = prepared
+                .with_native_service(&mut service, executor.clone())
+                .unwrap();
+            let listener = prepared.bind(executor.clone()).await.unwrap();
+            tokio::spawn(async move {
+                prepared.serve(listener, executor).await.unwrap();
+                drop(service);
+            });
+        });
+        runtime
+    }
+}
+
 /// Waits until the server's stderr log mentions `line`; returns the log.
 fn logged(log: &Path, line: &str) -> String {
     let deadline = Instant::now() + Duration::from_mins(1);
@@ -108,6 +159,13 @@ fn logged(log: &Path, line: &str) -> String {
         assert!(Instant::now() < deadline, "waiting for {line:?}:\n{text}");
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn pem(certs: &Path, name: &str) -> Vec<rustls_pki_types::CertificateDer<'static>> {
+    rustls_pki_types::CertificateDer::pem_file_iter(certs.join(name))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
 }
 
 /// The client and server certificates both nodes' mdma-serve use.
@@ -187,11 +245,7 @@ fn an_origin_routes_an_executors_model_set_up_with_mdma_fed() {
         enrolled.contains("enrolled origin.fleet.test") && enrolled.contains("runs tiny"),
         "{enrolled}"
     );
-    ok(&fed(&[
-        "enroll",
-        path(&origin.dir),
-        path(&root.path().join("executor.json")),
-    ]));
+    origin.trust(root.path(), "executor");
 
     let executor_log = root.path().join("executor.log");
     let running = executor.serve(&certs, &executor_log);
@@ -209,19 +263,13 @@ fn an_origin_routes_an_executors_model_set_up_with_mdma_fed() {
     // Startup on the origin checks exactly this: routes authorized, polling on.
     let config = mdma::federation::runtime::Config::load(&origin.dir.join("runtime.toml")).unwrap();
     assert!(config.enable_routing && config.poll_catalogs && !config.enable_execution);
-    let pem = |name: &str| {
-        rustls_pki_types::CertificateDer::pem_file_iter(certs.join(name))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-    };
     let client_listen = format!("127.0.0.1:{}", origin.client).parse().unwrap();
     drop(
         mdma::federation::runtime::Prepared::load(
             config,
             client_listen,
-            &pem("ca.pem"),
-            &pem("server.pem"),
+            &pem(&certs, "ca.pem"),
+            &pem(&certs, "server.pem"),
         )
         .unwrap(),
     );
@@ -300,11 +348,7 @@ fn an_empty_executor_takes_the_models_its_peers_push() {
         enrolled.contains("runs every installed model") && enrolled.contains("installs models"),
         "{enrolled}"
     );
-    ok(&fed(&[
-        "enroll",
-        path(&origin.dir),
-        path(&root.path().join("executor.json")),
-    ]));
+    origin.trust(root.path(), "executor");
 
     let log = root.path().join("executor.log");
     let running = executor.serve(&certs, &log);
@@ -373,4 +417,72 @@ fn an_empty_executor_takes_the_models_its_peers_push() {
         "bytes would leave less than the 1099511627776000000 bytes this node keeps free",
     );
     assert_eq!(files(), ["check.gguf", "tiny.gguf"]);
+}
+
+#[test]
+fn a_serving_origin_pushes_a_model_for_a_pinned_client() {
+    let _turn = daemon_turn();
+    let model = fixture::model(8);
+    let root = tempfile::tempdir().unwrap();
+    let certs = certs(root.path());
+    let (origin, executor) = (
+        Node::new(root.path(), "origin", Some(model.path())),
+        Node::new(root.path(), "executor", None),
+    );
+    ok(&fed(&[
+        "enroll",
+        path(&executor.dir),
+        path(&root.path().join("origin.json")),
+        "--install",
+        "0",
+        "--installed",
+    ]));
+    origin.trust(root.path(), "executor");
+    let _executor = executor.serve_in_process(&certs);
+
+    let push = |args: &[&str]| {
+        command(env!("CARGO_BIN_EXE_mdma-client"))
+            .env("MDMA_ADDR", format!("localhost:{}", origin.client))
+            .env("MDMA_TLS_CERT", certs.join("client.pem"))
+            .env("MDMA_TLS_KEY", certs.join("client-key.pem"))
+            .env("MDMA_TLS_CA", certs.join("ca.pem"))
+            .arg("--push")
+            .arg("executor.fleet.test")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let log = root.path().join("origin.log");
+    // Being a client of the origin is not enough to push from it.
+    let running = origin.serve(&certs, &log);
+    logged(&log, "mdma listening on");
+    refused(&push(&["tiny"]), "MDMA_PUSH_SPKI");
+    drop(running);
+
+    let pin = ok(&command(env!("CARGO_BIN_EXE_mdma-certs"))
+        .arg("--spki")
+        .arg(certs.join("client.pem"))
+        .output()
+        .unwrap());
+    let _running = origin.serve_with(&certs, &log, &[("MDMA_PUSH_SPKI", pin.trim())]);
+    logged(&log, "mdma listening on");
+    let pushed = push(&["tiny"]);
+    assert_eq!(ok(&pushed).trim(), "pushed tiny to executor.fleet.test");
+    assert!(
+        String::from_utf8_lossy(&pushed.stderr).contains("mdma-client: sent 0.00 of"),
+        "{pushed:?}"
+    );
+    // Bytes the peer holds are not sent again, under any name.
+    assert_eq!(
+        ok(&push(&["tiny", "copy"])).trim(),
+        "executor.fleet.test already holds these bytes as tiny"
+    );
+    // Only a name from the origin's models folder is pushed, never a path.
+    refused(&push(&["../origin.json"]), "file, without .gguf,");
+    refused(&push(&["missing"]), "missing.gguf");
+    let status = ok(&fed(&["status", path(&executor.dir)]));
+    assert!(
+        status.contains("model    tiny (synthesize) installed by origin.fleet.test"),
+        "{status}"
+    );
 }

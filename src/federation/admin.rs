@@ -8,7 +8,6 @@ use super::{
         self, CaRoot, ControlPermissions, ExecuteExport, InstallGrant, Operation, RouteImport,
         SigningKey, TlsPin, TlsRole, Window,
     },
-    control::{InstallRequest, UploadPart, upload_part},
     routing::Route,
     runtime::{
         Config,
@@ -16,8 +15,10 @@ use super::{
     },
     signing::KeyPairHandle,
     tls,
-    trust::{Action, Disclosure, State, Store},
+    trust::{Disclosure, State, Store},
 };
+
+pub use super::push::Pushed;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rama::error::BoxError;
 use rcgen::{
@@ -78,15 +79,6 @@ pub struct Grants {
     pub install: Option<InstallGrant>,
     /// Sees and runs every model a peer installed here.
     pub installed: bool,
-}
-
-/// What a push left on the peer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Pushed {
-    /// The file went over and is listed under this name.
-    Sent(String),
-    /// The peer already had these bytes, listed under this name.
-    Present(String),
 }
 
 /// Writes a new owner-only file; never replaces one.
@@ -482,83 +474,14 @@ fn failed(peer: &str, what: &str, cause: BoxError) -> BoxError {
 }
 
 /// Pushes the GGUF at `file` to `peer` as `name`, unless the peer already
-/// holds these bytes. The peer decides with its install grant and disk floor.
+/// holds these bytes.
 pub async fn push(dir: &Path, peer: &str, file: &Path, name: &str) -> Result<Pushed, BoxError> {
-    config::validate_model(name).map_err(|e| format!("{name:?}: {e}"))?;
     let (_, config) = load(dir)?;
-    let path = file.to_path_buf();
-    let (artifact_id, size) = tokio::task::spawn_blocking(move || -> Result<_, BoxError> {
-        let mut file =
-            std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let (sha, stamp) = crate::cache::fingerprint(&mut file)?;
-        Ok((format!("sha256:{sha}"), stamp.len()))
-    })
-    .await??;
     let store = Arc::new(open_store(&config)?);
     let credentials = credentials(&config, store)?;
-    let connected = credentials
-        .connect(peer, Action::Push, rama::rt::Executor::default())
+    super::push::push(&credentials, peer, file, name, |_, _| {})
         .await
-        .map_err(|cause| failed(peer, "install", cause))?;
-    let request = InstallRequest {
-        origin: config.server_id,
-        destination: peer.into(),
-        model: name.into(),
-        artifact_id,
-        size,
-    };
-    let client = connected.client;
-    let file = file.to_path_buf();
-    let exchange = async move {
-        let plan = client.install(request.clone()).await?.into_inner();
-        if !plan.installed.is_empty() {
-            return Ok(Pushed::Present(plan.installed));
-        }
-        let (parts, stream) = tokio::sync::mpsc::channel(16);
-        let offset = plan.offset;
-        let reader = tokio::task::spawn_blocking(move || send_file(&file, request, offset, &parts));
-        let response = client
-            .upload(tokio_stream::wrappers::ReceiverStream::new(stream))
-            .await;
-        reader.await??;
-        Ok::<_, BoxError>(Pushed::Sent(response?.into_inner().installed))
-    };
-    tokio::select! {
-        result = exchange => result.map_err(|cause| failed(peer, "install", cause)),
-        () = connected.drive => Err(format!("{peer} closed the connection during the push").into()),
-        () = tokio::time::sleep_until(connected.binding.deadline().into()) =>
-            Err(format!("{peer}'s credentials expired during the push").into()),
-    }
-}
-
-/// Streams `request` and then the file from `offset`; fails if the file
-/// changes while it is read.
-fn send_file(
-    path: &Path,
-    request: InstallRequest,
-    offset: u64,
-    parts: &tokio::sync::mpsc::Sender<UploadPart>,
-) -> Result<(), BoxError> {
-    use std::io::{Read, Seek};
-    let send = |part| {
-        parts
-            .blocking_send(UploadPart { part: Some(part) })
-            .map_err(|_| BoxError::from("the peer stopped the upload"))
-    };
-    let mut file = std::fs::File::open(path)?;
-    let stamp = crate::cache::Stamp::read(&file.metadata()?)?;
-    file.seek(std::io::SeekFrom::Start(offset))?;
-    send(upload_part::Part::Request(request))?;
-    let mut chunk = vec![0; super::install::CHUNK_BYTES];
-    loop {
-        let n = file.read(&mut chunk)?;
-        if n == 0 {
-            break;
-        }
-        send(upload_part::Part::Data(chunk[..n].to_vec()))?;
-    }
-    stamp.check(file.metadata()?)?;
-    Ok(())
+        .map_err(|cause| failed(peer, "install", cause))
 }
 
 pub(crate) fn apply_routes(

@@ -125,6 +125,7 @@ where
             .with_shutdown_guard(guard.clone_weak())
             .with_memory_budget(memory)
             .with_operators(std::mem::take(&mut config.operators))
+            .with_pushers(std::mem::take(&mut config.pushers))
             .with_max_output_tokens(config.max_output_tokens)
             .with_host(host);
         if federation.is_some() {

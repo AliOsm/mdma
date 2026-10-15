@@ -190,15 +190,28 @@ nobody anything; every peer with `--installed` sees and runs every installed
 model, whoever pushed it, so another origin keeps the same view. A node whose
 peers may install may start with no models.
 
-From the pushing node, also stopped:
+From the pushing node while it serves, with a client whose pin is in that
+server's `MDMA_PUSH_SPKI`, for a file in its models folder:
+
+```sh
+mdma-client --push pathfinder.fleet Qwen3-8B-Q4_K_M qwen3-8b
+```
+
+or, with that node stopped, for any file:
 
 ```sh
 mdma-fed push ~/.mdma/fed ~/models/Qwen3-8B-Q4_K_M.gguf --peer pathfinder.fleet --name qwen3-8b
+```
+
+Then, with the pushing node stopped, route what it sent:
+
+```sh
 mdma-fed routes ~/.mdma/fed --peer pathfinder.fleet --client-cert certs/client.pem
 ```
 
-`push` hashes the file and sends its name, size and digest first. The
-receiver answers from everything it holds:
+A push hashes the file and sends its name, size and digest first. One runs at
+a time per server; `mdma-client` prints progress and stops the push when it
+is interrupted. The receiver answers from everything it holds:
 
 - **Already installed** under any name: nothing is sent; `push` prints the name.
 - **One of its own models** has those bytes: it links the new name to that

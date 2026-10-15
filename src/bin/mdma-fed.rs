@@ -2,7 +2,7 @@
 //! routes to their models and models pushed to them. Changes need `mdma-serve`
 //! stopped.
 use mdma::decision::Contract;
-use mdma::federation::admin::{self, Bundle, Grants, Pushed};
+use mdma::federation::admin::{self, Bundle, Grants};
 use mdma::federation::config::{ExecuteExport, InstallGrant, Operation};
 use mdma::registry::Source;
 use std::path::{Path, PathBuf};
@@ -322,15 +322,18 @@ fn run(command: Command) -> Result<()> {
                         local_network_hint();
                     }
                 })?;
-            match pushed {
-                Pushed::Sent(model) => println!(
-                    "pushed {model} to {} in {:.1}s",
+            if pushed.present {
+                println!(
+                    "{} already holds these bytes as {}",
+                    args.peer, pushed.model
+                );
+            } else {
+                println!(
+                    "pushed {} to {} in {:.1}s",
+                    pushed.model,
                     args.peer,
                     started.elapsed().as_secs_f64()
-                ),
-                Pushed::Present(model) => {
-                    println!("{} already holds these bytes as {model}", args.peer);
-                }
+                );
             }
         }
         Command::Status(args) => print!("{}", admin::status(&args.dir)?),

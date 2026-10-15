@@ -12,8 +12,10 @@
 //   MDMA_RPC_TIMEOUT_MS            optional 1..300000; required for federation routes
 // Usage: mdma-client [prompt words...]
 //        mdma-client --decide request.json   ({"state": ..., "questions": {...}} to a Laya model)
+//        mdma-client --push PEER FILE [MODEL] (FILE.gguf from the server's models folder to a
+//                                              peer, as MODEL; needs a MDMA_PUSH_SPKI pin)
 use mdma::grpc::client::mtls_client;
-use mdma::grpc::{DecideRequest, IntrospectRequest, SynthesizeRequest};
+use mdma::grpc::{DecideRequest, IntrospectRequest, PushRequest, SynthesizeRequest};
 use mdma::registry::parameters_label;
 use rama::error::BoxError;
 use std::io::Write;
@@ -25,6 +27,41 @@ mod deadline;
 mod readiness;
 #[path = "mdma-client/sampling.rs"]
 mod sampling;
+
+/// Has the server send FILE.gguf to `peer`, reporting progress on stderr.
+async fn push(
+    client: &mdma::grpc::client::Client,
+    peer: &str,
+    file: &str,
+    model: String,
+) -> Result<(), BoxError> {
+    let mut progress = client
+        .push(PushRequest {
+            peer: peer.into(),
+            file: file.into(),
+            model,
+        })
+        .await?
+        .into_inner();
+    while let Some(report) = progress.next().await {
+        let report = report?;
+        if !report.installed.is_empty() {
+            if report.present {
+                println!("{peer} already holds these bytes as {}", report.installed);
+            } else {
+                println!("pushed {} to {peer}", report.installed);
+            }
+            return Ok(());
+        }
+        let gib = |bytes: u64| bytes as f64 / f64::from(1u32 << 30);
+        eprintln!(
+            "mdma-client: sent {:.2} of {:.2} GiB",
+            gib(report.sent),
+            gib(report.size)
+        );
+    }
+    Err("the server ended the push without an outcome".into())
+}
 
 fn env(name: &str) -> Result<String, BoxError> {
     std::env::var(name).map_err(|_| format!("missing required env var {name}").into())
@@ -57,6 +94,14 @@ async fn main() -> Result<(), BoxError> {
     )?;
     let model = std::env::var("MDMA_MODEL").unwrap_or_default();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|flag| flag == "--push") {
+        let (peer, file, model) = match &args[1..] {
+            [peer, file] => (peer, file, String::new()),
+            [peer, file, model] => (peer, file, model.clone()),
+            _ => return Err("usage: mdma-client --push PEER FILE [MODEL]".into()),
+        };
+        return push(&client, peer, file, model).await;
+    }
     let decision = match args.as_slice() {
         [flag, path] if flag == "--decide" => {
             let request: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path)?)?;

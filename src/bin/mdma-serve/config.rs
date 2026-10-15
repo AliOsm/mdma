@@ -36,6 +36,8 @@ pub(super) struct Config {
     pub federation_config: Option<String>,
     /// MDMA_OPERATOR_SPKI pins.
     pub operators: Vec<String>,
+    /// MDMA_PUSH_SPKI pins.
+    pub pushers: Vec<String>,
     /// MDMA_NODE_NAME, or the short host name.
     pub node: String,
     pub backend: String,
@@ -233,17 +235,21 @@ impl Config {
             Err(VarError::NotPresent) => None,
             Err(error) => return Err(format!("MDMA_FEDERATION_CONFIG: {error}").into()),
         };
-        let operators = match env("MDMA_OPERATOR_SPKI") {
-            Ok(list) => list.split(',').map(str::trim).filter(|pin| !pin.is_empty()).map(|pin| {
-                let valid = pin.strip_prefix("sha256:")
-                    .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
-                if valid { Ok(pin.to_owned()) } else {
-                    Err(format!("MDMA_OPERATOR_SPKI: {pin:?} is not a sha256:<64 lowercase hex> pin (see `mdma-certs --spki`)"))
-                }
-            }).collect::<Result<Vec<_>, _>>()?,
-            Err(VarError::NotPresent) => Vec::new(),
-            Err(e) => return Err(format!("MDMA_OPERATOR_SPKI: {e}").into()),
+        let pins = |name: &str| -> Result<Vec<String>, BoxError> {
+            match env(name) {
+                Ok(list) => Ok(list.split(',').map(str::trim).filter(|pin| !pin.is_empty()).map(|pin| {
+                    let valid = pin.strip_prefix("sha256:")
+                        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+                    if valid { Ok(pin.to_owned()) } else {
+                        Err(format!("{name}: {pin:?} is not a sha256:<64 lowercase hex> pin (see `mdma-certs --spki`)"))
+                    }
+                }).collect::<Result<Vec<_>, _>>()?),
+                Err(VarError::NotPresent) => Ok(Vec::new()),
+                Err(e) => Err(format!("{name}: {e}").into()),
+            }
         };
+        let operators = pins("MDMA_OPERATOR_SPKI")?;
+        let pushers = pins("MDMA_PUSH_SPKI")?;
         let node = match env("MDMA_NODE_NAME") {
             Ok(name) if name.trim().is_empty() => {
                 return Err("MDMA_NODE_NAME must not be empty".into());
@@ -273,6 +279,7 @@ impl Config {
             tls_ca: required("MDMA_TLS_CA")?,
             federation_config,
             operators,
+            pushers,
             node,
             backend,
             rocm_f32,

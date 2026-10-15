@@ -30,6 +30,12 @@ pub struct CancelOnDrop<S> {
     cancel: CancellationToken,
 }
 
+impl<S> CancelOnDrop<S> {
+    pub(crate) const fn new(inner: S, cancel: CancellationToken) -> Self {
+        Self { inner, cancel }
+    }
+}
+
 impl<S> Drop for CancelOnDrop<S> {
     fn drop(&mut self) {
         self.cancel.cancel();

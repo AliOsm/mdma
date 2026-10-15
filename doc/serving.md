@@ -203,6 +203,7 @@ service Mdma {
   rpc Decide(DecideRequest)         returns (DecideResponse);             // decision models (Laya, MiniCheck), JSON in and out
   rpc Introspect(IntrospectRequest) returns (IntrospectResponse);         // server state, power, and one ModelStatus per model
   rpc Watch(WatchRequest)           returns (stream ServerSnapshot);      // status, memory and (operators) federation, on change
+  rpc Push(PushRequest)             returns (stream PushProgress);        // (pinned clients) a models-folder file to a federation peer
 }
 ```
 
@@ -265,3 +266,11 @@ accelerator, with live figures: RAM free of total, the accelerator's memory
 free of total, and the free space of the disk holding the models folder (after
 following symlinks, so a folder on another disk reports that disk). Upstream and federated models carry the host they run on. [mdma-web](web.md) is a browser UI
 built on these.
+
+`Push` has a federation server send `<file>.gguf` from its models folder to a
+peer that grants installs, while it keeps serving; it streams bytes sent and
+the outcome, and dropping the stream cancels it. Only clients whose pins are
+in `MDMA_PUSH_SPKI` may push. It is a separate list from `MDMA_OPERATOR_SPKI`,
+so a gateway that shows operators the topology cannot ship files to peers for
+its own users. `mdma-client --push PEER FILE [MODEL]` calls it. See
+[pushing models](federation/routing-runtime.md#pushing-models-to-a-peer).
