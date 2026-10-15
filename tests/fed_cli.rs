@@ -77,13 +77,17 @@ impl Node {
         }
     }
 
+    /// Enrolls the bundle `root/<peer>.json` with `grants`; what enroll printed.
+    fn enroll(&self, root: &Path, peer: &str, grants: &[&str]) -> String {
+        let bundle = root.join(format!("{peer}.json"));
+        let mut args = vec!["enroll", path(&self.dir), path(&bundle)];
+        args.extend_from_slice(grants);
+        ok(&fed(&args))
+    }
+
     /// Enrolls the bundle `root/<peer>.json` for control only.
     fn trust(&self, root: &Path, peer: &str) {
-        ok(&fed(&[
-            "enroll",
-            path(&self.dir),
-            path(&root.join(format!("{peer}.json"))),
-        ]));
+        self.enroll(root, peer, &[]);
     }
 
     fn serve(&self, certs: &Path, log: &Path) -> Process {
@@ -114,14 +118,14 @@ impl Node {
 impl Node {
     /// This node's federation listener and models, served the way
     /// mdma-serve serves them, in this process. Runs until the runtime drops.
-    fn serve_in_process(&self, certs: &Path) -> tokio::runtime::Runtime {
+    fn serve_in_process(&self, certs: &Path) -> InProcess {
         use mdma::backend::cpu::CpuBackend;
         use mdma::federation::runtime::{Config, Prepared};
         use mdma::registry::{Options, Registry};
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (dir, models, client) = (self.dir.clone(), self.models.clone(), self.client);
         let (ca, chain) = (pem(certs, "ca.pem"), pem(certs, "server.pem"));
-        runtime.block_on(async move {
+        let registry = runtime.block_on(async move {
             let config = Config::load(&dir.join("runtime.toml")).unwrap();
             let client_listen = format!("127.0.0.1:{client}").parse().unwrap();
             let prepared = Prepared::load(config, client_listen, &ca, &chain).unwrap();
@@ -134,6 +138,7 @@ impl Node {
             registry.capture_execution_profiles().unwrap();
             let mut service = mdma::grpc::MdmaService::new(registry, "cpu");
             service.registry().hash_artifacts(|| false);
+            let registry = service.registry().clone();
             let executor = rama::rt::Executor::default();
             let prepared = prepared
                 .with_native_service(&mut service, executor.clone())
@@ -143,8 +148,29 @@ impl Node {
                 prepared.serve(listener, executor).await.unwrap();
                 drop(service);
             });
+            registry
         });
-        runtime
+        InProcess {
+            _runtime: runtime,
+            registry,
+        }
+    }
+}
+
+/// A node served in this process, until dropped.
+struct InProcess {
+    _runtime: tokio::runtime::Runtime,
+    registry: Arc<mdma::registry::Registry<mdma::backend::cpu::CpuBackend>>,
+}
+
+impl InProcess {
+    /// Each model's phase and last load error, for failure messages.
+    fn models(&self) -> String {
+        self.registry
+            .entries()
+            .map(|entry| format!("{} {:?} {:?}", entry.name, entry.phase, entry.error))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
@@ -194,6 +220,16 @@ fn routes(origin: &Node, certs: &Path) -> Output {
     ])
 }
 
+/// The names in `dir`, sorted.
+fn files(dir: &Path) -> Vec<String> {
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    files
+}
+
 /// Asserts `output` failed, saying `why`.
 fn refused(output: &Output, why: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -232,15 +268,11 @@ fn an_origin_routes_an_executors_model_set_up_with_mdma_fed() {
         Node::new(root.path(), "executor", Some(model.path())),
     );
 
-    let enrolled = ok(&fed(&[
-        "enroll",
-        path(&executor.dir),
-        path(&root.path().join("origin.json")),
-        "--execute",
-        "all",
-        "--models",
-        path(&executor.models),
-    ]));
+    let enrolled = executor.enroll(
+        root.path(),
+        "origin",
+        &["--execute", "all", "--models", path(&executor.models)],
+    );
     assert!(
         enrolled.contains("enrolled origin.fleet.test") && enrolled.contains("runs tiny"),
         "{enrolled}"
@@ -333,16 +365,8 @@ fn an_empty_executor_takes_the_models_its_peers_push() {
         Node::new(root.path(), "origin", None),
         Node::new(root.path(), "executor", None),
     );
-    let enroll = |floor: &str| {
-        ok(&fed(&[
-            "enroll",
-            path(&executor.dir),
-            path(&root.path().join("origin.json")),
-            "--install",
-            floor,
-            "--installed",
-        ]))
-    };
+    let enroll =
+        |floor: &str| executor.enroll(root.path(), "origin", &["--install", floor, "--installed"]);
     let enrolled = enroll("0");
     assert!(
         enrolled.contains("runs every installed model") && enrolled.contains("installs models"),
@@ -379,14 +403,7 @@ fn an_empty_executor_takes_the_models_its_peers_push() {
     let junk = root.path().join("junk.gguf");
     std::fs::write(&junk, b"not a model").unwrap();
     refused(&push(&junk, "junk"), "not a model this node serves");
-    let files = || {
-        let mut files: Vec<_> = std::fs::read_dir(&executor.models)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .collect();
-        files.sort();
-        files
-    };
+    let files = || files(&executor.models);
     assert_eq!(files(), ["tiny.gguf"]);
     // A decision model is installed as one.
     ok(&push(check.path(), "check"));
@@ -429,14 +446,7 @@ fn a_serving_origin_pushes_a_model_for_a_pinned_client() {
         Node::new(root.path(), "origin", Some(model.path())),
         Node::new(root.path(), "executor", None),
     );
-    ok(&fed(&[
-        "enroll",
-        path(&executor.dir),
-        path(&root.path().join("origin.json")),
-        "--install",
-        "0",
-        "--installed",
-    ]));
+    executor.enroll(root.path(), "origin", &["--install", "0", "--installed"]);
     origin.trust(root.path(), "executor");
     let _executor = executor.serve_in_process(&certs);
 
@@ -456,15 +466,11 @@ fn a_serving_origin_pushes_a_model_for_a_pinned_client() {
     // Being a client of the origin is not enough to push from it.
     let running = origin.serve(&certs, &log);
     logged(&log, "mdma listening on");
-    refused(&push(&["tiny"]), "MDMA_PUSH_SPKI");
+    refused(&push(&["tiny"]), "MDMA_ADMIN_SPKI");
     drop(running);
 
-    let pin = ok(&command(env!("CARGO_BIN_EXE_mdma-certs"))
-        .arg("--spki")
-        .arg(certs.join("client.pem"))
-        .output()
-        .unwrap());
-    let _running = origin.serve_with(&certs, &log, &[("MDMA_PUSH_SPKI", pin.trim())]);
+    let pin = pin(&certs);
+    let _running = origin.serve_with(&certs, &log, &[("MDMA_ADMIN_SPKI", pin.as_str())]);
     logged(&log, "mdma listening on");
     let pushed = push(&["tiny"]);
     assert_eq!(ok(&pushed).trim(), "pushed tiny to executor.fleet.test");
@@ -484,5 +490,281 @@ fn a_serving_origin_pushes_a_model_for_a_pinned_client() {
     assert!(
         status.contains("model    tiny (synthesize) installed by origin.fleet.test"),
         "{status}"
+    );
+}
+
+/// mdma-client against `origin` as the test client, with extra env.
+fn client(
+    origin: &Node,
+    certs: &Path,
+    env: &[(&str, &str)],
+    args: &[&str],
+) -> std::process::Command {
+    let mut command = command(env!("CARGO_BIN_EXE_mdma-client"));
+    command
+        .env("MDMA_ADDR", format!("localhost:{}", origin.client))
+        .env("MDMA_TLS_CERT", certs.join("client.pem"))
+        .env("MDMA_TLS_KEY", certs.join("client-key.pem"))
+        .env("MDMA_TLS_CA", certs.join("ca.pem"))
+        .envs(env.iter().copied())
+        .args(args);
+    command
+}
+
+/// The test client's pin, as MDMA_ADMIN_SPKI takes it.
+fn pin(certs: &Path) -> String {
+    ok(&command(env!("CARGO_BIN_EXE_mdma-certs"))
+        .arg("--spki")
+        .arg(certs.join("client.pem"))
+        .output()
+        .unwrap())
+    .trim()
+    .to_owned()
+}
+
+#[test]
+fn a_serving_origin_imports_routes_without_a_restart() {
+    let _turn = daemon_turn();
+    let (tiny, other) = (fixture::model(8), fixture::model(16));
+    let root = tempfile::tempdir().unwrap();
+    let certs = certs(root.path());
+    let (origin, executor) = (
+        Node::new(root.path(), "origin", None),
+        Node::new(root.path(), "executor", Some(tiny.path())),
+    );
+    std::fs::copy(other.path(), origin.models.join("other.gguf")).unwrap();
+    executor.enroll(
+        root.path(),
+        "origin",
+        &[
+            "--execute",
+            "all",
+            "--models",
+            path(&executor.models),
+            "--install",
+            "0",
+            "--installed",
+        ],
+    );
+    origin.trust(root.path(), "executor");
+    let executor_node = executor.serve_in_process(&certs);
+    let log = root.path().join("origin.log");
+    // Routing starts the way it always has, with the origin stopped.
+    let first = eventually("routes", &log, || routes(&origin, &certs));
+    assert_eq!(first.trim(), "executor-tiny -> executor.fleet.test tiny");
+
+    let pin = pin(&certs);
+    let admin = [("MDMA_ADMIN_SPKI", pin.as_str())];
+    let running = origin.serve_with(&certs, &log, &admin);
+    logged(&log, "mdma listening on");
+    let run = |args: &[&str]| client(&origin, &certs, &[], args).output().unwrap();
+    assert_eq!(
+        ok(&run(&["--push", "executor.fleet.test", "other"])).trim(),
+        "pushed other to executor.fleet.test"
+    );
+    let routed =
+        "executor-tiny -> executor.fleet.test tiny\nexecutor-other -> executor.fleet.test other";
+    assert_eq!(
+        ok(&run(&["--routes", "executor.fleet.test"])).trim(),
+        routed
+    );
+    let generate = || {
+        client(
+            &origin,
+            &certs,
+            &[
+                ("MDMA_MODEL", "executor-other"),
+                ("MDMA_RPC_TIMEOUT_MS", "60000"),
+                ("MDMA_MAX_TOKENS", "4"),
+                ("MDMA_READY_TIMEOUT_SECS", "30"),
+            ],
+            &["hello"],
+        )
+        .output()
+        .unwrap()
+    };
+    // The new route serves at once, from the running origin.
+    let generated = generate();
+    assert!(
+        generated.status.success(),
+        "{}\nexecutor: {}",
+        String::from_utf8_lossy(&generated.stderr),
+        executor_node.models()
+    );
+    let status = ok(&fed(&["status", path(&origin.dir)]));
+    assert!(
+        status.contains(
+            "route    executor-other -> executor.fleet.test other (synthesize, 1 client(s))"
+        ),
+        "{status}"
+    );
+
+    // What the running origin imported is what it starts with; a route
+    // lists once its peer's catalog is polled, just after start.
+    drop(running);
+    let _restarted = origin.serve_with(&certs, &log, &admin);
+    logged(&log, "mdma listening on");
+    eventually("the imported route after a restart", &log, generate);
+}
+
+#[test]
+fn an_interrupted_push_leaves_nothing_behind() {
+    use std::io::BufRead;
+    let _turn = daemon_turn();
+    let tiny = fixture::model(8);
+    let root = tempfile::tempdir().unwrap();
+    let certs = certs(root.path());
+    let (origin, executor) = (
+        Node::new(root.path(), "origin", Some(tiny.path())),
+        Node::new(root.path(), "executor", None),
+    );
+    // Long enough to stop halfway; sparse, so it costs no disk to send.
+    let size = 1u64 << 30;
+    std::fs::File::create(origin.models.join("big.gguf"))
+        .unwrap()
+        .set_len(size)
+        .unwrap();
+    executor.enroll(root.path(), "origin", &["--install", "0", "--installed"]);
+    origin.trust(root.path(), "executor");
+    let _executor = executor.serve_in_process(&certs);
+    let log = root.path().join("origin.log");
+    let pin = pin(&certs);
+    let _running = origin.serve_with(&certs, &log, &[("MDMA_ADMIN_SPKI", pin.as_str())]);
+    logged(&log, "mdma listening on");
+
+    let mut push = client(
+        &origin,
+        &certs,
+        &[],
+        &["--push", "executor.fleet.test", "big"],
+    )
+    .stderr(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .spawn()
+    .unwrap();
+    let progress = std::io::BufReader::new(push.stderr.take().unwrap());
+    let mut midway = None;
+    for line in progress.lines() {
+        let line = line.unwrap();
+        if let Some(sent) = line.strip_prefix("mdma-client: sent ")
+            && !sent.starts_with("0.00 ")
+        {
+            midway = Some(line);
+            break;
+        }
+    }
+    push.kill().unwrap();
+    push.wait().unwrap();
+    let midway = midway.expect("the push reported progress");
+    assert!(!midway.contains("sent 1.00 of"), "{midway}");
+
+    // The receiver drops what it took; neither side holds a turn.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let left = files(&executor.models);
+        if left.is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "left behind: {left:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let next = client(
+        &origin,
+        &certs,
+        &[],
+        &["--push", "executor.fleet.test", "tiny"],
+    )
+    .output()
+    .unwrap();
+    assert_eq!(ok(&next).trim(), "pushed tiny to executor.fleet.test");
+}
+
+/// A real model end to end: `MDMA_TEST_PUSH_MODEL=/path/model.gguf`, pushed
+/// from a serving origin, routed live and run through it.
+#[test]
+#[ignore = "needs a multi-GB GGUF in MDMA_TEST_PUSH_MODEL"]
+fn a_full_size_model_pushes_routes_and_runs() {
+    let _turn = daemon_turn();
+    let big = PathBuf::from(std::env::var("MDMA_TEST_PUSH_MODEL").unwrap());
+    let size = std::fs::metadata(&big).unwrap().len();
+    let tiny = fixture::model(8);
+    let root = tempfile::tempdir().unwrap();
+    let certs = certs(root.path());
+    let (origin, executor) = (
+        Node::new(root.path(), "origin", None),
+        Node::new(root.path(), "executor", Some(tiny.path())),
+    );
+    std::os::unix::fs::symlink(&big, origin.models.join("big.gguf")).unwrap();
+    executor.enroll(
+        root.path(),
+        "origin",
+        &[
+            "--execute",
+            "all",
+            "--models",
+            path(&executor.models),
+            "--install",
+            "0",
+            "--installed",
+        ],
+    );
+    origin.trust(root.path(), "executor");
+    let executor_node = executor.serve_in_process(&certs);
+    let log = root.path().join("origin.log");
+    eventually("routes", &log, || routes(&origin, &certs));
+    let pin = pin(&certs);
+    let _running = origin.serve_with(&certs, &log, &[("MDMA_ADMIN_SPKI", pin.as_str())]);
+    logged(&log, "mdma listening on");
+
+    let started = Instant::now();
+    let pushed = client(
+        &origin,
+        &certs,
+        &[],
+        &["--push", "executor.fleet.test", "big"],
+    )
+    .output()
+    .unwrap();
+    let took = started.elapsed();
+    assert_eq!(ok(&pushed).trim(), "pushed big to executor.fleet.test");
+    eprintln!(
+        "pushed {:.2} GiB in {:.1}s ({:.0} MiB/s, hashing included)",
+        size as f64 / f64::from(1u32 << 30),
+        took.as_secs_f64(),
+        size as f64 / f64::from(1u32 << 20) / took.as_secs_f64()
+    );
+    let imported = ok(
+        &client(&origin, &certs, &[], &["--routes", "executor.fleet.test"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        imported.contains("executor-big -> executor.fleet.test big"),
+        "{imported}"
+    );
+    let started = Instant::now();
+    let generated = client(
+        &origin,
+        &certs,
+        &[
+            ("MDMA_MODEL", "executor-big"),
+            ("MDMA_RPC_TIMEOUT_MS", "300000"),
+            ("MDMA_MAX_TOKENS", "8"),
+            ("MDMA_READY_TIMEOUT_SECS", "60"),
+        ],
+        &["The capital of France is"],
+    )
+    .output()
+    .unwrap();
+    assert!(
+        generated.status.success(),
+        "{}\nexecutor: {}",
+        String::from_utf8_lossy(&generated.stderr),
+        executor_node.models()
+    );
+    eprintln!(
+        "routed reply in {:.1}s, load included: {:?}",
+        started.elapsed().as_secs_f64(),
+        String::from_utf8_lossy(&generated.stdout).trim()
     );
 }

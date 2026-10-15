@@ -2,7 +2,7 @@
 use super::outbound::Credentials;
 use crate::federation::{
     catalog_cache::Cache,
-    trust::{Snapshot, State},
+    trust::{Snapshot, State, Verification},
 };
 use rama::{
     error::BoxError,
@@ -71,6 +71,13 @@ fn synchronize(
     Ok(())
 }
 
+fn verifications(snapshot: &Snapshot) -> BTreeMap<String, Verification> {
+    snapshot
+        .records()
+        .map(|record| (record.policy.server_id.clone(), record.verification()))
+        .collect()
+}
+
 fn due_peers(
     schedule: &mut BTreeMap<String, Schedule>,
     now: Instant,
@@ -114,11 +121,9 @@ impl Poller {
     pub async fn run(self, executor: Executor) -> Result<(), BoxError> {
         let mut changes = self.credentials.store.subscribe();
         let mut schedule = BTreeMap::new();
-        synchronize(
-            &mut schedule,
-            &self.credentials.store.snapshot()?,
-            Instant::now(),
-        )?;
+        let first = self.credentials.store.snapshot()?;
+        let mut verified = verifications(&first);
+        synchronize(&mut schedule, &first, Instant::now())?;
         let mut pending: FuturesUnordered<BoxFuture<'static, (String, bool)>> =
             FuturesUnordered::new();
         let stopping = async {
@@ -145,6 +150,7 @@ impl Poller {
                     let category = result.as_ref().err().map_or("none", |error| {
                         match error.downcast_ref::<crate::federation::catalog_cache::Error>() {
                             Some(crate::federation::catalog_cache::Error::Poll(reason)) => *reason,
+                            Some(crate::federation::catalog_cache::Error::Busy) => "busy",
                             Some(crate::federation::catalog_cache::Error::Trust(_)) => "trust_denied",
                             Some(crate::federation::catalog_cache::Error::Tls(_)) => "tls_binding",
                             Some(crate::federation::catalog_cache::Error::Catalog(_)) => "catalog_invalid",
@@ -177,11 +183,25 @@ impl Poller {
                 () = &mut stopping => return Ok(()),
                 changed = changes.changed() => {
                     changed.map_err(|_| "federation trust notifications closed")?;
-                    // Cancel all IO/challenges and remove cached metadata.
+                    let snapshot = self.credentials.store.snapshot()?;
+                    let now = Instant::now();
+                    // Polls begun under the old trust cannot publish: start
+                    // them over soon rather than back off after a failure.
                     pending.clear();
-                    self.cache.invalidate_all()?;
-                    schedule.clear();
-                    synchronize(&mut schedule, &self.credentials.store.snapshot()?, Instant::now())?;
+                    for entry in schedule.values_mut().filter(|entry| entry.running) {
+                        *entry = Schedule::initial(now)?;
+                    }
+                    // A peer whose state or credentials changed loses its
+                    // catalog at once; grant, route and consent edits keep it.
+                    let current = verifications(&snapshot);
+                    for (id, before) in &verified {
+                        if current.get(id) != Some(before) {
+                            self.cache.invalidate(id)?;
+                            schedule.remove(id);
+                        }
+                    }
+                    verified = current;
+                    synchronize(&mut schedule, &snapshot, now)?;
                 }
                 Some((id, success)) = pending.next(), if !pending.is_empty() => {
                     if let Some(entry) = schedule.get_mut(&id) {

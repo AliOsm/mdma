@@ -5,7 +5,7 @@ use super::catalog::{self, CatalogBody, SignedCatalogEnvelope, VerifyContext};
 use super::config::TlsRole;
 use super::control::SignedCatalog;
 use super::tls::Binding;
-use super::trust::{Action, Store};
+use super::trust::{Action, Store, Verification};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,6 +16,9 @@ pub const POLL_TIMEOUT: Duration = Duration::from_secs(2);
 pub enum Error {
     #[error("catalog poll denied: {0}")]
     Poll(&'static str),
+    /// Another poll of this peer has not finished; it ends within POLL_TIMEOUT.
+    #[error("a catalog poll is already outstanding")]
+    Busy,
     #[error(transparent)]
     Trust(#[from] super::trust::Error),
     #[error(transparent)]
@@ -28,7 +31,7 @@ pub enum Error {
 struct Cached {
     body: CatalogBody,
     key_id: String,
-    generation: u64,
+    verification: Verification,
     deadline: Instant,
     expires_ms: u64,
 }
@@ -50,7 +53,9 @@ pub struct Poll {
     peers: Arc<Mutex<BTreeMap<String, Entry>>>,
     binding: Binding,
     nonce: [u8; 32],
+    /// The poll runs under one trust generation, start to publication.
     generation: u64,
+    verification: Verification,
     deadline: Instant,
 }
 
@@ -101,7 +106,7 @@ impl Cache {
             .as_ref()
             .is_some_and(|(_, deadline)| now < *deadline)
         {
-            return Err(Error::Poll("a catalog poll is already outstanding"));
+            return Err(Error::Busy);
         }
         let mut nonce = [0; 32];
         aws_lc_rs::rand::fill(&mut nonce).map_err(|_| Error::Poll("nonce generation failed"))?;
@@ -110,17 +115,32 @@ impl Cache {
             .min(operation_deadline);
         entry.outstanding = Some((nonce, deadline));
         entry.latest_challenge = Some(nonce);
+        let verification = snapshot
+            .peer(binding.server_id())
+            .ok_or(Error::Poll("peer disappeared"))?
+            .verification();
         Ok(Poll {
             peers: self.peers.clone(),
             binding: binding.clone(),
             nonce,
             generation: snapshot.generation,
+            verification,
             deadline,
         })
     }
 
-    /// Cancel outstanding challenges and withdraw snapshots on runtime trust
-    /// notifications. Readers still recheck current authorization independently.
+    /// Cancel the peer's outstanding challenge and withdraw its snapshot, on
+    /// a trust change to its state or credentials. Readers still recheck
+    /// current authorization independently.
+    pub(crate) fn invalidate(&self, peer_id: &str) -> Result<(), Error> {
+        self.peers
+            .lock()
+            .map_err(|_| Error::Poll("cache lock poisoned"))?
+            .remove(peer_id);
+        Ok(())
+    }
+
+    /// Withdraw every snapshot, when polling stops.
     pub(crate) fn invalidate_all(&self) -> Result<(), Error> {
         self.peers
             .lock()
@@ -129,7 +149,7 @@ impl Cache {
         Ok(())
     }
 
-    /// Recheck state, generation, signer and both clocks before every use.
+    /// Recheck state, credentials, signer and both clocks before every use.
     /// Import/disclosure and model/digest grants are an additional routing gate.
     pub fn snapshot(
         &self,
@@ -149,7 +169,10 @@ impl Cache {
         let Some(cached) = &entry.cached else {
             return Ok(None);
         };
-        if cached.generation != snapshot.generation
+        let current = snapshot
+            .peer(peer_id)
+            .map(super::trust::Record::verification);
+        if current.as_ref() != Some(&cached.verification)
             || now >= cached.deadline
             || now_ms >= cached.expires_ms
         {
@@ -292,7 +315,7 @@ impl Poll {
         entry.cached = Some(Cached {
             body: body.clone(),
             key_id: envelope.key_id,
-            generation: self.generation,
+            verification: self.verification.clone(),
             deadline: now + Duration::from_millis(remaining_ms),
             expires_ms,
         });

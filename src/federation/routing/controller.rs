@@ -1,4 +1,5 @@
 use super::leases::{REMOTE_TTL_MS, RENEW_EVERY, RemoteLeases};
+use super::table::RouteTable;
 use super::{Route, Selection, validate};
 use crate::{
     federation::{
@@ -15,7 +16,6 @@ use rama::{
     rt::Executor,
 };
 use std::{
-    collections::BTreeMap,
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
@@ -28,7 +28,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub(crate) struct Router {
-    routes: Arc<BTreeMap<String, Route>>,
+    routes: RouteTable,
     credentials: Credentials,
     cache: Cache,
     executor: Executor,
@@ -43,22 +43,12 @@ impl Router {
         executor: Executor,
         local_names: &[String],
     ) -> Result<Self, BoxError> {
-        if routes.is_empty() || routes.len() > 256 {
+        if routes.is_empty() {
             return Err("routing requires 1..256 explicit aliases".into());
         }
-        let mut indexed = BTreeMap::new();
-        for route in routes {
-            route.validate()?;
-            if local_names.contains(&route.alias)
-                || indexed.insert(route.alias.clone(), route).is_some()
-            {
-                return Err(
-                    "route aliases must be unique and cannot shadow a local/default model".into(),
-                );
-            }
-        }
+        let table = RouteTable::new(routes, |alias| local_names.iter().any(|n| n == alias))?;
         Ok(Self {
-            routes: Arc::new(indexed),
+            routes: table,
             credentials,
             cache,
             executor,
@@ -74,7 +64,7 @@ impl Router {
         alias: &str,
         ttl: Option<Duration>,
     ) -> Result<Lease, LeaseError> {
-        if !self.routes.contains_key(alias) {
+        if self.routes.get(alias).is_none() {
             return Err(LeaseError::Missing(alias.to_owned()));
         }
         let (lease, start) = self.leases.take(holder, alias, ttl)?;
@@ -125,11 +115,10 @@ impl Router {
     /// lost connection is retried on the next round; the executor's own
     /// expiry covers an origin that disappears.
     async fn keep(self, alias: String) {
-        let route = self
-            .routes
-            .get(&alias)
-            .expect("keepers start for routed aliases")
-            .clone();
+        let Some(route) = self.routes.get(&alias) else {
+            // Its route was replaced before the keeper started.
+            return;
+        };
         let mut remote: Option<String> = None;
         loop {
             if !self.leases.keep(&alias, std::time::Instant::now()) {
@@ -232,11 +221,25 @@ impl Router {
     }
 
     pub(crate) fn contains(&self, alias: &str) -> bool {
-        self.routes.contains_key(alias)
+        self.routes.get(alias).is_some()
+    }
+
+    /// The aliases served, which imports replace while requests run.
+    pub(crate) const fn table(&self) -> &RouteTable {
+        &self.routes
+    }
+
+    pub(crate) const fn credentials(&self) -> &Credentials {
+        &self.credentials
+    }
+
+    pub(crate) const fn cache(&self) -> &Cache {
+        &self.cache
     }
 
     pub(crate) fn statuses<T>(&self, request: &Request<T>, ready: bool) -> Vec<grpc::ModelStatus> {
         self.routes
+            .snapshot()
             .values()
             .filter_map(|route| {
                 let (descriptor, host) =
@@ -298,6 +301,7 @@ impl Router {
             .get(alias)
             .filter(|r| r.operation == operation)
             .ok_or_else(|| Status::permission_denied("route_denied"))?;
+        let route = &route;
         let charge = self
             .slots
             .clone()
@@ -476,9 +480,6 @@ impl OperationContext {
             )
             .await
             .map_err(|_| Status::unavailable("federation_transport_failed"))?;
-        if connected.generation != self.selection.generation {
-            return Err(Status::permission_denied("route_denied"));
-        }
         self.selection
             .authorize(&self.router.credentials.store, Some(&connected.binding))?;
         *self

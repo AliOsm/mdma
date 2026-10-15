@@ -72,6 +72,52 @@ impl Store {
         })
     }
 
+    /// One publication for an import: `peer_id`'s route imports become
+    /// `imports`, `caller`'s consents for `retired` go, and `granted` are
+    /// approved. A route left unchanged is never without its consent.
+    pub fn replace_routes(
+        &self,
+        peer_id: &str,
+        imports: Vec<config::RouteImport>,
+        caller: &str,
+        retired: &[(String, Operation)],
+        granted: Vec<Disclosure>,
+    ) -> Result<(), Error> {
+        config::validate_digest(caller)?;
+        for grant in &granted {
+            grant.validate()?;
+            if grant.caller_spki_sha256 != caller || grant.peer_id != peer_id {
+                return Err(Error::Denied("an import consents for one caller and peer"));
+            }
+        }
+        self.update(move |snapshot| {
+            let floor = snapshot.clock_floor_ms;
+            if snapshot.tls_denied(caller)
+                || granted.iter().any(|g| g.window.valid_until_ms <= floor)
+            {
+                return Err(Error::Denied("disclosure approval denied"));
+            }
+            let record = snapshot
+                .peers
+                .get_mut(peer_id)
+                .ok_or(Error::Denied("unknown peer"))?;
+            if record.state != State::Active {
+                return Err(Error::Denied("policy requires active enrollment"));
+            }
+            record.policy.route_imports = imports;
+            let replaced = |old: &Disclosure| {
+                old.caller_spki_sha256 == caller
+                    && old.peer_id == peer_id
+                    && (retired.iter().any(|(model, operation)| {
+                        old.model == *model && old.operation == *operation
+                    }) || granted.iter().any(|grant| grant.same_target(old)))
+            };
+            snapshot.disclosures.retain(|old| !replaced(old));
+            snapshot.disclosures.extend(granted);
+            Ok(())
+        })
+    }
+
     pub fn remove_disclosure(
         &self,
         caller_spki_sha256: &str,

@@ -32,7 +32,7 @@ pub struct Installed {
 mod disclosure;
 pub use disclosure::Disclosure;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct KeyHistory {
     public_key: String,
@@ -77,6 +77,31 @@ impl Record {
     pub fn pin_eligible(&self, pin: &config::TlsPin, now_ms: u64) -> bool {
         pin.window.contains(now_ms) && !self.retired_tls.contains(&pin_label(pin))
     }
+
+    /// What this peer's signed catalog was checked against.
+    pub fn verification(&self) -> Verification {
+        Verification {
+            state: self.state,
+            peer: self.policy.without_grants(),
+            signing_history: self.signing_history.clone(),
+            retired_signing: self.retired_signing.clone(),
+            retired_tls: self.retired_tls.clone(),
+            tls_history: self.tls_history.clone(),
+        }
+    }
+}
+
+/// A peer's state and credentials without its grants. A catalog cached under
+/// one stays usable while it is unchanged: editing grants, routes or
+/// disclosures keeps it, a new state, key, pin or endpoint does not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verification {
+    state: State,
+    peer: Peer,
+    signing_history: BTreeMap<String, KeyHistory>,
+    retired_signing: BTreeSet<String>,
+    retired_tls: BTreeSet<String>,
+    tls_history: BTreeMap<String, config::TlsPin>,
 }
 
 fn pin_label(pin: &config::TlsPin) -> String {

@@ -317,6 +317,19 @@ message PushRequest {
   string model = 3;
 }
 
+message ImportRoutesRequest {
+  // An enrolled federation peer's server id.
+  string peer = 1;
+  // Aliases are PREFIX-MODEL; empty means the peer id's first label.
+  string prefix = 2;
+  // The pin (sha256:...) of the client that may use the routes; empty means the caller's.
+  string client_spki = 3;
+}
+
+message ImportRoutesResponse {
+  repeated FederationRoute routes = 1;
+}
+
 message PushProgress {
   // Bytes sent so far, of `size`.
   uint64 sent = 1;
@@ -336,6 +349,9 @@ service Mdma {
   rpc Renew(RenewRequest) returns (LeaseStatus);
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
   // Send a model file to a federation peer that grants installs, reporting
-  // progress. Needs a MDMA_PUSH_SPKI pin; dropping the stream cancels it.
+  // progress. Needs a MDMA_ADMIN_SPKI pin; dropping the stream cancels it.
   rpc Push(PushRequest) returns (stream PushProgress);
+  // Route every ready model a peer offers now, replacing its earlier routes,
+  // without a restart. Needs a MDMA_ADMIN_SPKI pin and a server that routes.
+  rpc ImportRoutes(ImportRoutesRequest) returns (ImportRoutesResponse);
 }

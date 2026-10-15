@@ -1,7 +1,7 @@
 //! Federation peers, grants, catalogs and routes, for operators.
 use super::catalog_cache::Cache;
 use super::config::Operation;
-use super::routing::selection::Route;
+use super::routing::RouteTable;
 use super::trust::{State, Store};
 use crate::grpc::{CatalogModel, CatalogView, FederationPeer, FederationRoute, FederationTopology};
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use tokio::sync::watch;
 pub(crate) struct Topology {
     store: Arc<Store>,
     cache: Option<Cache>,
-    routes: Vec<Route>,
+    routes: RouteTable,
 }
 
 const fn state(state: State) -> &'static str {
@@ -31,7 +31,7 @@ const fn operation(operation: Operation) -> &'static str {
 }
 
 impl Topology {
-    pub(crate) const fn new(store: Arc<Store>, cache: Option<Cache>, routes: Vec<Route>) -> Self {
+    pub(crate) const fn new(store: Arc<Store>, cache: Option<Cache>, routes: RouteTable) -> Self {
         Self {
             store,
             cache,
@@ -121,7 +121,8 @@ impl Topology {
             peers,
             routes: self
                 .routes
-                .iter()
+                .snapshot()
+                .values()
                 .map(|r| FederationRoute {
                     alias: r.alias.clone(),
                     peer_id: r.peer_id.clone(),

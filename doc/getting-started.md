@@ -356,7 +356,9 @@ in the Mac's budget.
 
 - **Stopping and changing**: stop a server with Ctrl-C. `mdma-fed status fed`
   shows peers, grants and routes, also while it runs. After a peer's models
-  change, stop the Mac's server, run `mdma-fed routes` again and restart it.
+  change, stop the Mac's server, run `mdma-fed routes` again and restart it,
+  or have the running server import them with `mdma-client --routes PEER`
+  from a client pinned in its `MDMA_ADMIN_SPKI`.
 - **Machines you do not log into**: enroll a peer with `--install 20G
   --installed` and the node may start with an empty models folder; push GGUFs
   to it with `mdma-fed push`, or from a running server with `mdma-client

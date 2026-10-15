@@ -58,7 +58,6 @@ pub(crate) struct Selection {
     pub(crate) descriptor: ModelDescriptor,
     pub(crate) deadline: Deadline,
     pub(crate) envelope: ExecutionEnvelope,
-    pub(crate) generation: u64,
 }
 
 fn denied() -> Status {
@@ -215,7 +214,6 @@ impl Selection {
             descriptor,
             deadline,
             envelope,
-            generation: snapshot.generation,
         };
         selected.authorize(store, None)?;
         Ok(selected)
@@ -225,6 +223,9 @@ impl Selection {
         self.route.action()
     }
 
+    /// The caller's consent, the route's exact import and the peer's state
+    /// and binding, as they are now. Unrelated trust edits do not end a
+    /// routed request; losing any of these does.
     pub(crate) fn authorize(&self, store: &Store, binding: Option<&Binding>) -> Result<(), Status> {
         let now = Instant::now();
         self.deadline.remaining(now).map_err(|_| expired())?;
@@ -239,7 +240,7 @@ impl Selection {
                 now,
             )
             .map_err(|_| denied())?;
-        let snapshot = match binding {
+        match binding {
             Some(binding) => {
                 if binding.server_id() != self.route.peer_id
                     || binding.role() != config::TlsRole::ServerAuth
@@ -248,14 +249,13 @@ impl Selection {
                 }
                 binding
                     .authorize(store, self.action(), now_ms, now)
-                    .map_err(|_| denied())?
+                    .map_err(|_| denied())?;
             }
-            None => store
-                .authorize(&self.route.peer_id, self.action(), now_ms)
-                .map_err(|_| denied())?,
-        };
-        if snapshot.generation != self.generation {
-            return Err(denied());
+            None => {
+                store
+                    .authorize(&self.route.peer_id, self.action(), now_ms)
+                    .map_err(|_| denied())?;
+            }
         }
         Ok(())
     }

@@ -131,6 +131,9 @@ pub struct Prepared {
     accepts_installs: bool,
     /// This node dialing its peers, when its identity may.
     outbound: Option<outbound::Credentials>,
+    /// The config as loaded, and where to save it when routes change live.
+    saved: Config,
+    saved_at: Option<PathBuf>,
     integrated: bool,
     client_policy: ClientPolicy,
 }
@@ -145,6 +148,7 @@ impl Prepared {
         if config.listen == client_listen {
             return Err("federation requires a separate listener".into());
         }
+        let saved = config.clone();
         // Open only. A missing/corrupt state must never enroll or recover peers.
         let store = Arc::new(Store::open(&config.trust_state, &config.server_id)?);
         let snapshot = store.snapshot()?;
@@ -254,9 +258,19 @@ impl Prepared {
             execution_enabled: config.enable_execution,
             accepts_installs,
             outbound,
+            saved,
+            saved_at: None,
             integrated: false,
             client_policy,
         })
+    }
+
+    /// Where the config was loaded from, so a running server can import
+    /// routes into it. Without it, routes change only with the server stopped.
+    #[must_use]
+    pub fn saving_to(mut self, path: PathBuf) -> Self {
+        self.saved_at = Some(path);
+        self
     }
 
     /// Attach only the native service's actual loaded registry and live state.
@@ -294,22 +308,31 @@ impl Prepared {
             service.set_federation_pusher(pusher);
         }
         let cache = self.polling.as_ref().map(|poller| poller.cache.clone());
-        let mut configured = Vec::new();
+        let mut table = super::routing::RouteTable::default();
         if let Some((credentials, cache, routes)) = self.routing.take() {
-            configured.clone_from(&routes);
             let router = super::routing::Router::new(
                 routes,
                 credentials,
                 cache,
-                executor,
+                executor.clone(),
                 &service.federation_local_names(),
             )?;
+            table = router.table().clone();
+            if let Some(path) = self.saved_at.clone() {
+                service.set_federation_importer(super::routing::Importer::new(
+                    router.clone(),
+                    path,
+                    self.saved.clone(),
+                    service.federation_folder(),
+                    executor,
+                ));
+            }
             service.set_federation_router(router);
         }
         service.set_federation_topology(super::topology::Topology::new(
             self.store.clone(),
             cache,
-            configured,
+            table,
         ));
         self.integrated = true;
         Ok(self)

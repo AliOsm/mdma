@@ -165,15 +165,21 @@ fn load(dir: &Path) -> Result<(PathBuf, Config), BoxError> {
 }
 
 fn save(dir: &Path, config: &Config) -> Result<(), BoxError> {
-    let path = dir.join(RUNTIME);
-    let next = dir.join(format!("{RUNTIME}.next"));
+    save_config(&dir.join(RUNTIME), config)
+}
+
+/// Replaces `path` whole, through a sibling `.next` file.
+pub(crate) fn save_config(path: &Path, config: &Config) -> Result<(), BoxError> {
+    let mut next = path.as_os_str().to_os_string();
+    next.push(".next");
+    let next = PathBuf::from(next);
     // A leftover from an interrupted save is ours to replace.
     match std::fs::remove_file(&next) {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
         _ => {}
     }
     secret(&next, toml::to_string(config)?)?;
-    std::fs::rename(&next, &path)?;
+    std::fs::rename(&next, path)?;
     Ok(())
 }
 
@@ -493,6 +499,19 @@ pub(crate) fn apply_routes(
     caller: &str,
     prefix: &str,
 ) -> Result<Vec<Route>, BoxError> {
+    let routes = plan_routes(&config, peer_id, models, prefix)?;
+    publish_routes(&mut config, store, peer_id, &routes, caller)?;
+    save(dir, &config)?;
+    Ok(routes)
+}
+
+/// `prefix-model` for each ready model `peer_id` offers. Writes nothing.
+pub(crate) fn plan_routes(
+    config: &Config,
+    peer_id: &str,
+    models: Vec<ModelDescriptor>,
+    prefix: &str,
+) -> Result<Vec<Route>, BoxError> {
     let routes: Vec<Route> = models
         .into_iter()
         .filter(|model| model.ready)
@@ -525,14 +544,26 @@ pub(crate) fn apply_routes(
             .into());
         }
     }
-    let mut policy = store
-        .snapshot()?
+    Ok(routes)
+}
+
+/// Publishes `routes` as `peer_id`'s, for the local client whose pin is
+/// `caller`, in one trust write, and updates `config` to match. Saving it
+/// is the caller's.
+pub(crate) fn publish_routes(
+    config: &mut Config,
+    store: &Store,
+    peer_id: &str,
+    routes: &[Route],
+    caller: &str,
+) -> Result<(), BoxError> {
+    let snapshot = store.snapshot()?;
+    let policy = &snapshot
         .peer(peer_id)
         .ok_or_else(|| format!("{peer_id} is not enrolled"))?
-        .policy
-        .clone();
-    let until = pins_until(&policy).ok_or("peer has no TLS pins")?;
-    policy.route_imports = routes
+        .policy;
+    let until = pins_until(policy).ok_or("peer has no TLS pins")?;
+    let imports = routes
         .iter()
         .map(|route| RouteImport {
             model: route.model.clone(),
@@ -541,13 +572,16 @@ pub(crate) fn apply_routes(
             operation: route.operation,
         })
         .collect();
-    store.approve_policy(policy)?;
-    for old in config.routes.iter().filter(|old| old.peer_id == peer_id) {
-        store.remove_disclosure(caller, peer_id, &old.model, old.operation)?;
-    }
+    let retired: Vec<_> = config
+        .routes
+        .iter()
+        .filter(|old| old.peer_id == peer_id)
+        .map(|old| (old.model.clone(), old.operation))
+        .collect();
     let now = tls::utc_ms()?;
-    for route in &routes {
-        store.approve_disclosure(Disclosure {
+    let granted = routes
+        .iter()
+        .map(|route| Disclosure {
             caller_spki_sha256: caller.into(),
             peer_id: peer_id.into(),
             model: route.model.clone(),
@@ -556,14 +590,14 @@ pub(crate) fn apply_routes(
                 valid_from_ms: now,
                 valid_until_ms: until,
             },
-        })?;
-    }
+        })
+        .collect();
+    store.replace_routes(peer_id, imports, caller, &retired, granted)?;
     config.routes.retain(|old| old.peer_id != peer_id);
     config.routes.extend(routes.iter().cloned());
     config.enable_routing = true;
     config.poll_catalogs = true;
-    save(dir, &config)?;
-    Ok(routes)
+    Ok(())
 }
 
 fn remaining(until_ms: u64, now_ms: u64) -> String {

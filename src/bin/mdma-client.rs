@@ -13,9 +13,13 @@
 // Usage: mdma-client [prompt words...]
 //        mdma-client --decide request.json   ({"state": ..., "questions": {...}} to a Laya model)
 //        mdma-client --push PEER FILE [MODEL] (FILE.gguf from the server's models folder to a
-//                                              peer, as MODEL; needs a MDMA_PUSH_SPKI pin)
+//                                              peer, as MODEL; needs a MDMA_ADMIN_SPKI pin)
+//        mdma-client --routes PEER [PREFIX]   (route the peer's ready models as PREFIX-MODEL
+//                                              for this client, live; needs a MDMA_ADMIN_SPKI pin)
 use mdma::grpc::client::mtls_client;
-use mdma::grpc::{DecideRequest, IntrospectRequest, PushRequest, SynthesizeRequest};
+use mdma::grpc::{
+    DecideRequest, ImportRoutesRequest, IntrospectRequest, PushRequest, SynthesizeRequest,
+};
 use mdma::registry::parameters_label;
 use rama::error::BoxError;
 use std::io::Write;
@@ -101,6 +105,26 @@ async fn main() -> Result<(), BoxError> {
             _ => return Err("usage: mdma-client --push PEER FILE [MODEL]".into()),
         };
         return push(&client, peer, file, model).await;
+    }
+    if args.first().is_some_and(|flag| flag == "--routes") {
+        let (peer, prefix) = match &args[1..] {
+            [peer] => (peer.clone(), String::new()),
+            [peer, prefix] => (peer.clone(), prefix.clone()),
+            _ => return Err("usage: mdma-client --routes PEER [PREFIX]".into()),
+        };
+        let routes = client
+            .import_routes(ImportRoutesRequest {
+                peer,
+                prefix,
+                client_spki: String::new(),
+            })
+            .await?
+            .into_inner()
+            .routes;
+        for route in routes {
+            println!("{} -> {} {}", route.alias, route.peer_id, route.model);
+        }
+        return Ok(());
     }
     let decision = match args.as_slice() {
         [flag, path] if flag == "--decide" => {

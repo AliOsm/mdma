@@ -122,9 +122,17 @@ result size and typed question/result schema, including duplicate keys.
 Trust APIs publish atomically, persist before success and notify running
 controllers. A running store has one locked writer; never edit its JSON or
 unlink either trust or machine lock. `mdma-fed` (below) changes a node only
-while its `mdma-serve` is stopped; restart it afterwards. Lost or corrupt
-trust is never recreated automatically. Generation changes conservatively cancel in-flight
-routes, including otherwise unrelated policy edits.
+while its `mdma-serve` is stopped; restart it afterwards. A running server
+changes its own trust only for installs and live route imports (below). Lost
+or corrupt trust is never recreated automatically.
+
+A routed request rechecks, on every trust change and every 50 ms, what it
+was admitted under: the caller's consent, the route's exact import, and the
+peer's state and binding. Losing any of them ends it; other edits, such as
+another route's import or another caller's consent, do not. A cached catalog
+stays usable while its peer's state and credentials are unchanged: a new
+state, key, pin or endpoint withdraws that peer's catalog at once and polls
+it again, grant edits keep it.
 
 Conformance includes actual two-leg HTTP/2 mTLS loopback inference, native
 synthesis/Laya parity, resumption rejection, deadlines/reset/drop/revocation,
@@ -170,8 +178,18 @@ mdma-fed routes ~/.mdma/fed --peer pathfinder.fleet --client-cert certs/client.p
 This reads the peer's signed catalog and routes each ready model as
 `pathfinder-<model>` (`--prefix` changes it) for that one client certificate,
 replacing the peer's earlier routes, and turns routing and polling on. Run it
-again after the peer's models change. `mdma-fed status <dir>` shows peers,
-grants and routes, also while the node runs.
+again after the peer's models change, or, once the origin routes, have it
+import them while it serves, from a client pinned in its `MDMA_ADMIN_SPKI`:
+
+```sh
+mdma-client --routes pathfinder.fleet
+```
+
+That does what `mdma-fed routes` does, for the calling client, in one trust
+write, and saves `runtime.toml`: requests on routes it keeps carry on, and the
+new routes select at once. An origin that does not route yet starts with
+`mdma-fed routes`. `mdma-fed status <dir>` shows peers, grants and routes, also
+while the node runs.
 
 ### Pushing models to a peer
 
@@ -191,7 +209,7 @@ model, whoever pushed it, so another origin keeps the same view. A node whose
 peers may install may start with no models.
 
 From the pushing node while it serves, with a client whose pin is in that
-server's `MDMA_PUSH_SPKI`, for a file in its models folder:
+server's `MDMA_ADMIN_SPKI`, for a file in its models folder:
 
 ```sh
 mdma-client --push pathfinder.fleet Qwen3-8B-Q4_K_M qwen3-8b
@@ -203,7 +221,8 @@ or, with that node stopped, for any file:
 mdma-fed push ~/.mdma/fed ~/models/Qwen3-8B-Q4_K_M.gguf --peer pathfinder.fleet --name qwen3-8b
 ```
 
-Then, with the pushing node stopped, route what it sent:
+Then route what it sent, live with `mdma-client --routes pathfinder.fleet`
+or with the pushing node stopped:
 
 ```sh
 mdma-fed routes ~/.mdma/fed --peer pathfinder.fleet --client-cert certs/client.pem
@@ -222,7 +241,10 @@ is interrupted. The receiver answers from everything it holds:
 The file streams into a hidden `.install-<digest>.part` in the models folder,
 one upload at a time, outside the two request slots inference uses. The
 receiver checks size and digest, links it into place (never replacing a file),
-reads it as startup would, and serves it without a restart. A file that is
+waits until its size and times have been still for two seconds (FreeBSD's
+soft updates change a moved file's ctime about half a second later, which
+would read as the file changing under a loaded model), reads it as startup
+would, and serves it without a restart. A file that is
 not a model it can serve is removed. Hidden uploads cut short are removed when
 the node next starts. `mdma-fed status` lists each installed model and who
 pushed it.

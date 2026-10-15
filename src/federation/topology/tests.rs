@@ -1,4 +1,5 @@
 use super::super::config::tests::peer;
+use super::super::routing::Route;
 use super::*;
 
 #[test]
@@ -15,7 +16,8 @@ fn snapshot_lists_peers_and_routes_and_follows_trust_changes() {
         profile_id: format!("sha256:{}", "cd".repeat(32)),
         operation: Operation::Synthesize,
     };
-    let topology = Topology::new(store.clone(), Some(Cache::default()), vec![route]);
+    let routes = crate::federation::routing::RouteTable::new(vec![route], |_| false).unwrap();
+    let topology = Topology::new(store.clone(), Some(Cache::default()), routes);
     let snapshot = topology.snapshot();
     assert!(snapshot.authorized && snapshot.enabled);
     assert_eq!(snapshot.server_id, "local.mdma.test");

@@ -1,7 +1,10 @@
-//! Push: a client pinned in MDMA_PUSH_SPKI has this server send a file from
-//! its models folder to a federation peer, while it keeps serving.
+//! What a client pinned in MDMA_ADMIN_SPKI may change on a running federation
+//! server: push a file from its models folder to a peer, and import a peer's
+//! routes.
 use super::MdmaService;
-use super::proto::{PushProgress, PushRequest};
+use super::proto::{
+    FederationRoute, ImportRoutesRequest, ImportRoutesResponse, PushProgress, PushRequest,
+};
 use crate::backend::Backend;
 use crate::federation::tls::ClientSpki;
 use crate::session::CancelOnDrop;
@@ -14,19 +17,72 @@ use tokio_util::sync::CancellationToken;
 /// Progress, then the outcome; dropping it cancels the push.
 pub type ProgressStream = CancelOnDrop<ReceiverStream<Result<PushProgress, Status>>>;
 
+/// The caller's pin, when it is in MDMA_ADMIN_SPKI.
+fn admin<B: Backend, T>(service: &MdmaService<B>, req: &Request<T>) -> Result<String, Status> {
+    req.extensions()
+        .get_ref::<Ingress<Extensions>>()
+        .and_then(|ingress| ingress.get_ref::<ClientSpki>())
+        .filter(|spki| service.admins.contains(&spki.0))
+        .map(|spki| spki.0.clone())
+        .ok_or_else(|| Status::permission_denied("this needs the client's pin in MDMA_ADMIN_SPKI"))
+}
+
+/// Checks the caller and request now; the returned future imports.
+pub(super) fn import_routes<B: Backend>(
+    service: &MdmaService<B>,
+    req: Request<ImportRoutesRequest>,
+) -> Result<impl Future<Output = Result<ImportRoutesResponse, Status>> + Send + use<B>, Status> {
+    let caller = admin(service, &req)?;
+    let importer = service.importer.clone().ok_or_else(|| {
+        Status::failed_precondition(
+            "this server does not route to peers; run mdma-fed routes once with it stopped",
+        )
+    })?;
+    let request = req.into_inner();
+    crate::federation::server_id::validate(&request.peer)
+        .map_err(|_| Status::invalid_argument("peer is a server id"))?;
+    let prefix = if request.prefix.is_empty() {
+        request
+            .peer
+            .split('.')
+            .next()
+            .unwrap_or(&request.peer)
+            .to_owned()
+    } else {
+        request.prefix
+    };
+    let client = if request.client_spki.is_empty() {
+        caller
+    } else {
+        crate::federation::config::validate_digest(&request.client_spki)
+            .map_err(|_| Status::invalid_argument("client_spki is a sha256: pin"))?;
+        request.client_spki
+    };
+    let peer = request.peer;
+    Ok(async move {
+        let routes = importer
+            .import(&peer, &prefix, &client)
+            .await
+            .map_err(|cause| status(&peer, &cause))?;
+        Ok(ImportRoutesResponse {
+            routes: routes
+                .into_iter()
+                .map(|route| FederationRoute {
+                    alias: route.alias,
+                    peer_id: route.peer_id,
+                    model: route.model,
+                    operation: route.operation.as_str().into(),
+                })
+                .collect(),
+        })
+    })
+}
+
 pub(super) fn push<B: Backend>(
     service: &MdmaService<B>,
     req: Request<PushRequest>,
 ) -> Result<ProgressStream, Status> {
-    let caller = req
-        .extensions()
-        .get_ref::<Ingress<Extensions>>()
-        .and_then(|ingress| ingress.get_ref::<ClientSpki>());
-    if !caller.is_some_and(|spki| service.pushers.contains(&spki.0)) {
-        return Err(Status::permission_denied(
-            "pushing needs this client's pin in MDMA_PUSH_SPKI",
-        ));
-    }
+    admin(service, &req)?;
     let pusher = service
         .pusher
         .clone()
@@ -90,5 +146,5 @@ fn status(peer: &str, cause: &BoxError) -> Status {
     if crate::federation::runtime::outbound::connect_failed(cause) {
         return Status::unavailable(format!("cannot connect to {peer}: {cause}"));
     }
-    Status::unavailable(format!("pushing to {peer}: {cause}"))
+    Status::failed_precondition(format!("{peer}: {cause}"))
 }

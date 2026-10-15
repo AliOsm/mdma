@@ -104,7 +104,9 @@ Cancellation consumes its nonce; delayed responses, changed trust generations,
 invalid signatures and wrong identities/challenges cannot publish a snapshot.
 Successful verification replaces the whole snapshot. Eligibility is rechecked
 on every use, with both wall-clock expiry and an unextendable monotonic deadline
-capped by the signing window. Outbound polling does not grant the peer access to
+capped by the signing window, and against the peer's state and credentials as
+they were when it was verified: a new state, key, pin or endpoint withdraws it,
+an edit to grants, routes or consent does not. Outbound polling does not grant the peer access to
 the local catalog. A verified cache entry still confers **no workload or caller
 disclosure permission**.
 

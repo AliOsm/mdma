@@ -36,8 +36,8 @@ pub(super) struct Config {
     pub federation_config: Option<String>,
     /// MDMA_OPERATOR_SPKI pins.
     pub operators: Vec<String>,
-    /// MDMA_PUSH_SPKI pins.
-    pub pushers: Vec<String>,
+    /// MDMA_ADMIN_SPKI pins.
+    pub admins: Vec<String>,
     /// MDMA_NODE_NAME, or the short host name.
     pub node: String,
     pub backend: String,
@@ -249,7 +249,7 @@ impl Config {
             }
         };
         let operators = pins("MDMA_OPERATOR_SPKI")?;
-        let pushers = pins("MDMA_PUSH_SPKI")?;
+        let admins = pins("MDMA_ADMIN_SPKI")?;
         let node = match env("MDMA_NODE_NAME") {
             Ok(name) if name.trim().is_empty() => {
                 return Err("MDMA_NODE_NAME must not be empty".into());
@@ -279,7 +279,7 @@ impl Config {
             tls_ca: required("MDMA_TLS_CA")?,
             federation_config,
             operators,
-            pushers,
+            admins,
             node,
             backend,
             rocm_f32,

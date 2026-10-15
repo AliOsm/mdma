@@ -1,4 +1,4 @@
-use super::super::config::Window;
+use super::super::config::{Operation, RouteImport, Window};
 use super::super::signing::KeyPairHandle;
 use super::super::tls::tests::Fixture;
 use super::*;
@@ -267,7 +267,7 @@ fn key_window_caps_monotonic_lifetime_and_rollback_cannot_revive_cache() {
 }
 
 #[test]
-fn generation_change_invalidates_cached_routes_even_without_peer_suspension() {
+fn grant_edits_keep_a_cached_catalog_and_credential_edits_drop_it() {
     let (f, binding, key, cache) = setup();
     let now = Instant::now();
     let poll = cache
@@ -275,21 +275,38 @@ fn generation_change_invalidates_cached_routes_even_without_peer_suspension() {
         .unwrap();
     let reply = wire(&poll, &key, f.now_ms, 60_000);
     poll.finish(&f.remote_store, reply, f.now_ms, now).unwrap();
-    let policy = f
-        .remote_store
-        .snapshot()
-        .unwrap()
-        .peer("local.mdma.test")
-        .unwrap()
-        .policy
-        .clone();
-    f.remote_store.approve_policy(policy).unwrap();
-    assert!(
+    let cached = || {
         cache
             .snapshot(&f.remote_store, "local.mdma.test", f.now_ms, now)
             .unwrap()
-            .is_none()
-    );
+            .is_some()
+    };
+    let policy = || {
+        f.remote_store
+            .snapshot()
+            .unwrap()
+            .peer("local.mdma.test")
+            .unwrap()
+            .policy
+            .clone()
+    };
+    // The same policy again, then new imports: the trust generation moves,
+    // the peer's state and credentials do not.
+    f.remote_store.approve_policy(policy()).unwrap();
+    assert!(cached());
+    let mut imports = policy();
+    imports.route_imports = vec![RouteImport {
+        model: "native".into(),
+        artifact_id: format!("sha256:{}", "a".repeat(64)),
+        profile_id: format!("sha256:{}", "b".repeat(64)),
+        operation: Operation::Synthesize,
+    }];
+    f.remote_store.approve_policy(imports).unwrap();
+    assert!(cached());
+    let mut moved = policy();
+    moved.endpoint = "https://127.0.0.1:7999".into();
+    f.remote_store.approve_policy(moved).unwrap();
+    assert!(!cached());
 }
 
 #[test]
@@ -385,7 +402,7 @@ fn a_new_empty_snapshot_withdraws_previously_advertised_models() {
     let topology = crate::federation::topology::Topology::new(
         f.remote_store.clone(),
         Some(cache.clone()),
-        vec![],
+        crate::federation::routing::RouteTable::default(),
     )
     .snapshot();
     let peer = &topology.peers[0];

@@ -154,6 +154,9 @@ impl Federation for Remote {
         if mode == 6 {
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
+        if mode == 8 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
         let response = self.service.synthesize(request).await?;
         let stream = response.into_inner().map(move |event| {
             let _active = &active;
@@ -729,7 +732,7 @@ async fn a_local_lease_on_a_route_keeps_the_model_loaded_on_its_executor() {
 #[tokio::test]
 async fn executors_refuse_leases_on_a_changed_selection_or_without_a_grant() {
     let live = Live::new().await;
-    let route = live.router.routes["remote-laya"].clone();
+    let route = live.router.routes.get("remote-laya").unwrap();
     let acquire = |model: &str, artifact_id: &str| control::LeaseRequest {
         origin: live.router.origin().unwrap(),
         destination: route.peer_id.clone(),
@@ -873,6 +876,45 @@ async fn disclosure_revocation_cancels_unpolled_work_and_blocks_queued_plaintext
 }
 
 #[tokio::test]
+async fn unrelated_trust_edits_keep_routed_work_and_cached_catalogs() {
+    let live = Live::new().await;
+    // The executor holds the request a second, so the edits land mid-route.
+    live.remote.mode.store(8, Ordering::SeqCst);
+    let stream = live.synthesize("5000m").await.unwrap().into_inner();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(live.remote.active.load(Ordering::SeqCst), 1);
+    let store = &live.fixture.remote_store;
+    store
+        .approve_disclosure(Disclosure {
+            caller_spki_sha256: format!("sha256:{}", "c".repeat(64)),
+            peer_id: "local.mdma.test".into(),
+            model: "native".into(),
+            operation: Operation::Synthesize,
+            window: Window {
+                valid_from_ms: live.fixture.now_ms - 1000,
+                valid_until_ms: live.fixture.now_ms + 100_000,
+            },
+        })
+        .unwrap();
+    let policy = store
+        .snapshot()
+        .unwrap()
+        .peer("local.mdma.test")
+        .unwrap()
+        .policy
+        .clone();
+    store.approve_policy(policy).unwrap();
+    let routed = replies(stream).await;
+    tokens_only(&routed);
+    assert!(!routed.is_empty());
+    // The catalog cached before the edits still routes, without a new poll.
+    live.remote.mode.store(0, Ordering::SeqCst);
+    let again = live.synthesize("5000m").await.unwrap().into_inner();
+    assert!(!replies(again).await.is_empty());
+    live.close().await;
+}
+
+#[tokio::test]
 async fn origin_handler_and_stream_drop_close_single_owned_remote_connection() {
     let live = Live::new().await;
     live.remote.mode.store(6, Ordering::SeqCst);
@@ -906,7 +948,7 @@ async fn origin_handler_and_stream_drop_close_single_owned_remote_connection() {
 #[tokio::test]
 async fn alias_collisions_wrong_operation_missing_principal_and_invalid_input_do_not_dial() {
     let live = Live::new().await;
-    let routes: Vec<_> = live.router.routes.values().cloned().collect();
+    let routes: Vec<_> = live.router.routes.snapshot().values().cloned().collect();
     assert!(
         Router::new(
             routes.clone(),
