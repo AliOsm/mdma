@@ -141,6 +141,10 @@ does not collect serial numbers or UUIDs.
 
 ## Quick start
 
+New to mdma? [Getting started](doc/getting-started.md) walks three ordinary
+16 GB machines (macOS, Linux, FreeBSD) from install to one private fabric,
+with every step tested.
+
 ```sh
 cargo build --release
 target/release/mdma info                  # hardware inventory
@@ -203,6 +207,10 @@ FreeBSD builds need `protoc` on `PATH`; Vulkan builds there also need
 first use, warms it up and keeps it resident, and gives each model the context
 it was trained for, capping each request's output (`MDMA_MAX_OUTPUT_TOKENS`). One process serves every GGUF and Laya checkpoint in a folder
 (`MDMA_MODELS_DIR`); other MDMA nodes' models are reached through federation.
+A node that routes to its peers may hold no models at all, so an old machine
+can be the front door for models that run elsewhere, and `chat` requests get
+each model's own chat format whether it runs locally or on a peer. See
+[getting started](doc/getting-started.md).
 
 ```proto
 service Mdma {
@@ -232,6 +240,7 @@ checkpoint gates and their references.
 
 | Topic | Document |
 |---|---|
+| Getting started: three machines, one fabric | [doc/getting-started.md](doc/getting-started.md) |
 | Architectures and validation boundaries | [doc/architectures.md](doc/architectures.md) |
 | Backend build details and execution modes | [doc/backends.md](doc/backends.md) |
 | Vulkan fusion and tiled attention | [doc/vulkan-fusion.md](doc/vulkan-fusion.md) |
