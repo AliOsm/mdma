@@ -507,6 +507,28 @@ fn lease_status(error: LeaseError) -> Status {
     }
 }
 
+/// Wraps the prompt as one user turn, after the optional system message, in
+/// `format` when the request asks for chat. A system message needs chat.
+/// `name` is the model the request reaches, local or routed.
+pub(crate) fn apply_chat(
+    req: &mut SynthesizeRequest,
+    name: &str,
+    format: Option<crate::tokenizer::ChatFormat>,
+) -> Result<(), Status> {
+    if req.chat {
+        let format = format.ok_or_else(|| {
+            Status::invalid_argument(format!("model {name:?} has no known chat format"))
+        })?;
+        req.prompt = format.conversation(
+            Some(req.system.as_str()).filter(|s| !s.is_empty()),
+            &req.prompt,
+        );
+    } else if !req.system.is_empty() {
+        return Err(Status::invalid_argument("`system` requires `chat`"));
+    }
+    Ok(())
+}
+
 impl<B> MdmaService<B>
 where
     B: Backend + Send + Sync + 'static,
@@ -521,11 +543,6 @@ where
             .as_ref()
             .filter(|router| router.contains(&req.get_ref().model))
         {
-            if req.get_ref().chat {
-                return Err(Status::invalid_argument(
-                    "chat is not available for federated routes",
-                ));
-            }
             let (cap, _) = self.admit(|| Ok(0), req.get_ref().max_tokens as usize, usize::MAX)?;
             req.get_mut().max_tokens = cap as u32;
             return router.synthesize(req).await;
@@ -537,17 +554,7 @@ where
             )));
         }
         let mut req = req.into_inner();
-        if req.chat {
-            let format = info.chat_format.ok_or_else(|| {
-                Status::invalid_argument(format!("model {name:?} has no known chat format"))
-            })?;
-            req.prompt = format.conversation(
-                Some(req.system.as_str()).filter(|s| !s.is_empty()),
-                &req.prompt,
-            );
-        } else if !req.system.is_empty() {
-            return Err(Status::invalid_argument("`system` requires `chat`"));
-        }
+        apply_chat(&mut req, &name, info.chat_format)?;
         self.accepting()?;
         let loaded = self.load_model(&name).await?;
         let decoder = loaded.decoder().expect("GGUF models load decoders");

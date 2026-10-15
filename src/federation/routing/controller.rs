@@ -321,7 +321,15 @@ impl Router {
         request: Request<grpc::SynthesizeRequest>,
     ) -> Result<Response<TokenStream>, Status> {
         let operation = self.begin(&request.get_ref().model, Operation::Synthesize, &request)?;
-        let input = request.into_inner();
+        let mut input = request.into_inner();
+        // The executor's signed catalog names the model's chat format, so the
+        // origin wraps the turn and the executor receives a plain prompt.
+        let alias = input.model.clone();
+        grpc::apply_chat(
+            &mut input,
+            &alias,
+            operation.selection.descriptor.chat_format,
+        )?;
         let events = input.emit_events;
         let mut message = control::SynthesizeRequest {
             envelope: Some(operation.selection.envelope.clone()),

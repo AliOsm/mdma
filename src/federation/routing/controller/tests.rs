@@ -39,6 +39,8 @@ struct Remote {
     calls: Arc<AtomicUsize>,
     active: Arc<AtomicUsize>,
     ids: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// Every synthesis prompt as it arrived.
+    prompts: Arc<Mutex<Vec<String>>>,
 }
 struct Active(Arc<AtomicUsize>);
 impl Drop for Active {
@@ -115,6 +117,10 @@ impl Federation for Remote {
         request: Request<control::SynthesizeRequest>,
     ) -> Result<Response<Self::SynthesizeStream>, Status> {
         let active = self.enter(request.get_ref().envelope.as_ref());
+        self.prompts
+            .lock()
+            .unwrap()
+            .push(request.get_ref().prompt.clone());
         let mode = self.mode.load(Ordering::SeqCst);
         if mode == 7 {
             let sampler = request
@@ -193,9 +199,15 @@ impl Live {
         B::Buf: Send + Sync,
     {
         let fixture = Fixture::new();
-        let gguf = crate::gguf::tests::Fixture::new(1, 8)
-            .with_tokenizer()
-            .write();
+        // Its signed catalog then advertises the Zephyr chat format.
+        let mut gguf = crate::gguf::tests::Fixture::new(1, 8).with_tokenizer();
+        gguf.metadata.insert(
+            "tokenizer.chat_template".into(),
+            candle_core::quantized::gguf_file::Value::String(
+                "{% for m in messages %}{{ '<|user|>\\n' + m['content'] + eos_token }}{{ '<|assistant|>\\n' }}{% endfor %}".into(),
+            ),
+        );
+        let gguf = gguf.write();
         let laya = crate::laya::compat_tests::checkpoint();
         let models = vec![
             ("native".into(), Source::Gguf(gguf.path().into())),
@@ -278,6 +290,7 @@ impl Live {
             calls: Arc::new(AtomicUsize::new(0)),
             active: Arc::new(AtomicUsize::new(0)),
             ids: Arc::new(Mutex::new(vec![])),
+            prompts: Arc::new(Mutex::new(vec![])),
         };
         let (stop, stopped) = oneshot::channel();
         let shutdown = Shutdown::new(async {
@@ -903,6 +916,15 @@ async fn alias_collisions_wrong_operation_missing_principal_and_invalid_input_do
         live.router.synthesize(request).await.err().unwrap().code(),
         Code::InvalidArgument
     );
+    let mut system = synth(false);
+    system.system = "Concise.".into();
+    let error = live
+        .router
+        .synthesize(live.request(system, "3000m"))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(error.code(), Code::InvalidArgument, "{}", error.message());
     assert_eq!(live.remote.calls.load(Ordering::SeqCst), 0);
     live.close().await;
 }
@@ -916,24 +938,25 @@ struct Wire(
 );
 
 #[tokio::test]
-async fn origin_declares_effective_defaults_and_preserves_explicit_zero_on_the_wire() {
+async fn origin_declares_effective_defaults_explicit_zero_and_chat_turns_on_the_wire() {
     let live = Live::new().await;
     live.remote.mode.store(7, Ordering::SeqCst);
-    for sampler in [
-        None,
-        Some(grpc::SynthesizeSamplerConfig {
-            temperature: Some(0.),
-            ..Default::default()
-        }),
+    // `synth`'s sampler: an explicit zero temperature.
+    let zero = synth(false).sampler;
+    // The last one asks for chat: the origin wraps it in the executor's format.
+    for (sampler, prompt, chat) in [
+        (None, "abc", false),
+        (zero, "abc", false),
+        (None, "a", true),
     ] {
         let request = live.request(
             grpc::SynthesizeRequest {
                 model: "remote-native".into(),
-                prompt: "abc".into(),
+                prompt: prompt.into(),
                 max_tokens: 2,
                 sampler,
                 emit_events: false,
-                chat: false,
+                chat,
                 system: String::new(),
             },
             "3000m",
@@ -945,7 +968,15 @@ async fn origin_declares_effective_defaults_and_preserves_explicit_zero_on_the_w
         drop(stream);
         live.idle().await;
     }
-    assert_eq!(live.remote.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(live.remote.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        *live.remote.prompts.lock().unwrap(),
+        [
+            "abc".to_owned(),
+            "abc".to_owned(),
+            crate::tokenizer::ChatFormat::Zephyr.user_turn("a"),
+        ]
+    );
     live.close().await;
 }
 impl rama::Service<rama::http::Request> for Wire {

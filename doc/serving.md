@@ -213,7 +213,9 @@ window). Responses stream one token at a time with its decoded text.
 - `chat`: the prompt is sent as a user turn in the model's chat format
   (`ModelStatus.chat_format`: `chatml`, `llama3`, `zephyr`, `gemma`, `gemma4`
   or `inst`). `system` adds a system message. `mdma-client` sets them with
-  `MDMA_CHAT=1` and `MDMA_SYSTEM`.
+  `MDMA_CHAT=1` and `MDMA_SYSTEM`. For a routed model the origin uses the
+  format its executor's signed catalog advertises and forwards the wrapped
+  turn.
 
 `ModelStatus.geometry` gives a native decoder's layers, widths, heads and KV
 bytes per position.

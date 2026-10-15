@@ -77,6 +77,12 @@ The `mdma-client` binary accepts `MDMA_RPC_TIMEOUT_MS=30000` (1..300000) for bot
 workload operations. Set it together with `MDMA_MODEL=<approved-alias>` for
 routing. Leaving it unset preserves ordinary local calls without a deadline.
 
+A routed `chat` request (`MDMA_CHAT=1`, optionally `MDMA_SYSTEM`) is wrapped
+on the origin, in the chat format the executor's fresh signed catalog
+advertises for that model, and forwarded as a plain prompt; the executor sees
+no new field. A model whose catalog names no format refuses `chat` before any
+dial, as does a system message without `chat`.
+
 ## Bounded lifetime and output
 
 The origin permits one active/undrained routed response, eight client
