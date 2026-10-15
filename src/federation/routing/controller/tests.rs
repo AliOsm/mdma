@@ -79,6 +79,18 @@ impl Federation for Remote {
     ) -> Result<Response<crate::federation::control::LeaseReleased>, Status> {
         self.service.release_lease(request).await
     }
+    async fn install(
+        &self,
+        request: Request<crate::federation::control::InstallRequest>,
+    ) -> Result<Response<crate::federation::control::InstallPlan>, Status> {
+        self.service.install(request).await
+    }
+    async fn upload(
+        &self,
+        request: Request<rama::http::grpc::Streaming<crate::federation::control::UploadPart>>,
+    ) -> Result<Response<crate::federation::control::InstallPlan>, Status> {
+        self.service.upload(request).await
+    }
     async fn identify(
         &self,
         request: Request<IdentifyRequest>,

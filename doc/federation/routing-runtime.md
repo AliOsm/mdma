@@ -173,6 +173,52 @@ replacing the peer's earlier routes, and turns routing and polling on. Run it
 again after the peer's models change. `mdma-fed status <dir>` shows peers,
 grants and routes, also while the node runs.
 
+### Pushing models to a peer
+
+A node can take GGUFs from a peer over the federation listener, so a machine
+nobody logs into can start with an empty models folder and be filled later.
+On the receiving node, with its server stopped:
+
+```sh
+# the peer may push models here while 20 GiB stay free, and sees and runs
+# every model any peer installs here
+mdma-fed enroll /var/lib/mdma/fed periscope.json --install 20G --installed
+```
+
+`--install` and `--installed` are separate grants. Pushing a model grants
+nobody anything; every peer with `--installed` sees and runs every installed
+model, whoever pushed it, so another origin keeps the same view. A node whose
+peers may install may start with no models.
+
+From the pushing node, also stopped:
+
+```sh
+mdma-fed push ~/.mdma/fed ~/models/Qwen3-8B-Q4_K_M.gguf --peer pathfinder.fleet --name qwen3-8b
+mdma-fed routes ~/.mdma/fed --peer pathfinder.fleet --client-cert certs/client.pem
+```
+
+`push` hashes the file and sends its name, size and digest first. The
+receiver answers from everything it holds:
+
+- **Already installed** under any name: nothing is sent; `push` prints the name.
+- **One of its own models** has those bytes: it links the new name to that
+  file, so nothing is sent and the weights load once.
+- **Otherwise** it refuses a taken name or an upload that would leave less than
+  the floor free, and else takes the file.
+
+The file streams into a hidden `.install-<digest>.part` in the models folder,
+one upload at a time, outside the two request slots inference uses. The
+receiver checks size and digest, links it into place (never replacing a file),
+reads it as startup would, and serves it without a restart. A file that is
+not a model it can serve is removed. Hidden uploads cut short are removed when
+the node next starts. `mdma-fed status` lists each installed model and who
+pushed it.
+
+The receiver keeps installs in its trust store, so they outlive restarts, and
+recording one counts as a trust change: a request being admitted at that
+moment fails once. There is no uninstall yet; delete the file and restart to
+drop one, after which its name can be installed again.
+
 ### Hardware acceptance
 
 Development acceptance used independently enrolled ARM64/x86_64 macOS and

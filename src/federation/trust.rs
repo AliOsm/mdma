@@ -15,6 +15,19 @@ use tokio::sync::watch;
 
 const MAX_STATE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_HISTORY: usize = 4096;
+/// Models peers may install here; one catalog lists at most this many.
+pub const MAX_INSTALLED: usize = super::catalog::MAX_DESCRIPTORS;
+
+/// A model a peer pushed here. Who may see and run it follows each peer's
+/// `installed_exports`, not who pushed it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Installed {
+    pub artifact_id: String,
+    pub operation: Operation,
+    pub installer: String,
+    pub installed_at_ms: u64,
+}
 
 mod disclosure;
 pub use disclosure::Disclosure;
@@ -89,9 +102,31 @@ pub struct Snapshot {
     /// Local caller approvals are never imported from a peer catalog.
     #[serde(default)]
     disclosures: Vec<Disclosure>,
+    /// Models peers pushed here, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    installed: BTreeMap<String, Installed>,
 }
 
 impl Snapshot {
+    pub fn installed(&self) -> &BTreeMap<String, Installed> {
+        &self.installed
+    }
+
+    /// What `record` sees in its catalog: its explicit exports, then, with
+    /// `installed_exports`, every installed model, at most one catalog's worth.
+    pub fn catalog_exports(&self, record: &Record) -> Vec<String> {
+        let mut exports = record.policy.catalog_exports.clone();
+        if record.policy.installed_exports {
+            for name in self.installed.keys() {
+                if !exports.contains(name) {
+                    exports.push(name.clone());
+                }
+            }
+        }
+        exports.truncate(super::catalog::MAX_DESCRIPTORS);
+        exports
+    }
+
     /// Current reviewed records, including suspended/revoked history. Reading
     /// these does not confer authorization.
     pub fn disclosures(&self) -> &[Disclosure] {
@@ -196,9 +231,7 @@ impl Snapshot {
                 }
             }
             if record.state != State::Active
-                && (!record.policy.catalog_exports.is_empty()
-                    || !record.policy.execute_exports.is_empty()
-                    || !record.policy.route_imports.is_empty()
+                && (record.policy.has_workload_grants()
                     || record.policy.control_permissions.scan_capabilities)
             {
                 return Err(Error::Denied("inactive peer has workload/catalog grants"));
@@ -207,6 +240,18 @@ impl Snapshot {
                 && record.policy.control_permissions.identify
             {
                 return Err(Error::Denied("disabled peer has Identify grant"));
+            }
+        }
+        if self.installed.len() > MAX_INSTALLED {
+            return Err(Error::Denied("too many installed models"));
+        }
+        for (model, installed) in &self.installed {
+            config::validate_model(model)?;
+            config::validate_digest(&installed.artifact_id)?;
+            super::server_id::validate(&installed.installer)
+                .map_err(|_| Error::Denied("invalid installer identity"))?;
+            if installed.installed_at_ms > config::MAX_SAFE_TIMESTAMP {
+                return Err(Error::Denied("invalid install time"));
             }
         }
         Ok(())
@@ -244,6 +289,10 @@ pub enum Action<'a> {
         profile_id: &'a str,
         operation: Operation,
     },
+    /// The peer pushes a model here.
+    Install,
+    /// This node pushes a model to the peer, which decides whether to take it.
+    Push,
 }
 
 pub struct Store {
@@ -271,6 +320,7 @@ impl Store {
             local_signing_history: BTreeMap::new(),
             retired_local_signing: BTreeSet::new(),
             disclosures: Vec::new(),
+            installed: BTreeMap::new(),
         };
         snapshot.validate(server_id)?;
         let bytes = serde_json::to_vec(&snapshot)?;
@@ -507,6 +557,27 @@ impl Store {
         })
     }
 
+    /// Records `model` as pushed by `installer`, which must still hold the
+    /// install grant. Replaces an entry whose file is gone.
+    pub fn record_install(
+        &self,
+        installer: &str,
+        model: &str,
+        installed: Installed,
+    ) -> Result<(), Error> {
+        self.update(|snapshot| {
+            if !snapshot
+                .peers
+                .get(installer)
+                .is_some_and(|r| r.state == State::Active && r.policy.install.is_some())
+            {
+                return Err(Error::Denied("installer lost its install grant"));
+            }
+            snapshot.installed.insert(model.into(), installed);
+            Ok(())
+        })
+    }
+
     pub fn suspend(&self, id: &str) -> Result<(), Error> {
         self.disable(id, State::Suspended)
     }
@@ -649,15 +720,21 @@ impl Store {
             Action::ScanCapabilities => {
                 record.state == State::Active && record.policy.control_permissions.scan_capabilities
             }
-            Action::PollCatalog => record.state == State::Active,
+            Action::PollCatalog | Action::Push => record.state == State::Active,
             Action::Execute { model, operation } => {
                 record.state == State::Active
-                    && record
+                    && (record
                         .policy
                         .execute_exports
                         .iter()
                         .any(|e| e.model == model && e.operation == operation)
+                        || record.policy.installed_exports
+                            && snapshot
+                                .installed
+                                .get(model)
+                                .is_some_and(|m| m.operation == operation))
             }
+            Action::Install => record.state == State::Active && record.policy.install.is_some(),
             Action::Import {
                 model,
                 artifact_id,

@@ -11,6 +11,36 @@ service Federation {
   rpc AcquireLease(LeaseRequest) returns (LeaseGrant);
   rpc RenewLease(LeaseRenewal) returns (LeaseGrant);
   rpc ReleaseLease(LeaseRelease) returns (LeaseReleased);
+  // Take a GGUF from the origin, or name the model already serving its bytes
+  // here. Needs the install grant.
+  rpc Install(InstallRequest) returns (InstallPlan);
+  // The bytes Install asked for: the same request first, then the file.
+  rpc Upload(stream UploadPart) returns (InstallPlan);
+}
+
+message InstallRequest {
+  string origin = 1;
+  string destination = 2;
+  // Its name here: 1 to 128 of [A-Za-z0-9._-].
+  string model = 3;
+  // The whole file's sha256, as catalogs name artifacts.
+  string artifact_id = 4;
+  uint64 size = 5;
+}
+
+message InstallPlan {
+  // The model serving these bytes here; empty while they are still wanted.
+  string installed = 1;
+  // Where Upload starts the file when nothing is installed yet.
+  uint64 offset = 2;
+}
+
+message UploadPart {
+  oneof part {
+    InstallRequest request = 1;
+    // At most 64 KiB, in file order.
+    bytes data = 2;
+  }
 }
 
 // The exact catalog selection the origin routes to.

@@ -105,6 +105,8 @@ impl Config {
             catalog_exports: vec![],
             execute_exports: vec![],
             route_imports: vec![],
+            install: None,
+            installed_exports: false,
             limits: config::Limits::default(),
         }
     }
@@ -125,6 +127,8 @@ pub struct Prepared {
         Vec<Route>,
     )>,
     execution_enabled: bool,
+    /// A peer may push models here.
+    accepts_installs: bool,
     integrated: bool,
     client_policy: ClientPolicy,
 }
@@ -143,9 +147,14 @@ impl Prepared {
         let store = Arc::new(Store::open(&config.trust_state, &config.server_id)?);
         let snapshot = store.snapshot()?;
         let mut policies: Vec<_> = snapshot.records().map(|r| r.policy.clone()).collect();
-        if policies.iter().any(|p| !p.execute_exports.is_empty()) && !config.enable_execution {
+        if policies
+            .iter()
+            .any(|p| !p.execute_exports.is_empty() || p.installed_exports)
+            && !config.enable_execution
+        {
             return Err("execute grants require explicit enable_execution".into());
         }
+        let accepts_installs = policies.iter().any(|p| p.install.is_some());
         if policies.iter().any(|p| !p.route_imports.is_empty()) && !config.enable_routing {
             return Err("import grants require explicit enable_routing".into());
         }
@@ -233,6 +242,7 @@ impl Prepared {
             polling,
             routing,
             execution_enabled: config.enable_execution,
+            accepts_installs,
             integrated: false,
             client_policy,
         })
@@ -261,7 +271,10 @@ impl Prepared {
         B: crate::backend::Backend + Send + Sync + 'static,
         B::Buf: Send + Sync,
     {
-        self.service = self.service.with_inventory(service.federation_inventory());
+        self.service = self
+            .service
+            .with_inventory(service.federation_inventory())
+            .with_install(service.federation_folder());
         if self.execution_enabled {
             self.service = self.service.with_execution(service.federation_executor());
         }
@@ -297,6 +310,11 @@ impl Prepared {
 
     pub fn execution_enabled(&self) -> bool {
         self.execution_enabled
+    }
+
+    /// Whether a peer may push models here, so the node may start without any.
+    pub fn accepts_installs(&self) -> bool {
+        self.accepts_installs
     }
 
     pub async fn bind(&self, executor: Executor) -> Result<TcpListener, BoxError> {

@@ -28,6 +28,10 @@ impl Stamp {
         })
     }
 
+    pub const fn len(&self) -> u64 {
+        self.len
+    }
+
     #[expect(
         clippy::needless_pass_by_value,
         reason = "callers pass freshly queried metadata"

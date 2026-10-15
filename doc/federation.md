@@ -55,9 +55,11 @@ local client -> origin MDMA -> execution MDMA
 - Whole-request text synthesis and typed-decision delegation, one federation hop.
 - Direct token streaming, bounded resource use and cancellation.
 - No automatic inference retries after dispatch.
+- GGUFs pushed by peers holding an explicit install grant, deduplicated by
+  digest.
 
-Not included: public registration, gossip, multi-hop inference, remote model
-downloads, tensor/KV transfer, replicated conversations, global consensus,
+Not included: public registration, gossip, multi-hop inference, nodes
+downloading models from URLs, tensor/KV transfer, replicated conversations, global consensus,
 payment settlement, portable end-user identity, durable job queues or stream
 resumption.
 
@@ -79,6 +81,8 @@ The proposed `mdma.federation.v1.Federation` service defines:
 | `ScanCapabilities` | Obtain a signed, recipient-specific full snapshot |
 | `Synthesize` | Execute a local decoder and stream admission/tokens/completion |
 | `Decide` | Execute a local typed-decision model and return its result |
+| `Install` | Name the model already holding a GGUF's bytes, or ask for them |
+| `Upload` | Stream the GGUF `Install` asked for |
 
 The client and federation services use distinct RPC paths, message types and
 authorization policies. Federation's `Synthesize` and `Decide` require an
@@ -109,7 +113,8 @@ the selected artifact and execution profile, power state, context limits,
 concurrency and memory before admitting each request.
 
 Only metadata crosses the control plane. Prompts, decision inputs, tokens
-and results are not replicated or broadcast.
+and results are not replicated or broadcast. Model files cross only when an
+operator pushes one to a peer that granted installs.
 
 A remote executor sees the inputs and outputs it processes. mTLS protects
 transport, not secrecy from that operator. The origin must obtain local

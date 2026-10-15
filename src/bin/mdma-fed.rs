@@ -1,8 +1,9 @@
 //! Federation administration: a node's identity, its peers and their grants,
-//! and routes to their models. Changes need `mdma-serve` stopped.
+//! routes to their models and models pushed to them. Changes need `mdma-serve`
+//! stopped.
 use mdma::decision::Contract;
-use mdma::federation::admin::{self, Bundle, Grants};
-use mdma::federation::config::{ExecuteExport, Operation};
+use mdma::federation::admin::{self, Bundle, Grants, Pushed};
+use mdma::federation::config::{ExecuteExport, InstallGrant, Operation};
 use mdma::registry::Source;
 use std::path::{Path, PathBuf};
 use usage_rs::Cli;
@@ -26,6 +27,8 @@ enum Command {
     Enroll(Enroll),
     /// Route a peer's ready models, as PREFIX-MODEL, for one local client.
     Routes(Routes),
+    /// Send a GGUF to a peer, unless it already holds those bytes.
+    Push(Push),
     /// Show peers, grants and routes; works while mdma-serve runs.
     Status(Status),
 }
@@ -68,6 +71,12 @@ struct Enroll {
     /// Models the peer may run: all, or a comma list.
     #[usage(long)]
     execute: Option<String>,
+    /// Let the peer push models here while SIZE stays free on the models disk, e.g. 20G.
+    #[usage(long)]
+    install: Option<String>,
+    /// Let the peer see and run every model peers push here.
+    #[usage(long)]
+    installed: bool,
     /// The models folder; defaults to MDMA_MODELS_DIR.
     #[usage(long, value_hint = usage_rs::ValueHint::DirPath)]
     models: Option<PathBuf>,
@@ -86,6 +95,21 @@ struct Routes {
     /// Alias prefix; defaults to the first label of the peer's id.
     #[usage(long)]
     prefix: Option<String>,
+}
+
+#[derive(Debug, usage_rs::Args)]
+struct Push {
+    #[usage(value_hint = usage_rs::ValueHint::DirPath)]
+    dir: PathBuf,
+    /// The GGUF to send.
+    #[usage(value_hint = usage_rs::ValueHint::FilePath)]
+    file: PathBuf,
+    /// The enrolled peer's server id.
+    #[usage(long)]
+    peer: String,
+    /// Its name on the peer; defaults to the file name without .gguf.
+    #[usage(long)]
+    name: Option<String>,
 }
 
 #[derive(Debug, usage_rs::Args)]
@@ -134,9 +158,34 @@ fn pick(spec: &str, offered: &[(String, Operation)]) -> Result<Vec<(String, Oper
         .collect()
 }
 
+/// Bytes from "20G", "512M" or a plain count; suffixes are powers of 1024.
+fn size(text: &str) -> Result<u64> {
+    let (digits, shift) = match text.chars().last().map(|c| c.to_ascii_uppercase()) {
+        Some('K') => (&text[..text.len() - 1], 10),
+        Some('M') => (&text[..text.len() - 1], 20),
+        Some('G') => (&text[..text.len() - 1], 30),
+        Some('T') => (&text[..text.len() - 1], 40),
+        _ => (text, 0),
+    };
+    digits
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(1 << shift))
+        .ok_or_else(|| format!("{text:?} is not a size like 20G").into())
+}
+
 fn grants(args: &Enroll) -> Result<Grants> {
+    let install = args
+        .install
+        .as_deref()
+        .map(|floor| size(floor).map(|floor_bytes| InstallGrant { floor_bytes }))
+        .transpose()?;
     if args.catalog.is_none() && args.execute.is_none() {
-        return Ok(Grants::default());
+        return Ok(Grants {
+            install,
+            installed: args.installed,
+            ..Grants::default()
+        });
     }
     let offered = offered(args.models.clone())?;
     let execute = args
@@ -155,6 +204,8 @@ fn grants(args: &Enroll) -> Result<Grants> {
             .into_iter()
             .map(|(model, operation)| ExecuteExport { model, operation })
             .collect(),
+        install,
+        installed: args.installed,
     })
 }
 
@@ -217,6 +268,15 @@ fn run(command: Command) -> Result<()> {
             for export in &peer.execute_exports {
                 println!("  runs {}", export.model);
             }
+            if peer.installed_exports {
+                println!("  runs every installed model");
+            }
+            if let Some(install) = peer.install {
+                println!(
+                    "  installs models, keeping {} bytes free",
+                    install.floor_bytes
+                );
+            }
         }
         Command::Routes(args) => {
             let prefix = args
@@ -239,6 +299,38 @@ fn run(command: Command) -> Result<()> {
                 })?;
             for route in routes {
                 println!("{} -> {} {}", route.alias, route.peer_id, route.model);
+            }
+        }
+        Command::Push(args) => {
+            let name = match args.name {
+                Some(name) => name,
+                None => args
+                    .file
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .ok_or("name the model with --name")?
+                    .to_owned(),
+            };
+            let started = std::time::Instant::now();
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let pushed = runtime
+                .block_on(admin::push(&args.dir, &args.peer, &args.file, &name))
+                .inspect_err(|error| {
+                    if error.downcast_ref::<admin::Unreachable>().is_some() {
+                        local_network_hint();
+                    }
+                })?;
+            match pushed {
+                Pushed::Sent(model) => println!(
+                    "pushed {model} to {} in {:.1}s",
+                    args.peer,
+                    started.elapsed().as_secs_f64()
+                ),
+                Pushed::Present(model) => {
+                    println!("{} already holds these bytes as {model}", args.peer);
+                }
             }
         }
         Command::Status(args) => print!("{}", admin::status(&args.dir)?),

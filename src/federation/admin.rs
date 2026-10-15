@@ -5,9 +5,10 @@ use super::{
     catalog::ModelDescriptor,
     catalog_cache::Cache,
     config::{
-        self, CaRoot, ControlPermissions, ExecuteExport, Operation, RouteImport, SigningKey,
-        TlsPin, TlsRole, Window,
+        self, CaRoot, ControlPermissions, ExecuteExport, InstallGrant, Operation, RouteImport,
+        SigningKey, TlsPin, TlsRole, Window,
     },
+    control::{InstallRequest, UploadPart, upload_part},
     routing::Route,
     runtime::{
         Config,
@@ -15,7 +16,7 @@ use super::{
     },
     signing::KeyPairHandle,
     tls,
-    trust::{Disclosure, State, Store},
+    trust::{Action, Disclosure, State, Store},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rama::error::BoxError;
@@ -73,6 +74,19 @@ impl std::error::Error for Unreachable {
 pub struct Grants {
     pub catalog: Vec<String>,
     pub execute: Vec<ExecuteExport>,
+    /// May push models here.
+    pub install: Option<InstallGrant>,
+    /// Sees and runs every model a peer installed here.
+    pub installed: bool,
+}
+
+/// What a push left on the peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pushed {
+    /// The file went over and is listed under this name.
+    Sent(String),
+    /// The peer already had these bytes, listed under this name.
+    Present(String),
 }
 
 /// Writes a new owner-only file; never replaces one.
@@ -296,6 +310,8 @@ pub fn export(dir: &Path) -> Result<Bundle, BoxError> {
         catalog_exports: vec![],
         execute_exports: vec![],
         route_imports: vec![],
+        install: None,
+        installed_exports: false,
         limits: config::Limits::default(),
     };
     peer.validate()?;
@@ -398,8 +414,10 @@ pub fn enroll(
     };
     peer.catalog_exports = grants.catalog;
     peer.execute_exports = grants.execute;
+    peer.install = grants.install;
+    peer.installed_exports = grants.installed;
     store.approve_policy(peer.clone())?;
-    if !peer.execute_exports.is_empty() && !config.enable_execution {
+    if (!peer.execute_exports.is_empty() || peer.installed_exports) && !config.enable_execution {
         config.enable_execution = true;
         save(&dir, &config)?;
     }
@@ -421,11 +439,24 @@ pub async fn routes(
             .map_err(|e| format!("{}: {e}", client_cert.display()))?,
     )?;
     let store = Arc::new(open_store(&config)?);
+    let credentials = credentials(&config, store.clone())?;
+    let catalog = credentials
+        .poll(&Cache::default(), peer, rama::rt::Executor::default())
+        .await
+        .map_err(|cause| failed(peer, "catalog", cause))?;
+    if catalog.server_state.forces_unready() {
+        return Err(format!("{peer} is not accepting work").into());
+    }
+    apply_routes(&dir, config, &store, peer, catalog.models, &caller, prefix)
+}
+
+/// This node dialing out as itself, from its runtime.toml and store.
+fn credentials(config: &Config, store: Arc<Store>) -> Result<Credentials, BoxError> {
     let now = tls::utc_ms()?;
     let signing_key = store.local_signer(&config.signer_id, now)?.bytes()?;
-    let chain = chain(&config)?;
-    let credentials = Credentials {
-        store: store.clone(),
+    let chain = chain(config)?;
+    Ok(Credentials {
+        store,
         key: Arc::new(PrivateKeyDer::from_pem_file(&config.tls_key)?),
         local_expires_ms: tls::local_client_expiry(
             &chain,
@@ -435,24 +466,99 @@ pub async fn routes(
         )?,
         chain,
         signing_key,
-    };
-    let catalog = credentials
-        .poll(&Cache::default(), peer, rama::rt::Executor::default())
-        .await
-        .map_err(|cause| {
-            if outbound::connect_failed(&cause) {
-                BoxError::from(Unreachable {
-                    peer: peer.to_owned(),
-                    cause,
-                })
-            } else {
-                format!("{peer}'s catalog: {cause}").into()
-            }
-        })?;
-    if catalog.server_state.forces_unready() {
-        return Err(format!("{peer} is not accepting work").into());
+    })
+}
+
+/// A failed exchange with `peer`, telling an unreachable peer apart.
+fn failed(peer: &str, what: &str, cause: BoxError) -> BoxError {
+    if outbound::connect_failed(&cause) {
+        BoxError::from(Unreachable {
+            peer: peer.to_owned(),
+            cause,
+        })
+    } else {
+        format!("{peer}'s {what}: {cause}").into()
     }
-    apply_routes(&dir, config, &store, peer, catalog.models, &caller, prefix)
+}
+
+/// Pushes the GGUF at `file` to `peer` as `name`, unless the peer already
+/// holds these bytes. The peer decides with its install grant and disk floor.
+pub async fn push(dir: &Path, peer: &str, file: &Path, name: &str) -> Result<Pushed, BoxError> {
+    config::validate_model(name).map_err(|e| format!("{name:?}: {e}"))?;
+    let (_, config) = load(dir)?;
+    let path = file.to_path_buf();
+    let (artifact_id, size) = tokio::task::spawn_blocking(move || -> Result<_, BoxError> {
+        let mut file =
+            std::fs::File::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (sha, stamp) = crate::cache::fingerprint(&mut file)?;
+        Ok((format!("sha256:{sha}"), stamp.len()))
+    })
+    .await??;
+    let store = Arc::new(open_store(&config)?);
+    let credentials = credentials(&config, store)?;
+    let connected = credentials
+        .connect(peer, Action::Push, rama::rt::Executor::default())
+        .await
+        .map_err(|cause| failed(peer, "install", cause))?;
+    let request = InstallRequest {
+        origin: config.server_id,
+        destination: peer.into(),
+        model: name.into(),
+        artifact_id,
+        size,
+    };
+    let client = connected.client;
+    let file = file.to_path_buf();
+    let exchange = async move {
+        let plan = client.install(request.clone()).await?.into_inner();
+        if !plan.installed.is_empty() {
+            return Ok(Pushed::Present(plan.installed));
+        }
+        let (parts, stream) = tokio::sync::mpsc::channel(16);
+        let offset = plan.offset;
+        let reader = tokio::task::spawn_blocking(move || send_file(&file, request, offset, &parts));
+        let response = client
+            .upload(tokio_stream::wrappers::ReceiverStream::new(stream))
+            .await;
+        reader.await??;
+        Ok::<_, BoxError>(Pushed::Sent(response?.into_inner().installed))
+    };
+    tokio::select! {
+        result = exchange => result.map_err(|cause| failed(peer, "install", cause)),
+        () = connected.drive => Err(format!("{peer} closed the connection during the push").into()),
+        () = tokio::time::sleep_until(connected.binding.deadline().into()) =>
+            Err(format!("{peer}'s credentials expired during the push").into()),
+    }
+}
+
+/// Streams `request` and then the file from `offset`; fails if the file
+/// changes while it is read.
+fn send_file(
+    path: &Path,
+    request: InstallRequest,
+    offset: u64,
+    parts: &tokio::sync::mpsc::Sender<UploadPart>,
+) -> Result<(), BoxError> {
+    use std::io::{Read, Seek};
+    let send = |part| {
+        parts
+            .blocking_send(UploadPart { part: Some(part) })
+            .map_err(|_| BoxError::from("the peer stopped the upload"))
+    };
+    let mut file = std::fs::File::open(path)?;
+    let stamp = crate::cache::Stamp::read(&file.metadata()?)?;
+    file.seek(std::io::SeekFrom::Start(offset))?;
+    send(upload_part::Part::Request(request))?;
+    let mut chunk = vec![0; super::install::CHUNK_BYTES];
+    loop {
+        let n = file.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        send(upload_part::Part::Data(chunk[..n].to_vec()))?;
+    }
+    stamp.check(file.metadata()?)?;
+    Ok(())
 }
 
 pub(crate) fn apply_routes(
@@ -544,6 +650,10 @@ fn remaining(until_ms: u64, now_ms: u64) -> String {
     }
 }
 
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / f64::from(1u32 << 30))
+}
+
 fn operation(operation: Operation) -> &'static str {
     match operation {
         Operation::Synthesize => "synthesize",
@@ -594,6 +704,24 @@ pub fn status(dir: &Path) -> Result<String, BoxError> {
                 .collect();
             writeln!(out, "  runs     {}", runs.join(", "))?;
         }
+        if policy.installed_exports {
+            writeln!(out, "  runs     every installed model")?;
+        }
+        if let Some(install) = policy.install {
+            writeln!(
+                out,
+                "  installs models, keeping {} free",
+                gib(install.floor_bytes)
+            )?;
+        }
+    }
+    for (model, installed) in snapshot.installed() {
+        writeln!(
+            out,
+            "model    {model} ({}) installed by {}",
+            operation(installed.operation),
+            installed.installer
+        )?;
     }
     for route in &config.routes {
         let callers = snapshot

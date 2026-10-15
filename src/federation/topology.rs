@@ -94,11 +94,18 @@ impl Topology {
                     peer_id: peer.server_id.clone(),
                     endpoint: peer.endpoint.clone(),
                     state: state(record.state).into(),
-                    catalog_exports: peer.catalog_exports.clone(),
+                    catalog_exports: snapshot.catalog_exports(record),
                     execute_exports: peer
                         .execute_exports
                         .iter()
                         .map(|e| e.model.clone())
+                        .chain(
+                            snapshot
+                                .installed()
+                                .keys()
+                                .filter(|_| peer.installed_exports)
+                                .cloned(),
+                        )
                         .collect(),
                     route_imports: peer.route_imports.iter().map(|r| r.model.clone()).collect(),
                     catalog,

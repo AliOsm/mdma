@@ -93,10 +93,12 @@ where
         };
         let mut registry = Registry::open(backend.clone(), std::path::Path::new(path), default.as_deref(), options)?;
         if registry.names().is_empty() {
-            if !federation.as_ref().is_some_and(mdma::federation::runtime::Prepared::routing_enabled) {
-                return Err(format!("no usable models in {path}; only a node that routes to peers may have none").into());
+            let routes = federation.as_ref().is_some_and(mdma::federation::runtime::Prepared::routing_enabled);
+            let installs = federation.as_ref().is_some_and(mdma::federation::runtime::Prepared::accepts_installs);
+            if !routes && !installs {
+                return Err(format!("no usable models in {path}; only a node that routes to peers or takes their models may have none").into());
             }
-            eprintln!("mdma: no local models in {path}; serving routes only");
+            eprintln!("mdma: no local models in {path}; {}", if routes { "serving routes only" } else { "waiting for peers to install some" });
         }
         if memory.limit() != usize::MAX {
             eprintln!("mdma native tensor budget: {}/{} bytes reserved (not a process/VRAM cap)", memory.used(), memory.limit());

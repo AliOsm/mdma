@@ -87,13 +87,18 @@ impl Extension for Receipt {}
 pub(crate) struct Gate<S> {
     inner: S,
     decoding: Arc<Semaphore>,
+    /// A model upload streams for minutes; it never holds a decoding permit.
+    upload: Arc<Semaphore>,
 }
+
+const UPLOAD: &str = "/mdma.federation.v1.Federation/Upload";
 
 impl<S> Gate<S> {
     pub(crate) fn new(inner: S) -> Self {
         Self {
             inner,
             decoding: Arc::new(Semaphore::new(2)),
+            upload: Arc::new(Semaphore::new(1)),
         }
     }
 }
@@ -127,7 +132,12 @@ where
     async fn serve(&self, request: Request) -> Result<Response, Infallible> {
         // All RPC body decoding, including control calls, is bounded. No wait
         // queue precedes identity/rate admission.
-        let Ok(_permit) = self.decoding.clone().try_acquire_owned() else {
+        let permits = if request.uri().path().is_some_and(|path| path == UPLOAD) {
+            &self.upload
+        } else {
+            &self.decoding
+        };
+        let Ok(_permit) = permits.clone().try_acquire_owned() else {
             return Ok(Status::resource_exhausted("limit_exceeded")
                 .try_into_http()
                 .expect("static gRPC status"));

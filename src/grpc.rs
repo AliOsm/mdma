@@ -189,6 +189,14 @@ impl<B: Backend> MdmaService<B> {
         })
     }
 
+    pub(crate) fn federation_folder(&self) -> Arc<dyn crate::federation::install::Folder>
+    where
+        B: Send + Sync + 'static,
+        B::Buf: Send + Sync,
+    {
+        Arc::new(self.registry.clone())
+    }
+
     pub(crate) fn federation_local_names(&self) -> Vec<String> {
         self.registry
             .names()

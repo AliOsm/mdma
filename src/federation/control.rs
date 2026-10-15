@@ -9,7 +9,7 @@ use super::tls::{Binding, utc_ms};
 use super::trust::{Action, Store};
 use rama::extensions::{Extensions, ExtensionsRef, Ingress};
 use rama::graceful::WeakShutdownGuard;
-use rama::http::grpc::{Request, Response, Status};
+use rama::http::grpc::{Request, Response, Status, Streaming};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -28,6 +28,7 @@ pub use proto::{
 };
 pub use proto::{DecideRequest, DecideResponse};
 pub use proto::{IdentifyRequest, IdentifyResponse, ScanCapabilitiesRequest, SignedCatalog};
+pub use proto::{InstallPlan, InstallRequest, UploadPart, upload_part};
 pub use proto::{LeaseGrant, LeaseRelease, LeaseReleased, LeaseRenewal, LeaseRequest};
 
 pub struct Signer {
@@ -69,6 +70,21 @@ pub struct ControlService {
     inventory: Arc<dyn Inventory>,
     shutdown: Option<WeakShutdownGuard>,
     execution: Option<super::execution::Service>,
+    install: Option<super::install::Service>,
+}
+
+/// The connection's authenticated peer. Rama stores transport metadata in
+/// Ingress, distinct from caller-supplied gRPC extensions and HTTP headers.
+fn ingress_binding<T>(request: &Request<T>) -> Result<Binding, Status> {
+    let ingress = request
+        .extensions()
+        .get_ref::<Ingress<Extensions>>()
+        .ok_or_else(|| Status::unauthenticated("authenticated TLS ingress absent"))?;
+    Ok(ingress
+        .0
+        .get_ref::<Binding>()
+        .ok_or_else(|| Status::unauthenticated("federation TLS binding absent"))?
+        .clone())
 }
 
 fn clock() -> Result<(u64, Instant), Status> {
@@ -87,6 +103,7 @@ impl ControlService {
             inventory: Arc::new(inventory::Empty),
             shutdown: None,
             execution: None,
+            install: None,
         }
     }
 
@@ -102,6 +119,12 @@ impl ControlService {
 
     pub(crate) fn with_execution(mut self, executor: Arc<dyn super::execution::Executor>) -> Self {
         self.execution = Some(super::execution::Service::new(self.store.clone(), executor));
+        self
+    }
+
+    /// Accept models from peers holding the install grant.
+    pub(crate) fn with_install(mut self, folder: Arc<dyn super::install::Folder>) -> Self {
+        self.install = Some(super::install::Service::new(self.store.clone(), folder));
         self
     }
 
@@ -132,17 +155,26 @@ impl ControlService {
         now_ms: u64,
         now: Instant,
     ) -> Result<(Binding, u64), Status> {
-        // Rama stores authenticated transport metadata in Ingress, distinct from
-        // ordinary caller-supplied gRPC extensions and all HTTP headers.
-        let ingress = request
-            .extensions()
-            .get_ref::<Ingress<Extensions>>()
-            .ok_or_else(|| Status::unauthenticated("authenticated TLS ingress absent"))?;
-        let binding = ingress
-            .0
-            .get_ref::<Binding>()
-            .ok_or_else(|| Status::unauthenticated("federation TLS binding absent"))?
-            .clone();
+        self.admit(
+            ingress_binding(request)?,
+            origin,
+            destination,
+            action,
+            now_ms,
+            now,
+        )
+    }
+
+    /// The peer's authorization and control budget for one RPC.
+    fn admit(
+        &self,
+        binding: Binding,
+        origin: &str,
+        destination: &str,
+        action: Action<'_>,
+        now_ms: u64,
+        now: Instant,
+    ) -> Result<(Binding, u64), Status> {
         if binding.role() != TlsRole::ClientAuth || origin != binding.server_id() {
             return Err(Status::unauthenticated(
                 "origin does not match inbound mTLS principal",
@@ -193,6 +225,12 @@ impl ControlService {
         );
         self.final_check(binding, Action::Execute { model, operation }, generation)?;
         descriptor
+    }
+
+    fn install(&self) -> Result<&super::install::Service, Status> {
+        self.install
+            .as_ref()
+            .ok_or_else(|| Status::unimplemented("install_disabled"))
     }
 
     fn execution(&self) -> Result<&super::execution::Service, Status> {
@@ -329,6 +367,60 @@ impl Federation for ControlService {
         execution.synthesize(request).map(Response::new)
     }
 
+    async fn install(
+        &self,
+        request: Request<InstallRequest>,
+    ) -> Result<Response<InstallPlan>, Status> {
+        let install = self.install()?;
+        let (wall, mono) = clock()?;
+        let message = request.get_ref();
+        let (binding, _) = self.binding(
+            &request,
+            &message.origin,
+            &message.destination,
+            Action::Install,
+            wall,
+            mono,
+        )?;
+        install
+            .install(binding.server_id().to_owned(), request.into_inner())
+            .await
+            .map(Response::new)
+    }
+
+    async fn upload(
+        &self,
+        request: Request<Streaming<UploadPart>>,
+    ) -> Result<Response<InstallPlan>, Status> {
+        let install = self.install()?;
+        let binding = ingress_binding(&request)?;
+        let mut parts = request.into_inner();
+        let first = tokio::time::timeout(Duration::from_secs(30), parts.message())
+            .await
+            .map_err(|_| Status::deadline_exceeded("upload stalled"))??;
+        let Some(UploadPart {
+            part: Some(upload_part::Part::Request(message)),
+        }) = first
+        else {
+            return Err(Status::invalid_argument(
+                "an upload starts with its request",
+            ));
+        };
+        let (wall, mono) = clock()?;
+        let (binding, _) = self.admit(
+            binding,
+            &message.origin,
+            &message.destination,
+            Action::Install,
+            wall,
+            mono,
+        )?;
+        install
+            .upload(binding, message, parts)
+            .await
+            .map(Response::new)
+    }
+
     async fn identify(
         &self,
         request: Request<IdentifyRequest>,
@@ -390,7 +482,8 @@ impl Federation for ControlService {
         if snapshot.generation != generation {
             return Err(Status::aborted("trust changed before inventory"));
         }
-        let inventory = self.inventory(&peer.policy.catalog_exports);
+        let exports = snapshot.catalog_exports(peer);
+        let inventory = self.inventory(&exports);
         let key = self
             .store
             .local_signer(&self.signer.key_id, wall)
@@ -421,10 +514,7 @@ impl Federation for ControlService {
         self.store
             .local_signer(&self.signer.key_id, clock()?.0)
             .map_err(|_| Status::unavailable("local signer authorization changed"))?;
-        if !self
-            .inventory(&peer.policy.catalog_exports)
-            .same_offer(&inventory)
-        {
+        if !self.inventory(&exports).same_offer(&inventory) {
             return Err(Status::aborted(
                 "native inventory/readiness changed while signing",
             ));

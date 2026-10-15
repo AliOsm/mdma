@@ -29,6 +29,8 @@ pub(crate) fn peer() -> Peer {
         catalog_exports: vec![],
         execute_exports: vec![],
         route_imports: vec![],
+        install: None,
+        installed_exports: false,
         limits: Limits::default(),
     }
 }

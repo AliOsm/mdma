@@ -20,6 +20,20 @@ impl ArtifactId {
     }
 }
 
+/// A GGUF's digest, fed in order as its bytes pass by.
+#[derive(Default)]
+pub(crate) struct Hasher(Sha256);
+
+impl Hasher {
+    pub fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    pub fn finish(self) -> ArtifactId {
+        ArtifactId(format!("sha256:{}", hex::encode(self.0.finalize())))
+    }
+}
+
 /// The anonymous copy is private to the loader: no path can retarget it and
 /// nobody outside the loader receives a writable handle. This is not OS
 /// sealing against the operator/root. It costs temporary disk space, not a
@@ -32,7 +46,7 @@ fn freeze_file_with(mut source: File, after_copy: impl FnOnce()) -> io::Result<(
     let stamp = Stamp::read(&source.metadata()?)?;
     source.rewind()?;
     let mut frozen = tempfile::tempfile()?;
-    let mut hash = Sha256::new();
+    let mut hash = Hasher::default();
     let mut chunk = vec![0; 1024 * 1024];
     loop {
         let n = source.read(&mut chunk)?;
@@ -45,10 +59,7 @@ fn freeze_file_with(mut source: File, after_copy: impl FnOnce()) -> io::Result<(
     after_copy();
     stamp.check(source.metadata()?)?;
     frozen.rewind()?;
-    Ok((
-        frozen,
-        ArtifactId(format!("sha256:{}", hex::encode(hash.finalize()))),
-    ))
+    Ok((frozen, hash.finish()))
 }
 
 /// The same digest as a frozen copy, read in place with positional reads so a
@@ -56,7 +67,7 @@ fn freeze_file_with(mut source: File, after_copy: impl FnOnce()) -> io::Result<(
 pub(crate) fn hash_at(file: &File) -> io::Result<ArtifactId> {
     use std::os::unix::fs::FileExt;
     let stamp = Stamp::read(&file.metadata()?)?;
-    let mut hash = Sha256::new();
+    let mut hash = Hasher::default();
     let mut chunk = vec![0; 1024 * 1024];
     let mut offset = 0;
     loop {
@@ -68,10 +79,7 @@ pub(crate) fn hash_at(file: &File) -> io::Result<ArtifactId> {
         offset += n as u64;
     }
     stamp.check(file.metadata()?)?;
-    Ok(ArtifactId(format!(
-        "sha256:{}",
-        hex::encode(hash.finalize())
-    )))
+    Ok(hash.finish())
 }
 
 /// Logical paths are fixed by the consuming loader, never supplied by a

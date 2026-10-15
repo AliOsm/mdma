@@ -156,6 +156,8 @@ fn provision() {
                     catalog_exports: vec![],
                     execute_exports: vec![],
                     route_imports: vec![],
+                    install: None,
+                    installed_exports: false,
                     limits: config::Limits::default(),
                 };
                 peer.validate().unwrap();

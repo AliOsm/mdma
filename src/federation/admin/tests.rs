@@ -121,6 +121,7 @@ fn enrolled_peers_get_their_grants_and_keep_their_credentials() {
             model: "native".into(),
             operation: Operation::Synthesize,
         }],
+        ..Grants::default()
     };
     let peer = enroll(&b, &from_a, Some("https://127.0.0.1:7000"), grants).unwrap();
     assert_eq!(

@@ -134,6 +134,14 @@ pub struct ExecuteExport {
     pub operation: Operation,
 }
 
+/// The peer may push GGUFs here while the models disk keeps `floor_bytes`
+/// free. Pushing grants nobody the model; `installed_exports` does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallGrant {
+    pub floor_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RouteImport {
@@ -196,6 +204,11 @@ pub struct Peer {
     pub execute_exports: Vec<ExecuteExport>,
     #[serde(default)]
     pub route_imports: Vec<RouteImport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<InstallGrant>,
+    /// Sees and runs every model a peer installed here, whoever pushed it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub installed_exports: bool,
     #[serde(default)]
     pub limits: Limits,
 }
@@ -275,7 +288,18 @@ impl Peer {
         peer.catalog_exports.clear();
         peer.execute_exports.clear();
         peer.route_imports.clear();
+        peer.install = None;
+        peer.installed_exports = false;
         peer
+    }
+
+    /// Any grant beyond control: models to see, run, import or install.
+    pub fn has_workload_grants(&self) -> bool {
+        !self.catalog_exports.is_empty()
+            || !self.execute_exports.is_empty()
+            || !self.route_imports.is_empty()
+            || self.install.is_some()
+            || self.installed_exports
     }
 }
 

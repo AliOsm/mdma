@@ -9,10 +9,12 @@ use crate::model::Model;
 use crate::tokenizer::{ChatFormat, Tokenizer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
+mod append;
 pub mod class;
 pub(crate) mod lease;
 mod native;
@@ -28,10 +30,14 @@ pub use scan::scan;
 pub use slot::{Decoder, LoadError, Phase, Use};
 pub use warmup::MAX_WARMUP_ROUNDS;
 
+use append::Append;
 use slot::{Resident, Slot};
 
 /// Free device memory a load leaves for driver state and request buffers.
 const DEVICE_HEADROOM: usize = 256 << 20;
+
+/// Names one registry lists, counting models added while it serves.
+pub const MAX_MODELS: usize = 1024;
 
 #[cfg(test)]
 mod tests;
@@ -158,11 +164,16 @@ pub struct Registry<B: Backend> {
     options: Options,
     /// The models folder, when listed from one.
     dir: Option<PathBuf>,
-    /// Names in order, each with its slot; aliases share one.
-    names: Vec<(String, usize)>,
-    slots: Vec<Slot<B>>,
+    /// Names in order, each with its slot; aliases share one. Both only grow.
+    names: Append<(String, usize)>,
+    slots: Append<Slot<B>>,
+    /// Each slot's file or folder, so an alias finds its slot. Held while
+    /// listing, which serializes additions.
+    identities: Mutex<HashMap<same_file::Handle, usize>>,
     default: usize,
     profiles: Profiles,
+    /// Every model listed at startup has been hashed (or failed to).
+    hashed: AtomicBool,
     /// Ticks when a model starts or finishes loading, or its artifact is known.
     changes: watch::Sender<u64>,
     /// One load admits memory, and evicts for it, at a time.
@@ -219,15 +230,29 @@ impl<B: Backend> Registry<B> {
             chat_format: decoder.tokenizer.chat_format(),
             decision: None,
         };
-        let options = Options::new(info.n_ctx);
+        let registry = Self::empty(backend, Options::new(info.n_ctx));
+        registry
+            .slots
+            .push(Slot::fixed(info, decoder))
+            .unwrap_or_else(|_| unreachable!("an empty registry has room"));
+        registry
+            .names
+            .push((name.to_owned(), 0))
+            .unwrap_or_else(|_| unreachable!("an empty registry has room"));
+        registry
+    }
+
+    fn empty(backend: Arc<B>, options: Options) -> Self {
         Self {
             backend,
             options,
             dir: None,
-            names: vec![(name.to_owned(), 0)],
-            slots: vec![Slot::fixed(info, decoder)],
+            names: Append::with_capacity(MAX_MODELS),
+            slots: Append::with_capacity(MAX_MODELS),
+            identities: Mutex::new(HashMap::new()),
             default: 0,
             profiles: Profiles::default(),
+            hashed: AtomicBool::new(false),
             changes: watch::Sender::new(0),
             admission: Mutex::new(()),
             leases: lease::Table::default(),
@@ -256,30 +281,32 @@ impl<B: Backend> Registry<B> {
         {
             crate::cache::require_original_source().map_err(|e| Error::Config(e.to_string()))?;
         }
-        let mut registry = Self {
-            backend,
-            options,
-            dir: None,
-            names: Vec::new(),
-            slots: Vec::new(),
-            default: 0,
-            profiles: Profiles::default(),
-            changes: watch::Sender::new(0),
-            admission: Mutex::new(()),
-            leases: lease::Table::default(),
-        };
-        let mut identities: HashMap<same_file::Handle, usize> = HashMap::new();
-        for (name, source) in models {
-            if name.trim().is_empty() {
-                return Err(Error::Config("a model has an empty name".into()));
-            }
-            if registry.names.iter().any(|(listed, _)| *listed == name) {
-                return Err(Error::Config(format!("model {name:?} is listed twice")));
-            }
-            match registry.preflight(&source, &mut identities) {
-                Ok(slot) => registry.names.push((name, slot)),
-                Err(e) if skip_invalid => eprintln!("mdma: skipping model {name}: {e}"),
-                Err(source) => return Err(Error::Load { name, source }),
+        if models.len() > MAX_MODELS {
+            return Err(Error::Config(format!(
+                "{} models listed; at most {MAX_MODELS}",
+                models.len()
+            )));
+        }
+        let mut registry = Self::empty(backend, options);
+        {
+            let mut identities = registry.identities.lock().expect("identity lock poisoned");
+            for (name, source) in models {
+                if name.trim().is_empty() {
+                    return Err(Error::Config("a model has an empty name".into()));
+                }
+                if registry.names.iter().any(|(listed, _)| *listed == name) {
+                    return Err(Error::Config(format!("model {name:?} is listed twice")));
+                }
+                match registry.preflight(&source, &mut identities) {
+                    Ok(slot) => {
+                        registry
+                            .names
+                            .push((name, slot))
+                            .unwrap_or_else(|_| unreachable!("checked against MAX_MODELS"));
+                    }
+                    Err(e) if skip_invalid => eprintln!("mdma: skipping model {name}: {e}"),
+                    Err(source) => return Err(Error::Load { name, source }),
+                }
             }
         }
         registry.default = match default {
@@ -294,11 +321,13 @@ impl<B: Backend> Registry<B> {
     }
 
     /// Reads metadata only; aliases of one file or folder share a slot.
+    /// `identities` is the held lock, so slots are pushed one at a time.
     fn preflight(
-        &mut self,
+        &self,
         source: &Source,
         identities: &mut HashMap<same_file::Handle, usize>,
     ) -> std::result::Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let full = |_| "the registry lists the most models it can";
         match source {
             Source::Gguf(path) => {
                 let (pinned, handle) = native::Pinned::open(path)?;
@@ -327,14 +356,18 @@ impl<B: Backend> Registry<B> {
                     chat_format: tokenizer.chat_format(),
                     decision: crate::decision::Contract::detect(&gguf, &tokenizer, class),
                 };
-                identities.insert(handle, self.slots.len());
-                self.slots.push(Slot::new(
-                    info,
-                    slot::Source::Gguf {
-                        pinned,
-                        tokenizer: Arc::new(tokenizer),
-                    },
-                ));
+                let index = self
+                    .slots
+                    .push(Slot::new(
+                        info,
+                        slot::Source::Gguf {
+                            pinned,
+                            tokenizer: Arc::new(tokenizer),
+                        },
+                    ))
+                    .map_err(full)?;
+                identities.insert(handle, index);
+                Ok(index)
             }
             Source::Laya(dir) => {
                 let handle = same_file::Handle::from_path(dir)?;
@@ -357,12 +390,71 @@ impl<B: Backend> Registry<B> {
                     chat_format: None,
                     decision: Some(crate::decision::Contract::Laya),
                 };
-                identities.insert(handle, self.slots.len());
-                self.slots
-                    .push(Slot::new(info, slot::Source::Laya(dir.clone())));
+                let index = self
+                    .slots
+                    .push(Slot::new(info, slot::Source::Laya(dir.clone())))
+                    .map_err(full)?;
+                identities.insert(handle, index);
+                Ok(index)
             }
         }
-        Ok(self.slots.len() - 1)
+    }
+
+    /// Lists `<name>.gguf` from the models folder while serving, as startup
+    /// would have. `artifact` is the digest the caller took of the file it
+    /// wrote; every load re-checks it. A link to a listed file shares its slot.
+    pub fn add(&self, name: &str, artifact: Option<ArtifactId>) -> Result<()> {
+        crate::federation::config::validate_model(name)
+            .map_err(|e| Error::Config(format!("{name:?}: {e}")))?;
+        let dir = self
+            .dir
+            .as_deref()
+            .ok_or_else(|| Error::Config("models are not listed from a folder".into()))?;
+        if self.options.frozen {
+            crate::cache::require_original_source().map_err(|e| Error::Config(e.to_string()))?;
+        }
+        let mut identities = self.identities.lock().expect("identity lock poisoned");
+        if self.names.iter().any(|(listed, _)| listed == name) {
+            return Err(Error::Config(format!("model {name:?} is already listed")));
+        }
+        let source = Source::Gguf(dir.join(format!("{name}.gguf")));
+        let index = self
+            .preflight(&source, &mut identities)
+            .map_err(|source| Error::Load {
+                name: name.to_owned(),
+                source,
+            })?;
+        if let Some(artifact) = artifact {
+            same_artifact(&self.slots[index], &artifact).map_err(|e| Error::Load {
+                name: name.to_owned(),
+                source: e.into(),
+            })?;
+            self.slots[index].set_artifact(artifact);
+        }
+        self.names
+            .push((name.to_owned(), index))
+            .map_err(|_| Error::Config(format!("at most {MAX_MODELS} models")))?;
+        drop(identities);
+        self.changed();
+        Ok(())
+    }
+
+    /// The first name serving these exact bytes.
+    pub fn find_artifact(&self, artifact_id: &str) -> Option<&str> {
+        self.names
+            .iter()
+            .find(|(_, index)| {
+                self.slots[*index]
+                    .artifact()
+                    .is_some_and(|known| known.as_str() == artifact_id)
+            })
+            .map(|(name, _)| name.as_str())
+    }
+
+    /// Whether [`Self::hash_artifacts`] has finished, so every listed model's
+    /// artifact that can be known is.
+    pub fn hashed(&self) -> bool {
+        self.hashed.load(Ordering::Acquire)
     }
 
     pub const fn backend(&self) -> &Arc<B> {
@@ -554,7 +646,7 @@ impl<B: Backend> Registry<B> {
         if !self.options.frozen {
             return;
         }
-        for (name, index) in &self.names {
+        for (name, index) in self.names.iter() {
             let slot = &self.slots[*index];
             if cancelled() {
                 return;
@@ -575,13 +667,14 @@ impl<B: Backend> Registry<B> {
                 Err(e) => eprintln!("mdma: cannot hash model {name}: {e}"),
             }
         }
+        self.hashed.store(true, Ordering::Release);
     }
 
     /// Load every model now, for a server that preloads. Returns the ones that did not load.
     pub fn preload(&self) -> Vec<(String, LoadError)> {
         let mut failures = Vec::new();
         let mut done = Vec::new();
-        for (name, index) in &self.names {
+        for (name, index) in self.names.iter() {
             if done.contains(index) {
                 continue;
             }
@@ -755,8 +848,9 @@ impl<B: Backend> Registry<B> {
 
     /// One profile per workload for this backend. Only concrete implemented
     /// backends (not labels or caller claims) and native CPU Laya have a
-    /// defined vocabulary. Returns how many models can export. Recapture clears
-    /// old snapshots before any fallible work.
+    /// defined vocabulary. Returns how many models can export now; a folder
+    /// with none still gets profiles for the models [`Self::add`] lists later.
+    /// Recapture clears old snapshots before any fallible work.
     pub fn capture_execution_profiles(&mut self) -> std::io::Result<usize>
     where
         B: 'static,
@@ -785,7 +879,7 @@ impl<B: Backend> Registry<B> {
                 Kind::Gguf => cpu || gpu.is_some(),
             })
             .count();
-        if exportable == 0 {
+        if exportable == 0 && self.dir.is_none() {
             return Ok(0);
         }
         let executor = Arc::new(capture()?);

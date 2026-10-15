@@ -17,6 +17,7 @@
 //! - [`tls`]: per-peer PKI, explicit certificate purpose/identity/SPKI checks
 //!   and authenticated full-handshake bindings.
 //! - [`control`]: authenticated Identify and signed catalog RPCs.
+//! - `install`: models a peer with the install grant pushes here.
 //! - [`catalog_cache`]: bounded challenges and verified expiring snapshots.
 //! - [`runtime`]: opt-in listener, catalog polling and native/client integration.
 //!
@@ -31,6 +32,7 @@ pub mod catalog_cache;
 pub mod config;
 pub mod control;
 pub(crate) mod execution;
+pub(crate) mod install;
 pub(crate) mod inventory;
 pub mod profile;
 pub(crate) mod routing;

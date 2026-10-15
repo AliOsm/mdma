@@ -357,6 +357,10 @@ in the Mac's budget.
 - **Stopping and changing**: stop a server with Ctrl-C. `mdma-fed status fed`
   shows peers, grants and routes, also while it runs. After a peer's models
   change, stop the Mac's server, run `mdma-fed routes` again and restart it.
+- **Machines you do not log into**: enroll a peer with `--install 20G
+  --installed` and the node may start with an empty models folder; push GGUFs
+  to it with `mdma-fed push`. See
+  [pushing models](federation/routing-runtime.md#pushing-models-to-a-peer).
 - **Certificates expire** after 30 days by default (`mdma-fed init --days`, up
   to 397). Renewing is a new `init` and enrolling again.
 - **macOS services**: Local Network privacy remembers its answer per signed
