@@ -39,9 +39,9 @@ change greedy tokens within a few dozen steps.
 
 The direct f32 SIMD experiment keeps activations in f32 and dequantizes Q4_K
 blocks while computing each dot product. Set `MDMA_CPU_Q4K_F32_DOT=1` to
-select it. The three modes can be run in fresh processes with the checked-in
-runner (the separate processes are required because the environment switches
-are read once):
+select it. The exact, packed, and direct f32 modes can be run in fresh
+processes with the checked-in runner (the separate processes are required
+because the environment switches are read once):
 
 ```sh
 RAYON_NUM_THREADS=24 MDMA_CPU_LIST=0-23 \
@@ -49,10 +49,10 @@ RAYON_NUM_THREADS=24 MDMA_CPU_LIST=0-23 \
 ```
 
 The runner records the revision, model SHA-256, CPU, thread pinning, compiler
-flags, workload, and one JSON result for each of `exact`, `q8`, and `f32`.
+flags, workload, and one JSON result for each of `exact`, `packed`, and `f32`.
 The direct path's fixture-free parity gate allows at most `5e-4` absolute
-dot-product drift from Candle's f32 dequantization reference; the packed Q8_K
-path uses a separate `0.5` fixture bound because activation requantization is
+dot-product drift from Candle's f32 dequantization reference; the packed Q4_K
+fixture uses a separate `0.5` bound because activation requantization is
 approximate:
 
 ```sh

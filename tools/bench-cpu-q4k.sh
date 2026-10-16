@@ -46,7 +46,7 @@ run_mode() {
     case "$mode" in
         exact)
             ;;
-        q8)
+        packed)
             mode_env+=(MDMA_CPU_MATMUL=packed)
             ;;
         f32)
@@ -58,13 +58,13 @@ run_mode() {
             ;;
     esac
     printf '\nmode=%s\n' "$mode" | tee -a "$output"
-    env -u MDMA_CPU_MATMUL -u MDMA_CPU_Q4K_F32_DOT \
+    env -u MDMA_CPU_MATMUL -u MDMA_CPU_Q4K_VEC_DOT -u MDMA_CPU_Q4K_F32_DOT \
         "${mode_env[@]}" "${runner[@]}" "$binary" \
         "$model" "$prompt_tokens" "$decode_steps" "$repetitions" | tee -a "$output"
 }
 
 run_mode exact
-run_mode q8
+run_mode packed
 run_mode f32
 
 printf '\nresults=%s\n' "$(realpath "$output")"
