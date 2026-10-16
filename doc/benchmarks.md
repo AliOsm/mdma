@@ -52,7 +52,7 @@ RAYON_NUM_THREADS=24 MDMA_CPU_LIST=0-23 \
 ```
 
 The runner records the revision, model SHA-256, CPU, thread pinning, compiler
-flags, workload, and one JSON result for each of `exact` and `q8`
+flags, workload, and one JSON result for each of `exact` and `packed`
 (`MDMA_CPU_MATMUL=packed`). The fused kernel's gate requires the same bits as
 the dequantized row; the packed path uses a `0.5` fixture bound because
 activation requantization is approximate:

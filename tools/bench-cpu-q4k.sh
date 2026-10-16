@@ -46,7 +46,7 @@ run_mode() {
     case "$mode" in
         exact)
             ;;
-        q8)
+        packed)
             mode_env+=(MDMA_CPU_MATMUL=packed)
             ;;
         *)
@@ -61,6 +61,6 @@ run_mode() {
 }
 
 run_mode exact
-run_mode q8
+run_mode packed
 
 printf '\nresults=%s\n' "$(realpath "$output")"
