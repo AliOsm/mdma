@@ -11,7 +11,10 @@ use rayon::prelude::*;
 use std::sync::OnceLock;
 
 mod fused;
+pub mod isa;
 mod packed;
+
+pub use isa::isa;
 
 #[derive(Default)]
 pub struct CpuBackend;
@@ -96,7 +99,7 @@ fn qmatmul_in(mode: Matmul, w: &QWeight<CpuBuf>, x_f32: &[f32], y_f32: &mut [f32
                     dot
                 } else {
                     dequant_row_at(w, row, n_in, row_f32)?;
-                    row_dot(row_f32, x_f32)
+                    kernels().row_dot(row_f32, x_f32)
                 };
                 Ok::<(), Error>(())
             },
@@ -115,7 +118,7 @@ fn qmatmul_in(mode: Matmul, w: &QWeight<CpuBuf>, x_f32: &[f32], y_f32: &mut [f32
             dequant_row_at(w, row, n_in, row_f32)?;
             for (t, y) in out.iter_mut().enumerate() {
                 let x_t = &x_f32[t * n_in..(t + 1) * n_in];
-                *y = row_dot(row_f32, x_t);
+                *y = kernels().row_dot(row_f32, x_t);
             }
             Ok::<(), Error>(())
         },
@@ -164,9 +167,64 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 /// Lanes a row's products are summed in; fused kernels add to the same ones.
 const LANES: usize = 16;
 
+isa::multiversion! {
+    /// `row_dot` per level; every level gives the same bits.
+    fn row_dot_at(a: &[f32], b: &[f32]) -> f32 = row_dot;
+}
+
+/// The exact kernels at one level. One exists only for a level this CPU
+/// has, which is what makes calling through its pointers sound.
+struct Kernels {
+    level: isa::Level,
+    row_dot: unsafe fn(&[f32], &[f32]) -> f32,
+    q4k: unsafe fn(&[u8], &[f32]) -> f32,
+}
+
+impl Kernels {
+    fn at(level: isa::Level) -> Option<Self> {
+        Some(Self {
+            level,
+            row_dot: row_dot_at(level)?,
+            q4k: fused::q4k_at(level)?,
+        })
+    }
+
+    #[allow(unsafe_code)]
+    fn row_dot(&self, a: &[f32], b: &[f32]) -> f32 {
+        // SAFETY: `at` holds a variant only for a level `isa` detected.
+        unsafe { (self.row_dot)(a, b) }
+    }
+
+    #[allow(unsafe_code)]
+    fn q4k(&self, row: &[u8], x: &[f32]) -> f32 {
+        // SAFETY: `at` holds a variant only for a level `isa` detected.
+        unsafe { (self.q4k)(row, x) }
+    }
+}
+
+/// The kernels for this CPU's level, chosen by [`init`] at startup.
+fn kernels() -> &'static Kernels {
+    static KERNELS: OnceLock<Kernels> = OnceLock::new();
+    KERNELS.get_or_init(|| Kernels::at(isa().level).expect("the detected level runs on this CPU"))
+}
+
+/// Startup: detects the CPU's instruction sets, picks the kernels for them
+/// and fixes the matmul mode, once, before any work. A machine does not
+/// change under a running process; generation only follows the choice.
+pub fn init(matmul: Matmul) -> std::result::Result<&'static isa::Isa, String> {
+    choose_matmul(matmul)?;
+    debug_assert_eq!(kernels().level, isa().level);
+    Ok(isa())
+}
+
 /// A weight row against an activation: products summed in 16 fixed lanes,
 /// then the lanes and the tail in order. The order does not depend on the
-/// machine or the thread count, and the compiler can vectorize it.
+/// machine, the thread count or the vector width the compiler picks.
+#[expect(
+    clippy::inline_always,
+    reason = "each multiversioned variant compiles this body with its own instruction sets"
+)]
+#[inline(always)]
 fn row_dot(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);

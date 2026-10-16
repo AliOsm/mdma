@@ -103,6 +103,9 @@ fn run<B: Backend>(backend: &B, name: &str, init_seconds: f64, args: &[String]) 
         "{}",
         json!({
             "backend": name, "architecture": architecture, "model": args[0], "execution": execution,
+            "cpu_matmul": mdma::backend::cpu::matmul().name(),
+            "cpu_kernels": mdma::backend::cpu::isa().level.name(),
+            "cpu_instruction_sets": &mdma::backend::cpu::isa().features,
             "artifact_bytes": artifact_bytes, "backend_init_seconds": init_seconds,
             "load_seconds": load_seconds, "prompt_tokens": prompt_len, "decode_steps": steps,
             "context_capacity": capacity, "kv_element_bytes": backend.kv_elem_bytes(),

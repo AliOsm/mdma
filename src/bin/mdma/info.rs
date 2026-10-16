@@ -30,7 +30,11 @@ pub(super) struct Args {
 }
 
 pub(super) fn collect(args: &Args) -> Result<report::Report, Box<dyn std::error::Error>> {
-    Ok(platform::collect(args.dmi_file.as_deref())?)
+    let mut report = platform::collect(args.dmi_file.as_deref())?;
+    let isa = mdma::backend::cpu::isa();
+    report.cpu.instruction_sets.clone_from(&isa.features);
+    report.cpu.kernel_level = isa.level.name();
+    Ok(report)
 }
 
 pub(super) fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {

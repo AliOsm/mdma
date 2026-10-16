@@ -282,7 +282,13 @@ async fn launch(config: Config, guard: ShutdownGuard) -> Result<(), BoxError> {
         prepared.serve(listener, executor).await?;
         return Ok(());
     }
-    mdma::backend::cpu::choose_matmul(config.cpu_matmul)?;
+    let isa = mdma::backend::cpu::init(config.cpu_matmul)?;
+    eprintln!(
+        "mdma CPU matmul {}, kernels {} ({})",
+        config.cpu_matmul.name(),
+        isa.level.name(),
+        isa.features.join(", ")
+    );
     match config.backend.as_str() {
         "cpu" => run(|| Ok(CpuBackend), "cpu", config, guard).await,
         #[cfg(feature = "rocm")]

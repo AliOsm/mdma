@@ -94,6 +94,16 @@ fn write_text(out: &mut String, report: &Report) -> std::fmt::Result {
     }
     writeln!(
         out,
+        "  Instruction sets: {} (kernels: {})",
+        if cpu.instruction_sets.is_empty() {
+            "none detected".to_owned()
+        } else {
+            cpu.instruction_sets.join(", ")
+        },
+        known(Some(cpu.kernel_level).filter(|level| !level.is_empty()))
+    )?;
+    writeln!(
+        out,
         "\nRAM\n  Physical capacity: {}\n  OS reported: {}\n  OS available now: {}{}",
         bytes(report.memory.installed_bytes),
         bytes(report.memory.total_bytes),

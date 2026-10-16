@@ -40,7 +40,7 @@ pub fn built(name: &str) -> bool {
 /// Builds backend `name` and runs `task` on it. `MDMA_HIP_F32=1` selects
 /// ROCm's f32 compute and KV; `MDMA_CPU_MATMUL` how CPU work multiplies.
 pub fn dispatch<T: Task>(name: &str, task: T) -> Result<T::Output> {
-    super::cpu::choose_matmul(super::cpu::Matmul::from_env()?)?;
+    super::cpu::init(super::cpu::Matmul::from_env()?)?;
     match name {
         "cpu" => task.run(CpuBackend),
         #[cfg(all(feature = "vulkan", not(target_os = "macos")))]

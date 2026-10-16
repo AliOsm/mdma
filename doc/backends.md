@@ -48,6 +48,16 @@ execution profile names it, so federation peers see which one runs. Build with
 `RUSTFLAGS="-C target-cpu=native"` (as `just install` does) for the AVX2/NEON
 kernels.
 
+A binary built for a target's baseline still runs wider vectors where the
+machine has them: at startup, `backend::cpu::init` detects the instruction
+sets once and picks the exact path's dot and fused Q4_K kernels for them, the
+`x86-64-v4` (AVX-512), `x86-64-v3` (AVX2, FMA, F16C) or baseline variant.
+Generation only follows that choice; nothing is detected per request. All variants give the same
+bits, so the choice is not part of the execution profile; `mdma info`,
+`mdma-bench` and `mdma-serve`'s startup log show it. On aarch64 NEON is the
+baseline; dotprod, i8mm, fp16, bf16, SVE and SVE2 are reported for kernels
+that will use them.
+
 ## Execution modes
 
 `Session` uses graph replay on supported HIP decode configurations.

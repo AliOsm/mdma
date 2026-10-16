@@ -17,7 +17,8 @@ pub(super) fn row_dot(w: &QWeight<CpuBuf>, row: usize, n_in: usize, x: &[f32]) -
         GgmlDType::Q4K if n_in.is_multiple_of(Q4K_VALUES) && x.len() == n_in => {
             let row_bytes = Q4K_BYTES * (n_in / Q4K_VALUES);
             let start = row.checked_mul(row_bytes)?;
-            Some(q4k(w.buf.0.get(start..start.checked_add(row_bytes)?)?, x))
+            let bytes = w.buf.0.get(start..start.checked_add(row_bytes)?)?;
+            Some(super::kernels().q4k(bytes, x))
         }
         _ => None,
     }
@@ -35,7 +36,17 @@ fn scale_min(j: usize, q: &[u8]) -> (u8, u8) {
     }
 }
 
-fn q4k(row: &[u8], x: &[f32]) -> f32 {
+super::isa::multiversion! {
+    /// `q4k` per level; every level gives the same bits.
+    pub(super) fn q4k_at(row: &[u8], x: &[f32]) -> f32 = q4k;
+}
+
+#[expect(
+    clippy::inline_always,
+    reason = "each multiversioned variant compiles this body with its own instruction sets"
+)]
+#[inline(always)]
+pub(super) fn q4k(row: &[u8], x: &[f32]) -> f32 {
     let mut lanes = [0f32; LANES];
     // Every run below is 16 values starting at a multiple of 16, taken in
     // increasing order, so value i lands in lane i % 16 after value i - 16.

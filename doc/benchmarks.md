@@ -115,8 +115,19 @@ tokens per second.
 | --- | ---: | ---: |
 | Sequential f32 dot (before) | 1.85 | 1.59 |
 | `exact`: 16-lane f32 dot | 2.99 | 2.56 |
+| `exact`: plus the fused Q4_K kernel | 6.12 | 5.40 |
 | Packed Q4_K only (first experiment) | 6.26 | 5.64 |
 | `packed`: every quantized type | 10.70 | 8.92 |
+
+The host is an AMD Ryzen 7 5800H (AVX2). The same `exact` path from a default
+build without `target-cpu=native`, as `cargo install` makes it:
+
+| Default build | Prefill | Decode |
+| --- | ---: | ---: |
+| Kernels compiled for SSE2 only | 4.54 | 3.98 |
+| `x86-64-v3` kernels picked at startup | 5.78 | 5.08 |
+
+Greedy output of all three builds was identical on every prompt tried.
 
 Greedy output of `exact` matched the sequential dot on every prompt tried, and
 the pinned Gemma 4 E2B and TinyLlama CPU checkpoints pass with it. `packed`

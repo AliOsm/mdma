@@ -244,6 +244,38 @@ fn packed_matmul_tracks_the_exact_path_for_every_quantized_type() {
 }
 
 #[test]
+fn every_kernel_level_this_cpu_runs_gives_the_same_bits() {
+    use super::Kernels;
+    use super::isa::{Level, isa};
+    // 1000 values: 62 full sets of 16 lanes and a tail of 8.
+    let a: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.37).sin()).collect();
+    let b: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.11).cos()).collect();
+    let q4k = crate::gguf::tests::weight(&[1, 512], GgmlDType::Q4K, 3)
+        .data()
+        .unwrap()
+        .into_owned();
+    let x: Vec<f32> = (0..512).map(|i| (i as f32 * 0.23).sin()).collect();
+    let baseline = Kernels::at(Level::Baseline).expect("every CPU runs its baseline");
+    let (dot, fused) = (baseline.row_dot(&a, &b), baseline.q4k(&q4k, &x));
+    let mut ran = Vec::new();
+    for level in [Level::Baseline, Level::X86V3, Level::X86V4] {
+        let Some(kernels) = Kernels::at(level) else {
+            assert!(
+                level > isa().level,
+                "{level:?} is detected but has no kernels"
+            );
+            continue;
+        };
+        let got = kernels.row_dot(&a, &b);
+        assert_eq!(got.to_bits(), dot.to_bits(), "row_dot at {level:?}");
+        let got = kernels.q4k(&q4k, &x);
+        assert_eq!(got.to_bits(), fused.to_bits(), "fused Q4_K at {level:?}");
+        ran.push(level);
+    }
+    assert_eq!(ran.last(), Some(&isa().level), "{ran:?} up to {:?}", isa());
+}
+
+#[test]
 fn qmatmul_batched_matches_sequential_single_token_calls() {
     let backend = CpuBackend;
     let w = QWeight {
