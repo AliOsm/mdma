@@ -123,7 +123,16 @@ impl ExecutionProfile {
             ),
             (
                 "matmul".into(),
-                Value::String("rayon-rows-sequential-f32-dot".into()),
+                Value::String(
+                    // Laya's f32 weights never take the packed path.
+                    match (laya, crate::backend::cpu::matmul()) {
+                        (false, crate::backend::cpu::Matmul::Packed) => {
+                            "rayon-rows-packed-q8-activation-blocks-else-16-lane-f32-dot"
+                        }
+                        _ => "rayon-rows-16-lane-f32-dot",
+                    }
+                    .into(),
+                ),
             ),
             (
                 "attention".into(),

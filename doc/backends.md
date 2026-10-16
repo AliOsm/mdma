@@ -35,6 +35,19 @@ the unused tail, matching the CPU buffer contract.
 The feature has no Apple dependencies on non-macOS targets, where selecting
 `MDMA_BACKEND=metal` reports an explicit platform error.
 
+## CPU matmul
+
+The CPU dequantizes each weight row to f32 and sums its products in 16 fixed
+lanes: deterministic on every machine and thread count, and vectorized by the
+compiler. `MDMA_CPU_MATMUL=packed` (default `exact`) instead quantizes each
+activation once per matmul to the weight type's dot type and multiplies rows
+in their blocks with Candle's kernels, several times faster on Q4_K_M models
+and not the same logits. `mdma-serve`, `mdma-run`, `mdma-bench` and `mdma`
+read it at startup, refuse other values, and fix it for the process; the CPU
+execution profile names it, so federation peers see which one runs. Build with
+`RUSTFLAGS="-C target-cpu=native"` (as `just install` does) for the AVX2/NEON
+kernels.
+
 ## Execution modes
 
 `Session` uses graph replay on supported HIP decode configurations.

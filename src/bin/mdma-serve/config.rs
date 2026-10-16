@@ -47,6 +47,9 @@ pub(super) struct Config {
         expect(dead_code, reason = "consumed only by the ROCm backend")
     )]
     pub rocm_f32: bool,
+    /// MDMA_CPU_MATMUL: how CPU work multiplies quantized weights, Laya's
+    /// and fallbacks' included, whatever the backend.
+    pub cpu_matmul: mdma::backend::cpu::Matmul,
     /// MDMA_N_CTX lowers every model's context; `None` uses each model's trained context.
     pub n_ctx: Option<usize>,
     /// MDMA_MAX_OUTPUT_TOKENS: the most tokens one request may generate.
@@ -198,6 +201,11 @@ impl Config {
         let host_buffer_bytes = byte_limit("MDMA_HOST_BUFFER_BYTES")?;
         let backend = optional("MDMA_BACKEND", "cpu")?;
         let rocm_f32 = flag("MDMA_HIP_F32")?;
+        let cpu_matmul = match env("MDMA_CPU_MATMUL") {
+            Ok(value) => mdma::backend::cpu::Matmul::parse(Some(&value))?,
+            Err(VarError::NotPresent) => mdma::backend::cpu::Matmul::default(),
+            Err(e) => return Err(format!("MDMA_CPU_MATMUL: {e}").into()),
+        };
         if (device_buffer_bytes.is_some() || host_buffer_bytes.is_some())
             && !matches!(backend.as_str(), "rocm" | "cuda" | "vulkan")
         {
@@ -283,6 +291,7 @@ impl Config {
             node,
             backend,
             rocm_f32,
+            cpu_matmul,
             n_ctx: optional_positive("MDMA_N_CTX", u32::MAX)?.map(|n| n as usize),
             max_output_tokens: positive(
                 "MDMA_MAX_OUTPUT_TOKENS",

@@ -22,6 +22,9 @@ Clients default to `MDMA_ADDR=localhost:6362`.
 
 `MDMA_BACKEND` accepts `cpu` (default), `rocm`, `level0`, `vulkan`, `cuda`,
 or `metal`, with the corresponding build feature and supported hardware.
+`MDMA_CPU_MATMUL=exact|packed` picks how CPU work multiplies quantized weights
+(see [backends](backends.md#cpu-matmul)); `packed` is several times faster on
+the CPU and changes logits.
 Each model uses the context it was trained for (`<arch>.context_length` in its
 GGUF); `MDMA_N_CTX` optionally lowers it for every model and never raises it. A
 prompt must fit that context. Output is capped by the space left and by
