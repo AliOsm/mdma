@@ -179,6 +179,70 @@ fn attn_decode_matches_hand_computed_softmax_weighted_sum() {
 }
 
 #[test]
+fn packed_matmul_tracks_the_exact_path_for_every_quantized_type() {
+    use super::{Matmul, dequant_row_at, qmatmul_in};
+    let (n_out, n_in, n_tokens) = (8, 512, 3);
+    let x: Vec<f32> = (0..n_tokens * n_in)
+        .map(|i| (i as f32 * 0.61).cos())
+        .collect();
+    let norm = |v: &[f32]| v.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>().sqrt();
+    for dtype in [
+        GgmlDType::Q4_0,
+        GgmlDType::Q4_1,
+        GgmlDType::Q5_0,
+        GgmlDType::Q5_1,
+        GgmlDType::Q8_0,
+        GgmlDType::Q2K,
+        GgmlDType::Q3K,
+        GgmlDType::Q4K,
+        GgmlDType::Q5K,
+        GgmlDType::Q6K,
+        GgmlDType::F32,
+    ] {
+        let tensor = crate::gguf::tests::weight(&[n_out, n_in], dtype, 7);
+        let w = QWeight {
+            dtype,
+            shape: vec![n_out, n_in],
+            buf: CpuBuf(tensor.data().unwrap().into_owned()),
+        };
+        let run = |mode, x: &[f32]| {
+            let mut y = vec![0f32; x.len() / n_in * n_out];
+            qmatmul_in(mode, &w, x, &mut y).unwrap();
+            y
+        };
+        // Exact: the dequantized weights' product, to f32 rounding.
+        let exact = run(Matmul::Exact, &x);
+        let mut row = vec![0f32; n_in];
+        for (t, x) in x.chunks_exact(n_in).enumerate() {
+            for r in 0..n_out {
+                dequant_row_at(&w, r, n_in, &mut row).unwrap();
+                let want: f64 = row
+                    .iter()
+                    .zip(x)
+                    .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                    .sum();
+                let got = f64::from(exact[t * n_out + r]);
+                assert!((got - want).abs() < 1e-4, "{dtype:?}: {got} vs {want}");
+            }
+        }
+        // Packed requantizes the activations: close to exact, and each
+        // token the same batched as alone.
+        let packed = run(Matmul::Packed, &x);
+        let error: Vec<f32> = packed.iter().zip(&exact).map(|(p, e)| p - e).collect();
+        let relative = norm(&error) / norm(&exact);
+        assert!(relative < 0.02, "{dtype:?}: packed is {relative:.4} off");
+        let alone: Vec<f32> = x
+            .chunks_exact(n_in)
+            .flat_map(|x| run(Matmul::Packed, x))
+            .collect();
+        assert_eq!(packed, alone, "{dtype:?}");
+        if dtype == GgmlDType::F32 {
+            assert_eq!(packed, exact, "f32 weights always take the exact path");
+        }
+    }
+}
+
+#[test]
 fn qmatmul_batched_matches_sequential_single_token_calls() {
     let backend = CpuBackend;
     let w = QWeight {

@@ -47,7 +47,7 @@ All `modes` values are strings:
 | `workload` | `decoder` or `laya` |
 | `execution` | `eager`; no GPU graphs or compiled graph replay |
 | `weights` | `gguf-raw-matrices-f32-norms` or `safetensors-raw-matrices-f32-norms`; matrices retain source dtype until row-to-f32 dequantization; norms/biases use f32. Frozen GGUF does not consume prepared cache payloads. |
-| `matmul` | `rayon-rows-sequential-f32-dot`; independent output rows parallelized, each dot product reduced in input order, not across threads. Scheduling/thread count does not select a different reduction algorithm. |
+| `matmul` | `rayon-rows-16-lane-f32-dot`; independent output rows parallelized, each row dequantized to f32 and its products summed in 16 fixed lanes, then the lanes and the tail in order, never across threads. Scheduling/thread count does not select a different reduction algorithm. With `MDMA_CPU_MATMUL=packed`, a decoder's quantized weights instead take `rayon-rows-packed-q8-activation-blocks-else-16-lane-f32-dot`: activations are quantized once per matmul to the weight type's dot type (Q8_K, Q8_0 or Q8_1) and Candle's block kernels take each row; f32/f16/bf16 weights and Laya keep the 16-lane path. |
 | `attention` | `scalar-sequential-f32-softmax`; f32 dot products and ordered value accumulation, max-subtracted f32 softmax; causal/windowed decoder or bidirectional encoder geometry comes from the artifact/operation. |
 | `normalization` | `scalar-sequential-f32`; f32 RMSNorm/LayerNorm sums, with artifact/architecture epsilon. |
 | `activation` | `mdma-native-activations-v1`; native f32 SiLU, tanh GELU, ReLU, scale and softcap. Encoder GELU uses the Abramowitz–Stegun 7.1.26 erf polynomial with f64 intermediates, rounded back to f32. |

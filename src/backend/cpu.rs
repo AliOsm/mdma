@@ -6,58 +6,120 @@ use super::{
     QWeight, Result, RopeSpec, shape,
 };
 use crate::gguf::GgmlDType;
-use candle_core::quantized::{
-    GgmlType,
-    k_quants::{BlockQ4K, BlockQ8K},
-};
 use dequant::dequantize_row;
 use rayon::prelude::*;
 use std::sync::OnceLock;
+
+mod packed;
 
 #[derive(Default)]
 pub struct CpuBackend;
 
 pub struct CpuBuf(pub Vec<u8>);
 
-fn q4k_vec_dot_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("MDMA_CPU_Q4K_VEC_DOT").is_some_and(|v| v == "1"))
+/// How the CPU multiplies quantized weights, fixed for the process.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Matmul {
+    /// Each weight row dequantized to f32 and summed in 16 fixed lanes.
+    #[default]
+    Exact,
+    /// Activations quantized once to the weight type's dot type, rows
+    /// multiplied in their blocks. Several times faster; changes logits.
+    Packed,
 }
 
-#[allow(unsafe_code, clippy::cast_ptr_alignment)]
-fn q4k_dot_row(w: &QWeight<CpuBuf>, row: usize, n_in: usize, x_q8: &[BlockQ8K]) -> Result<f32> {
-    let row_bytes = std::mem::size_of::<BlockQ4K>() * (n_in / BlockQ4K::BLCK_SIZE);
-    let start = row * row_bytes;
-    let bytes =
-        w.buf.0.get(start..start + row_bytes).ok_or_else(|| {
-            Error::ShapeMismatch(format!("row {row} out of range for weight buffer"))
-        })?;
-    if !bytes.as_ptr().cast::<BlockQ4K>().is_aligned() {
-        return Err(Error::ShapeMismatch(format!(
-            "Q4K row is not aligned to {} bytes",
-            std::mem::align_of::<BlockQ4K>()
-        )));
+impl Matmul {
+    /// `MDMA_CPU_MATMUL`: unset or `exact`, or `packed`.
+    pub fn parse(value: Option<&str>) -> std::result::Result<Self, String> {
+        match value {
+            None | Some("exact") => Ok(Self::Exact),
+            Some("packed") => Ok(Self::Packed),
+            Some(other) => Err(format!(
+                "MDMA_CPU_MATMUL must be exact or packed, not {other:?}"
+            )),
+        }
     }
-    let blocks = unsafe {
-        std::slice::from_raw_parts(
-            bytes.as_ptr().cast::<BlockQ4K>(),
-            n_in / BlockQ4K::BLCK_SIZE,
-        )
-    };
-    Ok(BlockQ4K::vec_dot(n_in, blocks, x_q8))
+
+    pub fn from_env() -> std::result::Result<Self, String> {
+        match std::env::var("MDMA_CPU_MATMUL") {
+            Ok(value) => Self::parse(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::parse(None),
+            Err(error) => Err(format!("MDMA_CPU_MATMUL: {error}")),
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Packed => "packed",
+        }
+    }
 }
 
-fn quantize_q8k(x: &[f32]) -> Result<Vec<BlockQ8K>> {
-    if !x.len().is_multiple_of(BlockQ8K::BLCK_SIZE) {
-        return Err(Error::ShapeMismatch(format!(
-            "Q8K activation width {} is not a multiple of {}",
-            x.len(),
-            BlockQ8K::BLCK_SIZE
-        )));
+static MATMUL: OnceLock<Matmul> = OnceLock::new();
+
+/// Fixes the process's CPU matmul before its first use. Choosing another
+/// later is refused: execution profiles name the one in force.
+pub fn choose_matmul(mode: Matmul) -> std::result::Result<(), String> {
+    match *MATMUL.get_or_init(|| mode) {
+        chosen if chosen == mode => Ok(()),
+        chosen => Err(format!("the CPU matmul is already {}", chosen.name())),
     }
-    let mut x_q8 = vec![BlockQ8K::zeros(); x.len() / BlockQ8K::BLCK_SIZE];
-    BlockQ8K::from_float(x, &mut x_q8);
-    Ok(x_q8)
+}
+
+/// The process's CPU matmul; exact unless chosen before first use.
+pub fn matmul() -> Matmul {
+    *MATMUL.get_or_init(Matmul::default)
+}
+
+/// `qmatmul` with the matmul `mode`, so both paths run in one process.
+fn qmatmul_in(mode: Matmul, w: &QWeight<CpuBuf>, x_f32: &[f32], y_f32: &mut [f32]) -> Result<()> {
+    let shape::Matmul {
+        n_out,
+        n_in,
+        n_tokens,
+    } = shape::matmul(&w.shape, x_f32.len(), y_f32.len())?;
+    if mode == Matmul::Packed && packed::matmul(w, x_f32, y_f32, n_out, n_in) {
+        return Ok(());
+    }
+
+    // Decode is the common one-token case. Write each dequantized row
+    // directly to the output instead of allocating and transposing a
+    // [n_out, n_tokens] scratch buffer.
+    if n_tokens == 1 {
+        y_f32.par_iter_mut().enumerate().try_for_each_init(
+            || vec![0f32; n_in],
+            |row_f32, (row, out)| {
+                dequant_row_at(w, row, n_in, row_f32)?;
+                *out = row_dot(row_f32, x_f32);
+                Ok::<(), Error>(())
+            },
+        )?;
+        return Ok(());
+    }
+
+    // Rows in parallel, each dequantized once and dotted against every
+    // token into a row-major [n_out, n_tokens] scratch (contiguous per
+    // thread); the transpose into y keeps every element's reduction
+    // order independent of thread scheduling.
+    let mut yt = vec![0f32; n_out * n_tokens];
+    yt.par_chunks_mut(n_tokens).enumerate().try_for_each_init(
+        || vec![0f32; n_in],
+        |row_f32, (row, out)| {
+            dequant_row_at(w, row, n_in, row_f32)?;
+            for (t, y) in out.iter_mut().enumerate() {
+                let x_t = &x_f32[t * n_in..(t + 1) * n_in];
+                *y = row_dot(row_f32, x_t);
+            }
+            Ok::<(), Error>(())
+        },
+    )?;
+    for t in 0..n_tokens {
+        for row in 0..n_out {
+            y_f32[t * n_out + row] = yt[row * n_tokens + t];
+        }
+    }
+    Ok(())
 }
 
 fn as_f32(bytes: &[u8]) -> Result<&[f32]> {
@@ -91,6 +153,30 @@ pub(crate) fn dequant_row(w: &QWeight<CpuBuf>, row: usize, out: &mut [f32]) -> R
 /// Sequential sum of products, so every caller reduces in one order.
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
+}
+
+/// A weight row against an activation: products summed in 16 fixed lanes,
+/// then the lanes and the tail in order. The order does not depend on the
+/// machine or the thread count, and the compiler can vectorize it.
+fn row_dot(a: &[f32], b: &[f32]) -> f32 {
+    const LANES: usize = 16;
+    let n = a.len().min(b.len());
+    let (a, b) = (&a[..n], &b[..n]);
+    let ((a_lanes, a_tail), (b_lanes, b_tail)) = (a.as_chunks::<LANES>(), b.as_chunks::<LANES>());
+    let mut lanes = [0f32; LANES];
+    for (a, b) in a_lanes.iter().zip(b_lanes) {
+        for i in 0..LANES {
+            lanes[i] += a[i] * b[i];
+        }
+    }
+    let mut sum = 0.0;
+    for lane in lanes {
+        sum += lane;
+    }
+    for (a, b) in a_tail.iter().zip(b_tail) {
+        sum += a * b;
+    }
+    sum
 }
 
 fn softmax_inplace(xs: &mut [f32]) {
@@ -381,67 +467,7 @@ impl Backend for CpuBackend {
     /// x/y are [n_tokens, n_in]/[n_tokens, n_out] row-major; n_tokens is
     /// inferred from x's length.
     fn qmatmul(&self, w: &QWeight<Self::Buf>, x: &Self::Buf, y: &mut Self::Buf) -> Result<()> {
-        let x_f32 = as_f32(&x.0)?;
-        let y_f32 = as_f32_mut(&mut y.0)?;
-        let shape::Matmul {
-            n_out,
-            n_in,
-            n_tokens,
-        } = shape::matmul(&w.shape, x_f32.len(), y_f32.len())?;
-
-        // Q4_K weights can stay packed while Candle's AVX2 dot kernel handles
-        // the nibble unpacking. Activations are quantized once per matmul and
-        // shared by every output row. Keep this opt-in until checkpoint drift
-        // has been characterized against the exact f32 dequantization path.
-        if n_tokens == 1 && w.dtype == GgmlDType::Q4K && q4k_vec_dot_enabled() {
-            let x_q8 = quantize_q8k(x_f32)?;
-            y_f32
-                .par_iter_mut()
-                .enumerate()
-                .try_for_each(|(row, out)| {
-                    *out = q4k_dot_row(w, row, n_in, &x_q8)?;
-                    Ok::<(), Error>(())
-                })?;
-            return Ok(());
-        }
-
-        // Decode is the common one-token case. Write each dequantized row
-        // directly to the output instead of allocating and transposing a
-        // [n_out, n_tokens] scratch buffer.
-        if n_tokens == 1 {
-            y_f32.par_iter_mut().enumerate().try_for_each_init(
-                || vec![0f32; n_in],
-                |row_f32, (row, out)| {
-                    dequant_row_at(w, row, n_in, row_f32)?;
-                    *out = dot(row_f32, x_f32);
-                    Ok::<(), Error>(())
-                },
-            )?;
-            return Ok(());
-        }
-
-        // Rows in parallel, each dequantized once and dotted against every
-        // token into a row-major [n_out, n_tokens] scratch (contiguous per
-        // thread); the transpose into y keeps every element's reduction
-        // order independent of thread scheduling.
-        let mut yt = vec![0f32; n_out * n_tokens];
-        yt.par_chunks_mut(n_tokens).enumerate().try_for_each_init(
-            || vec![0f32; n_in],
-            |row_f32, (row, out)| {
-                dequant_row_at(w, row, n_in, row_f32)?;
-                for (t, y) in out.iter_mut().enumerate() {
-                    let x_t = &x_f32[t * n_in..(t + 1) * n_in];
-                    *y = dot(row_f32, x_t);
-                }
-                Ok::<(), Error>(())
-            },
-        )?;
-        for t in 0..n_tokens {
-            for row in 0..n_out {
-                y_f32[t * n_out + row] = yt[row * n_tokens + t];
-            }
-        }
-        Ok(())
+        qmatmul_in(matmul(), w, as_f32(&x.0)?, as_f32_mut(&mut y.0)?)
     }
 
     fn embed(

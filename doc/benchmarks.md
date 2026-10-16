@@ -30,11 +30,12 @@ and three timed trials after one complete untimed warmup.
 - These are library measurements, not streaming latency, P95, sampling,
   network latency, or a comparison with another inference engine.
 
-For an experimental packed Q4_K CPU path on an x86 build with native AVX2,
-set `MDMA_CPU_Q4K_VEC_DOT=1` on the benchmark command. It quantizes each
-activation vector to Q8_K and uses Candle's packed dot kernel; the exact f32
-dequantization path remains the default because the requantization can change
-logits.
+`MDMA_CPU_MATMUL=packed` times the CPU's packed path: each activation is
+quantized once per matmul to the weight type's dot type (Q8_K for k-quants,
+Q8_0 or Q8_1 otherwise) and Candle's block kernels take the rows, for one
+token or a batch. The default `exact` path dequantizes rows to f32, which
+matches the pinned llama.cpp checkpoints; requantizing changes logits and can
+change greedy tokens within a few dozen steps.
 
 Run one model/backend per fresh process, serially, without competing inference
 or builds. Record model checksum, release revision, Rust/driver versions,
@@ -61,6 +62,27 @@ The Qwen run used the Qwen3.5-9B Q4_K_M file with SHA-256
 `03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8`; the
 Gemma file's SHA-256 was
 `740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8`.
+
+## x86_64 16-thread CPU report
+
+Collected on 2026-10-16 on a 16-thread x86_64 FreeBSD 16-CURRENT host with
+Rust `1.99.0`, `RUSTFLAGS="-C target-cpu=native"`, the standard 128-token
+prompt plus 16 decode steps, one untimed warmup and three timed trials per
+process, two processes per row, alternated. Gemma 4 E4B Q4_K_M, SHA-256
+`85a896a047553e842f25297ee5b031d64ff30147d9c4af17b1e4b394cd1fab87`. Values are
+tokens per second.
+
+| CPU matmul | Prefill | Decode |
+| --- | ---: | ---: |
+| Sequential f32 dot (before) | 1.85 | 1.59 |
+| `exact`: 16-lane f32 dot | 2.99 | 2.56 |
+| Packed Q4_K only (first experiment) | 6.26 | 5.64 |
+| `packed`: every quantized type | 10.70 | 8.92 |
+
+Greedy output of `exact` matched the sequential dot on every prompt tried, and
+the pinned Gemma 4 E2B and TinyLlama CPU checkpoints pass with it. `packed`
+matched `exact` on the same four generations (24 to 64 tokens) where Q4_K-only
+packing changed tokens within 15.
 
 ## Metal batching and tiles
 

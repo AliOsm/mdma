@@ -64,6 +64,21 @@ fn defaults_and_overrides() {
 }
 
 #[test]
+fn cpu_matmul_is_exact_unless_packed_is_named() {
+    use mdma::backend::cpu::Matmul;
+    let mut env = environment();
+    assert_eq!(load(&env).unwrap().cpu_matmul, Matmul::Exact);
+    for (value, mode) in [("exact", Matmul::Exact), ("packed", Matmul::Packed)] {
+        env.insert("MDMA_CPU_MATMUL", value.into());
+        assert_eq!(load(&env).unwrap().cpu_matmul, mode, "{value}");
+    }
+    for value in ["", "1", "Packed", "fast"] {
+        env.insert("MDMA_CPU_MATMUL", value.into());
+        assert!(load(&env).is_err(), "{value:?}");
+    }
+}
+
+#[test]
 fn rocm_reference_mode_is_explicit_and_validated() {
     let mut env = environment();
     env.insert("MDMA_BACKEND", "rocm".into());
