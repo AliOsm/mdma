@@ -37,11 +37,14 @@ token or a batch. The default `exact` path dequantizes rows to f32, which
 matches the pinned llama.cpp checkpoints; requantizing changes logits and can
 change greedy tokens within a few dozen steps.
 
-The direct f32 SIMD experiment keeps activations in f32 and dequantizes Q4_K
-blocks while computing each dot product. Set `MDMA_CPU_Q4K_F32_DOT=1` to
-select it. The three modes can be run in fresh processes with the checked-in
-runner (the separate processes are required because the environment switches
-are read once):
+In `exact`, a one-token Q4_K matmul never writes a row out: each weight is
+dequantized in registers exactly as Candle does and added to the same 16
+lanes, in the same order, so the result is bit-identical to dequantizing the
+row, without storing and rereading a row of f32. The direct f32 SIMD
+experiment measured below started this; its AVX2-only, differently ordered sum
+is no longer a mode. Both
+modes can be run in fresh processes with the checked-in runner (the matmul is
+fixed once per process):
 
 ```sh
 RAYON_NUM_THREADS=24 MDMA_CPU_LIST=0-23 \
@@ -49,15 +52,14 @@ RAYON_NUM_THREADS=24 MDMA_CPU_LIST=0-23 \
 ```
 
 The runner records the revision, model SHA-256, CPU, thread pinning, compiler
-flags, workload, and one JSON result for each of `exact`, `q8`, and `f32`.
-The direct path's fixture-free parity gate allows at most `5e-4` absolute
-dot-product drift from Candle's f32 dequantization reference; the packed Q8_K
-path uses a separate `0.5` fixture bound because activation requantization is
-approximate:
+flags, workload, and one JSON result for each of `exact` and `q8`
+(`MDMA_CPU_MATMUL=packed`). The fused kernel's gate requires the same bits as
+the dequantized row; the packed path uses a `0.5` fixture bound because
+activation requantization is approximate:
 
 ```sh
 cargo test --release --lib \
-  backend::cpu::tests::q4k_direct_and_packed_dot_match_dequant_reference_within_tolerance
+  backend::cpu::tests::q4k_fused_dot_is_the_exact_path_bit_for_bit_and_packed_stays_close
 ```
 
 Run one model/backend per fresh process, serially, without competing inference

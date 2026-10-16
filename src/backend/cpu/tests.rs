@@ -1,4 +1,4 @@
-use super::{CpuBackend, CpuBuf, Matmul, q4k_f32_dot_row, qmatmul_in};
+use super::{CpuBackend, CpuBuf, Matmul, qmatmul_in};
 use crate::backend::{AttnSpec, Backend, KvView, Pool, QWeight, RopeSpec};
 use crate::gguf::GgmlDType;
 use candle_core::quantized::{GgmlType, k_quants::BlockQ4K};
@@ -283,7 +283,8 @@ fn q4k_bytes(blocks: &[BlockQ4K]) -> Vec<u8> {
 }
 
 #[test]
-fn q4k_direct_and_packed_dot_match_dequant_reference_within_tolerance() {
+fn q4k_fused_dot_is_the_exact_path_bit_for_bit_and_packed_stays_close() {
+    use super::{dequant_row_at, fused, row_dot};
     const ROWS: usize = 3;
     const N_IN: usize = 512;
     let weights: Vec<f32> = (0..ROWS * N_IN)
@@ -294,40 +295,28 @@ fn q4k_direct_and_packed_dot_match_dequant_reference_within_tolerance() {
         .collect();
     let mut blocks = vec![BlockQ4K::zeros(); weights.len() / BlockQ4K::BLCK_SIZE];
     BlockQ4K::from_float(&weights, &mut blocks);
-    let raw = q4k_bytes(&blocks);
-    let x: Vec<f32> = (0..N_IN)
-        .map(|i| ((i.wrapping_mul(19) % 149) as f32 - 74.0) / 83.0)
-        .collect();
-    let mut dequantized = vec![0.0; weights.len()];
-    BlockQ4K::to_float(&blocks, &mut dequantized);
     let weight = QWeight {
         dtype: GgmlDType::Q4K,
         shape: vec![ROWS, N_IN],
-        buf: CpuBuf(raw),
+        buf: CpuBuf(q4k_bytes(&blocks)),
     };
-
-    let mut max_abs = 0.0f32;
+    let x: Vec<f32> = (0..N_IN)
+        .map(|i| ((i.wrapping_mul(19) % 149) as f32 - 74.0) / 83.0)
+        .collect();
     let mut packed = vec![0.0f32; ROWS];
     qmatmul_in(Matmul::Packed, &weight, &x, &mut packed).expect("packed Q4_K matmul");
-    let mut packed_max_abs = 0.0f32;
-    for row in 0..ROWS {
-        let expected: f32 = dequantized[row * N_IN..(row + 1) * N_IN]
-            .iter()
-            .zip(&x)
-            .map(|(weight, x)| weight * x)
-            .sum();
-        let got = q4k_f32_dot_row(&weight, row, N_IN, &x).expect("direct Q4_K dot");
-        max_abs = max_abs.max((got - expected).abs());
-        packed_max_abs = packed_max_abs.max((packed[row] - expected).abs());
+    let mut row = vec![0.0f32; N_IN];
+    for (r, packed) in packed.iter().enumerate() {
+        dequant_row_at(&weight, r, N_IN, &mut row).unwrap();
+        let exact = row_dot(&row, &x);
+        let got = fused::row_dot(&weight, r, N_IN, &x).expect("Q4_K has a fused kernel");
+        assert_eq!(got.to_bits(), exact.to_bits(), "row {r}: {got} vs {exact}");
+        assert!(
+            (packed - exact).abs() <= 0.5,
+            "packed Q4_K dot drifted by {}, fixture tolerance is 0.5",
+            (packed - exact).abs()
+        );
     }
-    assert!(
-        max_abs <= 5e-4,
-        "direct Q4_K dot drifted by {max_abs}, tolerance is 5e-4"
-    );
-    assert!(
-        packed_max_abs <= 0.5,
-        "packed Q4_K dot drifted by {packed_max_abs}, fixture tolerance is 0.5"
-    );
 }
 
 #[test]
