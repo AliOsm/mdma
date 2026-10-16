@@ -16,6 +16,7 @@ exclude = [
     "/Justfile",
     "/doc/",
     "/deploy/",
+    "/tools/",
     "/tests/",
     "**/tests.rs",
     "/src/**/tests/",
