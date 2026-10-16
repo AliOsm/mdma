@@ -343,6 +343,21 @@ impl Backend for CpuBackend {
             n_tokens,
         } = shape::matmul(&w.shape, x_f32.len(), y_f32.len())?;
 
+        // Decode is the common one-token case. Write each dequantized row
+        // directly to the output instead of allocating and transposing a
+        // [n_out, n_tokens] scratch buffer.
+        if n_tokens == 1 {
+            y_f32.par_iter_mut().enumerate().try_for_each_init(
+                || vec![0f32; n_in],
+                |row_f32, (row, out)| {
+                    dequant_row_at(w, row, n_in, row_f32)?;
+                    *out = dot(row_f32, x_f32);
+                    Ok::<(), Error>(())
+                },
+            )?;
+            return Ok(());
+        }
+
         // Rows in parallel, each dequantized once and dotted against every
         // token into a row-major [n_out, n_tokens] scratch (contiguous per
         // thread); the transpose into y keeps every element's reduction
