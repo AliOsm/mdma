@@ -159,7 +159,7 @@ published files) attends, the rest are recurrent.
 
 Recurrent state is fixed per session: each DeltaNet layer keeps its
 convolution window and a `head_dim`² matrix per value head, about 53 MB for
-Qwen3.8-9B. It counts toward the KV reservation but not the per-token KV
+Qwen3.5-9B. It counts toward the KV reservation but not the per-token KV
 figure. The state has absorbed every position written, so a session resumes
 only where it stopped; any other shared prefix restarts from position 0.
 
@@ -167,9 +167,12 @@ CPU implements the required operations (`rope_partial_split_half`,
 `sigmoid_mul`, `ssm_conv_silu`, `gated_delta_step`); GPU backends reject
 `qwen35` before weight upload. The vision projector is not implemented.
 
-The `qwen35_cpu_greedy_checkpoint` test pins Qwen3.8-9B Q4_K_M's SHA-256 and
+The `qwen35_cpu_greedy_checkpoint` test pins one Q4_K_M fixture's SHA-256 and
 three continuations: English (32 tokens), chat arithmetic `[19, 248046]` (`4`
-plus EOS) and Chinese (32 tokens). A 16-layer Qwen3.6 finetune with 48 value
+plus EOS) and Chinese (32 tokens). The fixture is separate from the Qwen3.5-9B
+download used by the getting-started guide; a different file must not be used
+for this exact-token gate without updating its SHA-256 and expected tokens. A
+16-layer Qwen3.6 finetune with 48 value
 heads over 16 key heads (model width 5120, value width 6144) matched llama.cpp's
 48-token continuation in a manual run; it has no pinned test.
 
@@ -183,7 +186,7 @@ the prompt and flips a near tie in the English case at output 8;
 | Architecture | Example artifact | Remaining validation/task work |
 |---|---|---|
 | `qwen3` + classifier head | Qwen3-Reranker-4B | Dedicated two-class head/pooling and reranking API; do not treat two class logits as vocabulary logits |
-| `qwen35` | Qwen3.8-9B | Native CPU decoder and CPU checkpoint gate; GPU kernels, multi-token prediction drafting and vision projector |
+| `qwen35` | Qwen3.5-9B | Native CPU decoder and CPU checkpoint gate; GPU kernels, multi-token prediction drafting and vision projector |
 | `qwen2vl` | NuMarkdown-8B | Text decoder is separate from its image encoder/projector and OCR API |
 | `glm4` | GLM-4-32B-0414 | Native CPU/ROCm decoder and bounded ROCm checkpoint gate; raw-only cache policy and long-context validation |
 | `gemma2` | ShieldGemma-9B | Scaled embedding, four norms, GELU gating, attention/final softcaps, alternating local/global attention |

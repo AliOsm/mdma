@@ -100,6 +100,9 @@ fetch https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4
 ```
 
 Only the model file is needed, not the `mmproj` vision projectors next to it.
+The optional qwen35 checkpoint gate uses a separate pinned fixture; the
+Qwen3.5-9B file downloaded here is a runnable example, but it is not accepted
+by that exact-token test unless its SHA-256 matches the pinned value.
 
 ## 3. Will it fit?
 
