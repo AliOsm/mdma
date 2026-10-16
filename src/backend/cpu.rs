@@ -11,8 +11,15 @@ use candle_core::quantized::{
     k_quants::{BlockQ4K, BlockQ8K},
 };
 use dequant::dequantize_row;
+use half::f16;
 use rayon::prelude::*;
 use std::sync::OnceLock;
+
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::{
+    __m256, _mm_add_ps, _mm_cvtss_f32, _mm_hadd_ps, _mm256_add_ps, _mm256_castps256_ps128,
+    _mm256_extractf128_ps, _mm256_loadu_ps, _mm256_mul_ps,
+};
 
 #[derive(Default)]
 pub struct CpuBackend;
@@ -22,6 +29,160 @@ pub struct CpuBuf(pub Vec<u8>);
 fn q4k_vec_dot_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("MDMA_CPU_Q4K_VEC_DOT").is_some_and(|v| v == "1"))
+}
+
+fn q4k_f32_dot_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("MDMA_CPU_Q4K_F32_DOT").is_some_and(|v| v == "1"))
+}
+
+const Q4K_BLOCK_SIZE: usize = 256;
+const Q4K_BLOCK_BYTES: usize = std::mem::size_of::<BlockQ4K>();
+const Q4K_SCALE_BYTES: usize = 12;
+
+fn q4k_scale_min(index: usize, scales: &[u8]) -> (u8, u8) {
+    debug_assert_eq!(scales.len(), Q4K_SCALE_BYTES);
+    if index < 4 {
+        (scales[index] & 63, scales[index + 4] & 63)
+    } else {
+        (
+            (scales[index + 4] & 0x0f) | ((scales[index - 4] >> 6) << 4),
+            (scales[index + 4] >> 4) | ((scales[index] >> 6) << 4),
+        )
+    }
+}
+
+fn q4k_block_dot_scalar(block: &[u8], x: &[f32]) -> f32 {
+    debug_assert_eq!(block.len(), Q4K_BLOCK_BYTES);
+    debug_assert_eq!(x.len(), Q4K_BLOCK_SIZE);
+    let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+    let dmin = f16::from_bits(u16::from_le_bytes([block[2], block[3]])).to_f32();
+    let scales = &block[4..4 + Q4K_SCALE_BYTES];
+    let qs = &block[4 + Q4K_SCALE_BYTES..];
+    let mut sum = 0.0;
+
+    for j in (0..Q4K_BLOCK_SIZE).step_by(64) {
+        let q = &qs[j / 2..j / 2 + 32];
+        let (scale, min) = q4k_scale_min(j / 32, scales);
+        let d1 = d * f32::from(scale);
+        let m1 = dmin * f32::from(min);
+        let (scale, min) = q4k_scale_min(j / 32 + 1, scales);
+        let d2 = d * f32::from(scale);
+        let m2 = dmin * f32::from(min);
+        for (i, &q) in q.iter().enumerate() {
+            sum += (d1 * f32::from(q & 0x0f) - m1) * x[j + i];
+            sum += (d2 * f32::from(q >> 4) - m2) * x[j + 32 + i];
+        }
+    }
+    sum
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "avx2")]
+unsafe fn q4k_segment_dot_avx2(
+    q: &[u8],
+    x: &[f32],
+    high_nibble: bool,
+    d: f32,
+    scale: u8,
+    dmin: f32,
+    min: u8,
+) -> f32 {
+    debug_assert_eq!(q.len(), 16);
+    debug_assert_eq!(x.len(), 16);
+    let mut weights = [0.0f32; 16];
+    let d = d * f32::from(scale);
+    let min = dmin * f32::from(min);
+    for (weight, &q) in weights.iter_mut().zip(q) {
+        let q = if high_nibble { q >> 4 } else { q & 0x0f };
+        *weight = d * f32::from(q) - min;
+    }
+
+    let weights_lo: __m256 = _mm256_loadu_ps(weights.as_ptr());
+    let weights_hi: __m256 = _mm256_loadu_ps(weights.as_ptr().add(8));
+    let x_lo: __m256 = _mm256_loadu_ps(x.as_ptr());
+    let x_hi: __m256 = _mm256_loadu_ps(x.as_ptr().add(8));
+    let products = _mm256_add_ps(
+        _mm256_mul_ps(weights_lo, x_lo),
+        _mm256_mul_ps(weights_hi, x_hi),
+    );
+    let low = _mm256_castps256_ps128(products);
+    let high = _mm256_extractf128_ps(products, 1);
+    let sum = _mm_add_ps(low, high);
+    let sum = _mm_hadd_ps(sum, sum);
+    let sum = _mm_hadd_ps(sum, sum);
+    _mm_cvtss_f32(sum)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
+#[target_feature(enable = "avx2")]
+unsafe fn q4k_block_dot_avx2(block: &[u8], x: &[f32]) -> f32 {
+    debug_assert_eq!(block.len(), Q4K_BLOCK_BYTES);
+    debug_assert_eq!(x.len(), Q4K_BLOCK_SIZE);
+    let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+    let dmin = f16::from_bits(u16::from_le_bytes([block[2], block[3]])).to_f32();
+    let scales = &block[4..4 + Q4K_SCALE_BYTES];
+    let qs = &block[4 + Q4K_SCALE_BYTES..];
+    let mut sum = 0.0;
+
+    for j in (0..Q4K_BLOCK_SIZE).step_by(64) {
+        let q = &qs[j / 2..j / 2 + 32];
+        let (scale_low, min_low) = q4k_scale_min(j / 32, scales);
+        let (scale_high, min_high) = q4k_scale_min(j / 32 + 1, scales);
+        for pair in 0..2 {
+            let q = &q[pair * 16..(pair + 1) * 16];
+            let x_low = &x[j + pair * 16..j + pair * 16 + 16];
+            let x_high = &x[j + 32 + pair * 16..j + 32 + pair * 16 + 16];
+            sum += q4k_segment_dot_avx2(q, x_low, false, d, scale_low, dmin, min_low);
+            sum += q4k_segment_dot_avx2(q, x_high, true, d, scale_high, dmin, min_high);
+        }
+    }
+    sum
+}
+
+/// Dot one f32 activation row directly against a packed Q4_K weight row.
+/// This keeps the original activation values and only vectorizes the
+/// dequantized f32 multiply-add; it does not requantize activations to Q8_K.
+#[allow(unsafe_code)]
+fn q4k_f32_dot_row(w: &QWeight<CpuBuf>, row: usize, n_in: usize, x: &[f32]) -> Result<f32> {
+    if !n_in.is_multiple_of(Q4K_BLOCK_SIZE) || x.len() != n_in {
+        return Err(Error::ShapeMismatch(format!(
+            "Q4K direct dot expects a {Q4K_BLOCK_SIZE}-wide row, got {n_in}"
+        )));
+    }
+    let row_bytes = Q4K_BLOCK_BYTES * (n_in / Q4K_BLOCK_SIZE);
+    let start = row
+        .checked_mul(row_bytes)
+        .ok_or_else(|| Error::ShapeMismatch("Q4K row offset overflow".into()))?;
+    let bytes =
+        w.buf.0.get(start..start + row_bytes).ok_or_else(|| {
+            Error::ShapeMismatch(format!("row {row} out of range for weight buffer"))
+        })?;
+
+    let (blocks, []) = bytes.as_chunks::<Q4K_BLOCK_BYTES>() else {
+        return Err(Error::ShapeMismatch("Q4K row has a partial block".into()));
+    };
+    let (x_blocks, []) = x.as_chunks::<Q4K_BLOCK_SIZE>() else {
+        return Err(Error::ShapeMismatch(
+            "Q4K activation has a partial block".into(),
+        ));
+    };
+    let mut sum = 0.0;
+    for (block, x_block) in blocks.iter().zip(x_blocks) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                // SAFETY: the runtime check above enables every instruction
+                // used by q4k_block_dot_avx2, and both slices are exact blocks.
+                sum += unsafe { q4k_block_dot_avx2(block, x_block) };
+                continue;
+            }
+        }
+        sum += q4k_block_dot_scalar(block, x_block);
+    }
+    Ok(sum)
 }
 
 #[allow(unsafe_code, clippy::cast_ptr_alignment)]
@@ -389,10 +550,19 @@ impl Backend for CpuBackend {
             n_tokens,
         } = shape::matmul(&w.shape, x_f32.len(), y_f32.len())?;
 
-        // Q4_K weights can stay packed while Candle's AVX2 dot kernel handles
-        // the nibble unpacking. Activations are quantized once per matmul and
-        // shared by every output row. Keep this opt-in until checkpoint drift
-        // has been characterized against the exact f32 dequantization path.
+        // Experimental Q4_K paths are opt-in. The direct f32 path preserves
+        // activations; the packed path below requantizes them to Q8_K.
+        if n_tokens == 1 && w.dtype == GgmlDType::Q4K && q4k_f32_dot_enabled() {
+            y_f32
+                .par_iter_mut()
+                .enumerate()
+                .try_for_each(|(row, out)| {
+                    *out = q4k_f32_dot_row(w, row, n_in, x_f32)?;
+                    Ok::<(), Error>(())
+                })?;
+            return Ok(());
+        }
+
         if n_tokens == 1 && w.dtype == GgmlDType::Q4K && q4k_vec_dot_enabled() {
             let x_q8 = quantize_q8k(x_f32)?;
             y_f32

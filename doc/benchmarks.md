@@ -36,6 +36,29 @@ activation vector to Q8_K and uses Candle's packed dot kernel; the exact f32
 dequantization path remains the default because the requantization can change
 logits.
 
+The direct f32 SIMD experiment keeps activations in f32 and dequantizes Q4_K
+blocks while computing each dot product. Set `MDMA_CPU_Q4K_F32_DOT=1` to
+select it. The three modes can be run in fresh processes with the checked-in
+runner (the separate processes are required because the environment switches
+are read once):
+
+```sh
+RAYON_NUM_THREADS=24 MDMA_CPU_LIST=0-23 \
+  tools/bench-cpu-q4k.sh /path/to/Qwen3.5-9B-Q4_K_M.gguf results.txt
+```
+
+The runner records the revision, model SHA-256, CPU, thread pinning, compiler
+flags, workload, and one JSON result for each of `exact`, `q8`, and `f32`.
+The direct path's fixture-free parity gate allows at most `5e-4` absolute
+dot-product drift from Candle's f32 dequantization reference; the packed Q8_K
+path uses a separate `0.5` fixture bound because activation requantization is
+approximate:
+
+```sh
+cargo test --release --lib \
+  backend::cpu::tests::q4k_direct_and_packed_dot_match_dequant_reference_within_tolerance
+```
+
 Run one model/backend per fresh process, serially, without competing inference
 or builds. Record model checksum, release revision, Rust/driver versions,
 hardware, power/thermal conditions, workload, and per-trial durations alongside
@@ -61,6 +84,20 @@ The Qwen run used the Qwen3.5-9B Q4_K_M file with SHA-256
 `03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8`; the
 Gemma file's SHA-256 was
 `740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8`.
+
+## Q4_K CPU path comparison
+
+On the same i7-14700F, using 24 pinned Rayon threads, native release code,
+Qwen3.5-9B Q4_K_M (SHA-256
+`03b74727a860a56338e042c4420bb3f04b2fec5734175f4cb9fa853daf52b7e8`),
+128 prompt tokens, 16 decode steps, one warmup, and three timed trials at
+revision `5ca4d44`, the modes measured:
+
+| CPU mode | Prefill tok/s | Decode tok/s | Accuracy status |
+| --- | ---: | ---: | --- |
+| exact f32 dequantization | 1.741 ± 0.001 | 1.555 ± 0.004 | reference |
+| packed Q8_K (`MDMA_CPU_Q4K_VEC_DOT=1`) | 3.568 ± 0.006 | 2.867 ± 0.003 | opt-in; can change logits |
+| direct f32 SIMD (`MDMA_CPU_Q4K_F32_DOT=1`) | 2.992 ± 0.004 | 2.483 ± 0.005 | opt-in; max dot drift `2.8e-6` in the fixture |
 
 ## Metal batching and tiles
 

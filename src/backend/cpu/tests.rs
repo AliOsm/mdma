@@ -1,6 +1,7 @@
-use super::{CpuBackend, CpuBuf};
+use super::{CpuBackend, CpuBuf, q4k_dot_row, q4k_f32_dot_row, quantize_q8k};
 use crate::backend::{AttnSpec, Backend, KvView, Pool, QWeight, RopeSpec};
 use crate::gguf::GgmlDType;
+use candle_core::quantized::{GgmlType, k_quants::BlockQ4K};
 
 fn f32_buf(vals: &[f32]) -> CpuBuf {
     CpuBuf(bytemuck::cast_slice(vals).to_vec())
@@ -205,6 +206,64 @@ fn qmatmul_batched_matches_sequential_single_token_calls() {
     for (a, b) in got.iter().zip(expected.iter()) {
         assert!((a - b).abs() < 1e-6, "got {a}, want {b}");
     }
+}
+
+#[allow(unsafe_code)]
+fn q4k_bytes(blocks: &[BlockQ4K]) -> Vec<u8> {
+    // Candle owns the Q4_K layout; the test only needs its serialized GGUF
+    // representation to exercise the CPU backend's byte-oriented loader.
+    unsafe {
+        std::slice::from_raw_parts(blocks.as_ptr().cast::<u8>(), std::mem::size_of_val(blocks))
+            .to_vec()
+    }
+}
+
+#[test]
+fn q4k_direct_and_packed_dot_match_dequant_reference_within_tolerance() {
+    const ROWS: usize = 3;
+    const N_IN: usize = 512;
+    let weights: Vec<f32> = (0..ROWS * N_IN)
+        .map(|i| {
+            let centered = (i.wrapping_mul(37) % 257) as f32 - 128.0;
+            centered / 91.0 + ((i % 11) as f32 - 5.0) / 113.0
+        })
+        .collect();
+    let mut blocks = vec![BlockQ4K::zeros(); weights.len() / BlockQ4K::BLCK_SIZE];
+    BlockQ4K::from_float(&weights, &mut blocks);
+    let raw = q4k_bytes(&blocks);
+    let x: Vec<f32> = (0..N_IN)
+        .map(|i| ((i.wrapping_mul(19) % 149) as f32 - 74.0) / 83.0)
+        .collect();
+    let mut dequantized = vec![0.0; weights.len()];
+    BlockQ4K::to_float(&blocks, &mut dequantized);
+    let weight = QWeight {
+        dtype: GgmlDType::Q4K,
+        shape: vec![ROWS, N_IN],
+        buf: CpuBuf(raw),
+    };
+
+    let mut max_abs = 0.0f32;
+    let x_q8 = quantize_q8k(&x).expect("Q8_K activation quantization");
+    let mut packed_max_abs = 0.0f32;
+    for row in 0..ROWS {
+        let expected: f32 = dequantized[row * N_IN..(row + 1) * N_IN]
+            .iter()
+            .zip(&x)
+            .map(|(weight, x)| weight * x)
+            .sum();
+        let got = q4k_f32_dot_row(&weight, row, N_IN, &x).expect("direct Q4_K dot");
+        max_abs = max_abs.max((got - expected).abs());
+        let packed = q4k_dot_row(&weight, row, N_IN, &x_q8).expect("packed Q4_K dot");
+        packed_max_abs = packed_max_abs.max((packed - expected).abs());
+    }
+    assert!(
+        max_abs <= 5e-4,
+        "direct Q4_K dot drifted by {max_abs}, tolerance is 5e-4"
+    );
+    assert!(
+        packed_max_abs <= 0.5,
+        "packed Q4_K dot drifted by {packed_max_abs}, fixture tolerance is 0.5"
+    );
 }
 
 #[test]
