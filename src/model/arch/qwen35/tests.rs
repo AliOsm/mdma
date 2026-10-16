@@ -2,10 +2,10 @@ use super::*;
 use crate::backend::cpu::CpuBackend;
 use crate::{model::test_support::assert_greedy, tokenizer::Tokenizer};
 
-/// Qwen3.8-9B Q4_K_M. Reference: llama.cpp d812350493 `llama-server`, CPU,
-/// ctx 512, context checkpoints off, raw prompts, greedy, no penalties. With
-/// checkpoints on, the server splits the prompt and flips a near tie in the
-/// first case at output 8 (`,` for `.`).
+/// Pinned qwen35 Q4_K_M fixture. Reference: llama.cpp d812350493
+/// `llama-server`, CPU, ctx 512, context checkpoints off, raw prompts, greedy,
+/// no penalties. With checkpoints on, the server splits the prompt and flips a
+/// near tie in the first case at output 8 (`,` for `.`).
 const CASES: &[(&str, &[u32])] = &[
     (
         "The capital of France is",
