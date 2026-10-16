@@ -24,6 +24,10 @@ pub struct Cpu {
     pub min_mhz: Option<f64>,
     pub max_mhz: Option<f64>,
     pub caches: Vec<Cache>,
+    /// Instruction sets mdma's kernels can use, detected at run time.
+    pub instruction_sets: Vec<&'static str>,
+    /// The exact kernels' variant this CPU runs.
+    pub kernel_level: &'static str,
 }
 
 #[derive(Debug, Serialize)]

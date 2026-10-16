@@ -6,19 +6,15 @@ use super::{
     QWeight, Result, RopeSpec, shape,
 };
 use crate::gguf::GgmlDType;
-use candle_core::quantized::k_quants::BlockQ4K;
 use dequant::dequantize_row;
-use half::f16;
 use rayon::prelude::*;
 use std::sync::OnceLock;
 
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::{
-    __m256, _mm_add_ps, _mm_cvtss_f32, _mm_hadd_ps, _mm256_add_ps, _mm256_castps256_ps128,
-    _mm256_extractf128_ps, _mm256_loadu_ps, _mm256_mul_ps,
-};
-
+mod fused;
+pub mod isa;
 mod packed;
+
+pub use isa::isa;
 
 #[derive(Default)]
 pub struct CpuBackend;
@@ -34,160 +30,6 @@ pub enum Matmul {
     /// Activations quantized once to the weight type's dot type, rows
     /// multiplied in their blocks. Several times faster; changes logits.
     Packed,
-}
-
-fn q4k_f32_dot_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("MDMA_CPU_Q4K_F32_DOT").is_some_and(|v| v == "1"))
-}
-
-const Q4K_BLOCK_SIZE: usize = 256;
-const Q4K_BLOCK_BYTES: usize = std::mem::size_of::<BlockQ4K>();
-const Q4K_SCALE_BYTES: usize = 12;
-
-fn q4k_scale_min(index: usize, scales: &[u8]) -> (u8, u8) {
-    debug_assert_eq!(scales.len(), Q4K_SCALE_BYTES);
-    if index < 4 {
-        (scales[index] & 63, scales[index + 4] & 63)
-    } else {
-        (
-            (scales[index + 4] & 0x0f) | ((scales[index - 4] >> 6) << 4),
-            (scales[index + 4] >> 4) | ((scales[index] >> 6) << 4),
-        )
-    }
-}
-
-fn q4k_block_dot_scalar(block: &[u8], x: &[f32]) -> f32 {
-    debug_assert_eq!(block.len(), Q4K_BLOCK_BYTES);
-    debug_assert_eq!(x.len(), Q4K_BLOCK_SIZE);
-    let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
-    let dmin = f16::from_bits(u16::from_le_bytes([block[2], block[3]])).to_f32();
-    let scales = &block[4..4 + Q4K_SCALE_BYTES];
-    let qs = &block[4 + Q4K_SCALE_BYTES..];
-    let mut sum = 0.0;
-
-    for j in (0..Q4K_BLOCK_SIZE).step_by(64) {
-        let q = &qs[j / 2..j / 2 + 32];
-        let (scale, min) = q4k_scale_min(j / 32, scales);
-        let d1 = d * f32::from(scale);
-        let m1 = dmin * f32::from(min);
-        let (scale, min) = q4k_scale_min(j / 32 + 1, scales);
-        let d2 = d * f32::from(scale);
-        let m2 = dmin * f32::from(min);
-        for (i, &q) in q.iter().enumerate() {
-            sum += (d1 * f32::from(q & 0x0f) - m1) * x[j + i];
-            sum += (d2 * f32::from(q >> 4) - m2) * x[j + 32 + i];
-        }
-    }
-    sum
-}
-
-#[cfg(target_arch = "x86_64")]
-#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
-#[target_feature(enable = "avx2")]
-unsafe fn q4k_segment_dot_avx2(
-    q: &[u8],
-    x: &[f32],
-    high_nibble: bool,
-    d: f32,
-    scale: u8,
-    dmin: f32,
-    min: u8,
-) -> f32 {
-    debug_assert_eq!(q.len(), 16);
-    debug_assert_eq!(x.len(), 16);
-    let mut weights = [0.0f32; 16];
-    let d = d * f32::from(scale);
-    let min = dmin * f32::from(min);
-    for (weight, &q) in weights.iter_mut().zip(q) {
-        let q = if high_nibble { q >> 4 } else { q & 0x0f };
-        *weight = d * f32::from(q) - min;
-    }
-
-    let weights_lo: __m256 = _mm256_loadu_ps(weights.as_ptr());
-    let weights_hi: __m256 = _mm256_loadu_ps(weights.as_ptr().add(8));
-    let x_lo: __m256 = _mm256_loadu_ps(x.as_ptr());
-    let x_hi: __m256 = _mm256_loadu_ps(x.as_ptr().add(8));
-    let products = _mm256_add_ps(
-        _mm256_mul_ps(weights_lo, x_lo),
-        _mm256_mul_ps(weights_hi, x_hi),
-    );
-    let low = _mm256_castps256_ps128(products);
-    let high = _mm256_extractf128_ps(products, 1);
-    let sum = _mm_add_ps(low, high);
-    let sum = _mm_hadd_ps(sum, sum);
-    let sum = _mm_hadd_ps(sum, sum);
-    _mm_cvtss_f32(sum)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[allow(unsafe_code, unsafe_op_in_unsafe_fn)]
-#[target_feature(enable = "avx2")]
-unsafe fn q4k_block_dot_avx2(block: &[u8], x: &[f32]) -> f32 {
-    debug_assert_eq!(block.len(), Q4K_BLOCK_BYTES);
-    debug_assert_eq!(x.len(), Q4K_BLOCK_SIZE);
-    let d = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
-    let dmin = f16::from_bits(u16::from_le_bytes([block[2], block[3]])).to_f32();
-    let scales = &block[4..4 + Q4K_SCALE_BYTES];
-    let qs = &block[4 + Q4K_SCALE_BYTES..];
-    let mut sum = 0.0;
-
-    for j in (0..Q4K_BLOCK_SIZE).step_by(64) {
-        let q = &qs[j / 2..j / 2 + 32];
-        let (scale_low, min_low) = q4k_scale_min(j / 32, scales);
-        let (scale_high, min_high) = q4k_scale_min(j / 32 + 1, scales);
-        for pair in 0..2 {
-            let q = &q[pair * 16..(pair + 1) * 16];
-            let x_low = &x[j + pair * 16..j + pair * 16 + 16];
-            let x_high = &x[j + 32 + pair * 16..j + 32 + pair * 16 + 16];
-            sum += q4k_segment_dot_avx2(q, x_low, false, d, scale_low, dmin, min_low);
-            sum += q4k_segment_dot_avx2(q, x_high, true, d, scale_high, dmin, min_high);
-        }
-    }
-    sum
-}
-
-/// Dot one f32 activation row directly against a packed Q4_K weight row.
-/// This keeps the original activation values and only vectorizes the
-/// dequantized f32 multiply-add; it does not requantize activations to Q8_K.
-#[allow(unsafe_code)]
-fn q4k_f32_dot_row(w: &QWeight<CpuBuf>, row: usize, n_in: usize, x: &[f32]) -> Result<f32> {
-    if !n_in.is_multiple_of(Q4K_BLOCK_SIZE) || x.len() != n_in {
-        return Err(Error::ShapeMismatch(format!(
-            "Q4K direct dot expects a {Q4K_BLOCK_SIZE}-wide row, got {n_in}"
-        )));
-    }
-    let row_bytes = Q4K_BLOCK_BYTES * (n_in / Q4K_BLOCK_SIZE);
-    let start = row
-        .checked_mul(row_bytes)
-        .ok_or_else(|| Error::ShapeMismatch("Q4K row offset overflow".into()))?;
-    let bytes =
-        w.buf.0.get(start..start + row_bytes).ok_or_else(|| {
-            Error::ShapeMismatch(format!("row {row} out of range for weight buffer"))
-        })?;
-
-    let (blocks, []) = bytes.as_chunks::<Q4K_BLOCK_BYTES>() else {
-        return Err(Error::ShapeMismatch("Q4K row has a partial block".into()));
-    };
-    let (x_blocks, []) = x.as_chunks::<Q4K_BLOCK_SIZE>() else {
-        return Err(Error::ShapeMismatch(
-            "Q4K activation has a partial block".into(),
-        ));
-    };
-    let mut sum = 0.0;
-    for (block, x_block) in blocks.iter().zip(x_blocks) {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if is_x86_feature_detected!("avx2") {
-                // SAFETY: the runtime check above enables every instruction
-                // used by q4k_block_dot_avx2, and both slices are exact blocks.
-                sum += unsafe { q4k_block_dot_avx2(block, x_block) };
-                continue;
-            }
-        }
-        sum += q4k_block_dot_scalar(block, x_block);
-    }
-    Ok(sum)
 }
 
 impl Matmul {
@@ -242,32 +84,23 @@ fn qmatmul_in(mode: Matmul, w: &QWeight<CpuBuf>, x_f32: &[f32], y_f32: &mut [f32
         n_tokens,
     } = shape::matmul(&w.shape, x_f32.len(), y_f32.len())?;
 
-    // Experimental opt-in: Q4_K dequantized in registers against the f32
-    // activations, which are not requantized.
-    if n_tokens == 1 && w.dtype == GgmlDType::Q4K && q4k_f32_dot_enabled() {
-        y_f32
-            .par_iter_mut()
-            .enumerate()
-            .try_for_each(|(row, out)| {
-                *out = q4k_f32_dot_row(w, row, n_in, x_f32)?;
-                Ok::<(), Error>(())
-            })?;
-        return Ok(());
-    }
-
     if mode == Matmul::Packed && packed::matmul(w, x_f32, y_f32, n_out, n_in) {
         return Ok(());
     }
 
-    // Decode is the common one-token case. Write each dequantized row
-    // directly to the output instead of allocating and transposing a
-    // [n_out, n_tokens] scratch buffer.
+    // Decode is the common one-token case. Write each row's dot directly to
+    // the output instead of allocating and transposing a [n_out, n_tokens]
+    // scratch buffer; types with a fused kernel never write the row out.
     if n_tokens == 1 {
         y_f32.par_iter_mut().enumerate().try_for_each_init(
             || vec![0f32; n_in],
             |row_f32, (row, out)| {
-                dequant_row_at(w, row, n_in, row_f32)?;
-                *out = row_dot(row_f32, x_f32);
+                *out = if let Some(dot) = fused::row_dot(w, row, n_in, x_f32) {
+                    dot
+                } else {
+                    dequant_row_at(w, row, n_in, row_f32)?;
+                    kernels().row_dot(row_f32, x_f32)
+                };
                 Ok::<(), Error>(())
             },
         )?;
@@ -285,7 +118,7 @@ fn qmatmul_in(mode: Matmul, w: &QWeight<CpuBuf>, x_f32: &[f32], y_f32: &mut [f32
             dequant_row_at(w, row, n_in, row_f32)?;
             for (t, y) in out.iter_mut().enumerate() {
                 let x_t = &x_f32[t * n_in..(t + 1) * n_in];
-                *y = row_dot(row_f32, x_t);
+                *y = kernels().row_dot(row_f32, x_t);
             }
             Ok::<(), Error>(())
         },
@@ -331,11 +164,68 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(a, b)| a * b).sum()
 }
 
+/// Lanes a row's products are summed in; fused kernels add to the same ones.
+const LANES: usize = 16;
+
+isa::multiversion! {
+    /// `row_dot` per level; every level gives the same bits.
+    fn row_dot_at(a: &[f32], b: &[f32]) -> f32 = row_dot;
+}
+
+/// The exact kernels at one level. One exists only for a level this CPU
+/// has, which is what makes calling through its pointers sound.
+struct Kernels {
+    level: isa::Level,
+    row_dot: unsafe fn(&[f32], &[f32]) -> f32,
+    q4k: unsafe fn(&[u8], &[f32]) -> f32,
+}
+
+impl Kernels {
+    fn at(level: isa::Level) -> Option<Self> {
+        Some(Self {
+            level,
+            row_dot: row_dot_at(level)?,
+            q4k: fused::q4k_at(level)?,
+        })
+    }
+
+    #[allow(unsafe_code)]
+    fn row_dot(&self, a: &[f32], b: &[f32]) -> f32 {
+        // SAFETY: `at` holds a variant only for a level `isa` detected.
+        unsafe { (self.row_dot)(a, b) }
+    }
+
+    #[allow(unsafe_code)]
+    fn q4k(&self, row: &[u8], x: &[f32]) -> f32 {
+        // SAFETY: `at` holds a variant only for a level `isa` detected.
+        unsafe { (self.q4k)(row, x) }
+    }
+}
+
+/// The kernels for this CPU's level, chosen by [`init`] at startup.
+fn kernels() -> &'static Kernels {
+    static KERNELS: OnceLock<Kernels> = OnceLock::new();
+    KERNELS.get_or_init(|| Kernels::at(isa().level).expect("the detected level runs on this CPU"))
+}
+
+/// Startup: detects the CPU's instruction sets, picks the kernels for them
+/// and fixes the matmul mode, once, before any work. A machine does not
+/// change under a running process; generation only follows the choice.
+pub fn init(matmul: Matmul) -> std::result::Result<&'static isa::Isa, String> {
+    choose_matmul(matmul)?;
+    debug_assert_eq!(kernels().level, isa().level);
+    Ok(isa())
+}
+
 /// A weight row against an activation: products summed in 16 fixed lanes,
 /// then the lanes and the tail in order. The order does not depend on the
-/// machine or the thread count, and the compiler can vectorize it.
+/// machine, the thread count or the vector width the compiler picks.
+#[expect(
+    clippy::inline_always,
+    reason = "each multiversioned variant compiles this body with its own instruction sets"
+)]
+#[inline(always)]
 fn row_dot(a: &[f32], b: &[f32]) -> f32 {
-    const LANES: usize = 16;
     let n = a.len().min(b.len());
     let (a, b) = (&a[..n], &b[..n]);
     let ((a_lanes, a_tail), (b_lanes, b_tail)) = (a.as_chunks::<LANES>(), b.as_chunks::<LANES>());

@@ -17,7 +17,10 @@ target/release/mdma info --json
   from OS-usable RAM and currently available RAM.
 - **CPU:** manufacturer, model, architecture, sockets, physical cores, logical
   threads, observed and nominal frequencies, reported min/max frequency, and caches.
-  Hybrid CPUs do not assume every core has the same number of threads.
+  Hybrid CPUs do not assume every core has the same number of threads. The
+  instruction sets mdma's kernels can use (`avx2`, `avx512vnni`, `dotprod`,
+  `i8mm`, …) are detected at run time with the kernel variant they select
+  (`instruction_sets`, `kernel_level`).
 - **GPU:** PCI display/3D devices (including headless devices) and macOS built-in GPUs. Chip and board
   manufacturers, driver, VRAM capacity/manufacturer and clocks are included where
   exposed by the installed driver.

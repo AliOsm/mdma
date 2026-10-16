@@ -37,11 +37,14 @@ token or a batch. The default `exact` path dequantizes rows to f32, which
 matches the pinned llama.cpp checkpoints; requantizing changes logits and can
 change greedy tokens within a few dozen steps.
 
-The direct f32 SIMD experiment keeps activations in f32 and dequantizes Q4_K
-blocks while computing each dot product. Set `MDMA_CPU_Q4K_F32_DOT=1` to
-select it. The exact, packed, and direct f32 modes can be run in fresh
-processes with the checked-in runner (the separate processes are required
-because the environment switches are read once):
+In `exact`, a one-token Q4_K matmul never writes a row out: each weight is
+dequantized in registers exactly as Candle does and added to the same 16
+lanes, in the same order, so the result is bit-identical to dequantizing the
+row, without storing and rereading a row of f32. The direct f32 SIMD
+experiment measured below started this; its AVX2-only, differently ordered sum
+is no longer a mode. Both
+modes can be run in fresh processes with the checked-in runner (the matmul is
+fixed once per process):
 
 ```sh
 RAYON_NUM_THREADS=24 MDMA_CPU_LIST=0-23 \
@@ -49,15 +52,14 @@ RAYON_NUM_THREADS=24 MDMA_CPU_LIST=0-23 \
 ```
 
 The runner records the revision, model SHA-256, CPU, thread pinning, compiler
-flags, workload, and one JSON result for each of `exact`, `packed`, and `f32`.
-The direct path's fixture-free parity gate allows at most `5e-4` absolute
-dot-product drift from Candle's f32 dequantization reference; the packed Q4_K
-fixture uses a separate `0.5` bound because activation requantization is
-approximate:
+flags, workload, and one JSON result for each of `exact` and `packed`
+(`MDMA_CPU_MATMUL=packed`). The fused kernel's gate requires the same bits as
+the dequantized row; the packed path uses a `0.5` fixture bound because
+activation requantization is approximate:
 
 ```sh
 cargo test --release --lib \
-  backend::cpu::tests::q4k_direct_and_packed_dot_match_dequant_reference_within_tolerance
+  backend::cpu::tests::q4k_fused_dot_is_the_exact_path_bit_for_bit_and_packed_stays_close
 ```
 
 Run one model/backend per fresh process, serially, without competing inference
@@ -113,8 +115,19 @@ tokens per second.
 | --- | ---: | ---: |
 | Sequential f32 dot (before) | 1.85 | 1.59 |
 | `exact`: 16-lane f32 dot | 2.99 | 2.56 |
+| `exact`: plus the fused Q4_K kernel | 6.12 | 5.40 |
 | Packed Q4_K only (first experiment) | 6.26 | 5.64 |
 | `packed`: every quantized type | 10.70 | 8.92 |
+
+The host is an AMD Ryzen 7 5800H (AVX2). The same `exact` path from a default
+build without `target-cpu=native`, as `cargo install` makes it:
+
+| Default build | Prefill | Decode |
+| --- | ---: | ---: |
+| Kernels compiled for SSE2 only | 4.54 | 3.98 |
+| `x86-64-v3` kernels picked at startup | 5.78 | 5.08 |
+
+Greedy output of all three builds was identical on every prompt tried.
 
 Greedy output of `exact` matched the sequential dot on every prompt tried, and
 the pinned Gemma 4 E2B and TinyLlama CPU checkpoints pass with it. `packed`
