@@ -30,6 +30,12 @@ and three timed trials after one complete untimed warmup.
 - These are library measurements, not streaming latency, P95, sampling,
   network latency, or a comparison with another inference engine.
 
+For an experimental packed Q4_K CPU path on an x86 build with native AVX2,
+set `MDMA_CPU_Q4K_VEC_DOT=1` on the benchmark command. It quantizes each
+activation vector to Q8_K and uses Candle's packed dot kernel; the exact f32
+dequantization path remains the default because the requantization can change
+logits.
+
 Run one model/backend per fresh process, serially, without competing inference
 or builds. Record model checksum, release revision, Rust/driver versions,
 hardware, power/thermal conditions, workload, and per-trial durations alongside
